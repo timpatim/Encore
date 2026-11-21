@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# personal files written by Encore next to the program (settings, Hugging Face token, queue)
+config.json
+defaults.json
+queue.json
+
+# test and screenshot outputs
+tests/e2e/out/
+tests/screenshots/out/

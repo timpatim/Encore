@@ -1,0 +1,7 @@
+# line endings: shell scripts keep LF (Linux), batch files CRLF (Windows)
+*.sh  text eol=lf
+*.bat text eol=crlf
+# binary files
+*.png binary
+*.mp4 binary
+*.wav binary

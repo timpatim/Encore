@@ -1,0 +1,130 @@
+{
+  "version": 3,
+  "project": "rue_test_v1",
+  "mode": "free",
+  "notes": "Free-mode test: POV of a father picking his daughter up from school. Tests voices on a 3-continuation chain and a new scene after a hard cut.",
+  "refs": {
+    "homme": "Voice only: the father holding the camera (never seen).",
+    "fillette": "Image and voice: the ten-year-old girl.",
+    "rue": "Image only: the street."
+  },
+  "context_frames": 39,
+  "crossfade_frames": 0,
+  "clips": [
+    {
+      "name": "sortie_ecole",
+      "frames": 209,
+      "continue": false,
+      "refs": [
+        "fillette",
+        "homme",
+        "rue"
+      ],
+      "dialogue": [
+        {
+          "speaker": "fillette",
+          "text": "Papa ! Papa ! Regarde, j'ai eu une étoile à la dictée !",
+          "language": "French"
+        },
+        {
+          "speaker": "homme",
+          "text": "Une étoile ? Fais voir ça, championne.",
+          "language": "French"
+        }
+      ],
+      "prompt": "subject_definitions:\n<Subject 1> is the ten-year-old girl whose face, hair, build and clothing come from {picture:fillette}.\n<Subject 1> speaks with the voice from {voice:fillette}.\n<Subject 2> is the man who holds the camera; he is never seen, except at most his hands and the sleeves of a dark wool coat entering the bottom of the frame.\n<Subject 2> speaks with the voice from {voice:homme}.\nThe street, its pavement, shop fronts and light come from {picture:rue}.\n\nsummary:\n[reference generation] Point-of-view shot in the street: the girl runs up to the camera after school, waving a sheet of paper, and proudly announces her good mark.\n\nretention_analysis:\n<Subject 1> (appears throughout [Shot 1]): fully_preserved - retain the referenced face, hair, build and clothing while pose, expression and movement follow the scene.\nThe street (throughout [Shot 1]): fully_preserved - same buildings, pavement and light as the reference.\n\ndetailed_description:\nThe target video is a cinematic live-action scene shot as a first-person point of view: the camera is the eyes of a man standing at adult height, slight natural handheld sway, natural daylight, realistic skin texture, shallow depth of field, no on-screen text.\n[Shot 1] The camera stands still on the pavement, looking along the street. <Subject 1> runs towards the camera from the middle distance, a school bag bouncing on her back, waving a sheet of paper above her head. She stops right in front of the camera, out of breath, and looks up into the lens with a huge smile. <Subject 1> (S1), excited and breathless, says: <d>[French] Papa ! Papa ! Regarde, j'ai eu une étoile à la dictée !</d> She holds the sheet up towards the camera. After a short beat, <Subject 2> (S2), off-screen, amused and warm, says: <d>[French] Une étoile ? Fais voir ça, championne.</d> The camera tilts down slightly towards the paper. End with a quiet half second: the girl still holding the sheet up, smiling, mouth closed.\n\noverall_soundscape:\nQuiet city street after school: distant traffic, a few children's voices far away, footsteps on the pavement, light wind. The two voices are close and clear, the man's voice slightly closer to the microphone since he holds the camera.\n\nnon_diegetic_music:\nNone."
+    },
+    {
+      "name": "la_dictee",
+      "frames": 209,
+      "continue": true,
+      "refs": [
+        "fillette",
+        "homme",
+        "rue"
+      ],
+      "dialogue": [
+        {
+          "speaker": "homme",
+          "text": "Zéro faute... Tu as triché ou quoi ?",
+          "language": "French"
+        },
+        {
+          "speaker": "fillette",
+          "text": "Mais non ! J'ai juste beaucoup révisé avec mamie.",
+          "language": "French"
+        }
+      ],
+      "prompt": "subject_definitions:\n<Subject 1> is the ten-year-old girl whose face, hair, build and clothing come from {picture:fillette}.\n<Subject 1> speaks with the voice from {voice:fillette}.\n<Subject 2> is the man who holds the camera; he is never seen, except at most his hands and the sleeves of a dark wool coat entering the bottom of the frame.\n<Subject 2> speaks with the voice from {voice:homme}.\nThe street, its pavement, shop fronts and light come from {picture:rue}.\n\nsummary:\n[reference generation] Same unbroken point-of-view shot: the man takes the dictation sheet, reads it and teases the girl, who protests, laughing.\n\nretention_analysis:\n<Subject 1> (appears throughout [Shot 1]): fully_preserved - retain the referenced face, hair, build and clothing while pose, expression and movement follow the scene.\nThe street (throughout [Shot 1]): fully_preserved - same buildings, pavement and light as the reference.\n\ndetailed_description:\nThe target video is a cinematic live-action scene shot as a first-person point of view: the camera is the eyes of a man standing at adult height, slight natural handheld sway, natural daylight, realistic skin texture, shallow depth of field, no on-screen text.\n[Shot 1] The incoming camera trajectory, the girl's motion, facial state, the light and the protected sound continue uninterrupted from the protected video and audio context; nothing in that context is repeated. A man's hand in a dark wool coat sleeve enters the bottom of the frame and takes the sheet; the camera looks down at the handwritten dictation with a gold star sticker in the corner, then lifts back to the girl. <Subject 2> (S2), off-screen, pretending to be suspicious, says: <d>[French] Zéro faute... Tu as triché ou quoi ?</d> <Subject 1> puts her hands on her hips, outraged, then bursts out laughing. <Subject 1> (S1), laughing, says: <d>[French] Mais non ! J'ai juste beaucoup révisé avec mamie.</d> End with a quiet half second: she smiles up at the camera, mouth closed.\n\noverall_soundscape:\nQuiet city street after school: distant traffic, a few children's voices far away, footsteps on the pavement, light wind. The two voices are close and clear, the man's voice slightly closer to the microphone since he holds the camera.\n\nnon_diegetic_music:\nNone."
+    },
+    {
+      "name": "le_plan",
+      "frames": 209,
+      "continue": true,
+      "refs": [
+        "fillette",
+        "homme",
+        "rue"
+      ],
+      "dialogue": [
+        {
+          "speaker": "fillette",
+          "text": "Dis, une étoile, ça mérite un pain au chocolat, non ?",
+          "language": "French"
+        },
+        {
+          "speaker": "homme",
+          "text": "Ah, je vois... C'était donc ça, le plan.",
+          "language": "French"
+        }
+      ],
+      "prompt": "subject_definitions:\n<Subject 1> is the ten-year-old girl whose face, hair, build and clothing come from {picture:fillette}.\n<Subject 1> speaks with the voice from {voice:fillette}.\n<Subject 2> is the man who holds the camera; he is never seen, except at most his hands and the sleeves of a dark wool coat entering the bottom of the frame.\n<Subject 2> speaks with the voice from {voice:homme}.\nThe street, its pavement, shop fronts and light come from {picture:rue}.\n\nsummary:\n[reference generation] Same unbroken point-of-view shot: they start walking side by side along the street and the girl slyly asks for a treat.\n\nretention_analysis:\n<Subject 1> (appears throughout [Shot 1]): fully_preserved - retain the referenced face, hair, build and clothing while pose, expression and movement follow the scene.\nThe street (throughout [Shot 1]): fully_preserved - same buildings, pavement and light as the reference.\n\ndetailed_description:\nThe target video is a cinematic live-action scene shot as a first-person point of view: the camera is the eyes of a man standing at adult height, slight natural handheld sway, natural daylight, realistic skin texture, shallow depth of field, no on-screen text.\n[Shot 1] The incoming camera trajectory, the girl's motion, facial state, the light and the protected sound continue uninterrupted from the protected video and audio context; nothing in that context is repeated. The camera starts walking slowly along the pavement; <Subject 1> walks beside it on the right, the sheet now folded in her hand, looking up sideways at the camera with a sly smile. <Subject 1> (S1), innocently, says: <d>[French] Dis, une étoile, ça mérite un pain au chocolat, non ?</d> The camera turns slightly towards her. <Subject 2> (S2), off-screen, with a knowing laugh, says: <d>[French] Ah, je vois... C'était donc ça, le plan.</d> End with a quiet half second of walking, both silent.\n\noverall_soundscape:\nQuiet city street after school: distant traffic, a few children's voices far away, footsteps on the pavement, light wind. The two voices are close and clear, the man's voice slightly closer to the microphone since he holds the camera.\n\nnon_diegetic_music:\nNone."
+    },
+    {
+      "name": "s_il_te_plait",
+      "frames": 175,
+      "continue": true,
+      "refs": [
+        "fillette",
+        "homme",
+        "rue"
+      ],
+      "dialogue": [
+        {
+          "speaker": "fillette",
+          "text": "S'il te plaît, s'il te plaît, s'il te plaît !",
+          "language": "French"
+        },
+        {
+          "speaker": "homme",
+          "text": "Bon, d'accord. Mais un seul !",
+          "language": "French"
+        }
+      ],
+      "prompt": "subject_definitions:\n<Subject 1> is the ten-year-old girl whose face, hair, build and clothing come from {picture:fillette}.\n<Subject 1> speaks with the voice from {voice:fillette}.\n<Subject 2> is the man who holds the camera; he is never seen, except at most his hands and the sleeves of a dark wool coat entering the bottom of the frame.\n<Subject 2> speaks with the voice from {voice:homme}.\nThe street, its pavement, shop fronts and light come from {picture:rue}.\n\nsummary:\n[reference generation] Same unbroken point-of-view shot: the girl jumps in front of the camera and begs; the man gives in.\n\nretention_analysis:\n<Subject 1> (appears throughout [Shot 1]): fully_preserved - retain the referenced face, hair, build and clothing while pose, expression and movement follow the scene.\nThe street (throughout [Shot 1]): fully_preserved - same buildings, pavement and light as the reference.\n\ndetailed_description:\nThe target video is a cinematic live-action scene shot as a first-person point of view: the camera is the eyes of a man standing at adult height, slight natural handheld sway, natural daylight, realistic skin texture, shallow depth of field, no on-screen text.\n[Shot 1] The incoming camera trajectory, the girl's motion, facial state, the light and the protected sound continue uninterrupted from the protected video and audio context; nothing in that context is repeated. <Subject 1> skips ahead, turns round to face the camera, walking backwards, and clasps her hands together under her chin, pleading with big eyes. <Subject 1> (S1), pleading in a sing-song voice, says: <d>[French] S'il te plaît, s'il te plaît, s'il te plaît !</d> The camera stops. <Subject 2> (S2), off-screen, giving in with a sigh and a smile, says: <d>[French] Bon, d'accord. Mais un seul !</d> <Subject 1> raises both fists in victory, silently. End with her spinning round to run ahead.\n\noverall_soundscape:\nQuiet city street after school: distant traffic, a few children's voices far away, footsteps on the pavement, light wind. The two voices are close and clear, the man's voice slightly closer to the microphone since he holds the camera.\n\nnon_diegetic_music:\nNone."
+    },
+    {
+      "name": "la_vitrine",
+      "frames": 175,
+      "continue": false,
+      "refs": [
+        "fillette",
+        "homme",
+        "rue"
+      ],
+      "dialogue": [
+        {
+          "speaker": "fillette",
+          "text": "Celui-là ! Le plus gros, là, avec plein de chocolat !",
+          "language": "French"
+        },
+        {
+          "speaker": "homme",
+          "text": "Un seul, j'ai dit !",
+          "language": "French"
+        }
+      ],
+      "prompt": "subject_definitions:\n<Subject 1> is the ten-year-old girl whose face, hair, build and clothing come from {picture:fillette}.\n<Subject 1> speaks with the voice from {voice:fillette}.\n<Subject 2> is the man who holds the camera; he is never seen, except at most his hands and the sleeves of a dark wool coat entering the bottom of the frame.\n<Subject 2> speaks with the voice from {voice:homme}.\nThe street, its pavement, shop fronts and light come from {picture:rue}.\n\nsummary:\n[reference generation] A little later, further along the same street: point-of-view shot of the girl at a bakery window, choosing the biggest pastry.\n\nretention_analysis:\n<Subject 1> (appears throughout [Shot 1]): fully_preserved - retain the referenced face, hair, build and clothing while pose, expression and movement follow the scene.\nThe street (throughout [Shot 1]): fully_preserved - same buildings, pavement and light as the reference.\n\ndetailed_description:\nThe target video is a cinematic live-action scene shot as a first-person point of view: the camera is the eyes of a man standing at adult height, slight natural handheld sway, natural daylight, realistic skin texture, shallow depth of field, no on-screen text.\n[Shot 1] Hidden lead-in for the first 1.6 seconds: the camera already faces a bakery shop window further along the same street, <Subject 1> standing at the glass with her back half turned, silent. Then <Subject 1> presses both hands and her nose against the window full of pastries, turns her head to look up at the camera and points at a large chocolate pastry. <Subject 1> (S1), delighted, says: <d>[French] Celui-là ! Le plus gros, là, avec plein de chocolat !</d> <Subject 2> (S2), off-screen, laughing, says: <d>[French] Un seul, j'ai dit !</d> She grins with a chocolate-hungry look. End on her grin, mouth closed, the shop sign reflected in the glass.\n\noverall_soundscape:\nQuiet city street after school: distant traffic, a few children's voices far away, footsteps on the pavement, light wind. The two voices are close and clear, the man's voice slightly closer to the microphone since he holds the camera.\n\nnon_diegetic_music:\nNone."
+    }
+  ]
+}

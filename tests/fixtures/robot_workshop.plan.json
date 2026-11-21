@@ -1,0 +1,48 @@
+{
+ "version": 3,
+ "project": "robot_workshop",
+ "mode": "free",
+ "notes": "Example plan in free mode: H3 generates picture and sound. Two images (robot, workshop) in examples/; a voice sample named 'robot' is optional.",
+ "refs": {
+  "robot": "Image: the small orange robot (examples/robot.png). Voice: optional sample of the robot's voice; without one, H3 picks a voice.",
+  "workshop": "Image: the workshop (examples/workshop.png)."
+ },
+ "context_frames": 39,
+ "crossfade_frames": 0,
+ "clips": [
+  {
+   "name": "fixing_lamp",
+   "frames": 158,
+   "continue": false,
+   "refs": [
+    "robot",
+    "workshop"
+   ],
+   "dialogue": [
+    {
+     "speaker": "robot",
+     "text": "Oh, hello! You're just in time.",
+     "language": "English"
+    }
+   ],
+   "prompt": "subject_definitions:\n<Subject 1> is the small friendly robot whose orange body, dark visor face with two round glowing blue eyes and a thin blue light for a mouth, yellow-bulb antenna, blue ear bolts and chest panel with three coloured buttons come from {picture:robot}.\n<Subject 1> speaks with the voice from {voice:robot}.\nThe workshop, its workbench, pegboard of tools, window and wooden crates come from {picture:workshop}.\n\nsummary:\n[reference generation] In a cosy workshop, the little robot is repairing a desk lamp at the workbench; it notices the camera and greets it.\n\nretention_analysis:\n<Subject 1> (appears throughout [Shot 1]): fully_preserved - retain the referenced shape, colours, visor face, antenna and chest panel while pose and movement follow the scene.\nThe workshop (throughout [Shot 1]): fully_preserved - same workbench, tools, window light and crates as the reference.\n\ndetailed_description:\nThe target video is a colourful stylized 3D animated short in the style of a family animated film, with soft toy-like materials, clean shapes and colours matching the references, gentle physically grounded camera movement, no on-screen text.\n[Shot 1] Medium shot in the workshop, warm daylight from the window. <Subject 1> stands at the workbench with its back half turned, tightening a screw on a small desk lamp with a screwdriver. It pauses, turns its head toward the camera, its eyes light up and it waves the screwdriver. <Subject 1> (S1), cheerful and a little surprised, says: <d>[English] Oh, hello! You're just in time.</d> Its mouth light flickers with each word. End with the robot turning back to the lamp, reaching for its switch, the movement still in progress.\n\noverall_soundscape:\nQuiet workshop room tone, the squeak of the screwdriver, a soft whirr of the robot's motors, birds faintly outside the window.\n\nnon_diegetic_music:\nNone."
+  },
+  {
+   "name": "lamp_works",
+   "frames": 158,
+   "continue": true,
+   "refs": [
+    "robot",
+    "workshop"
+   ],
+   "dialogue": [
+    {
+     "speaker": "robot",
+     "text": "Look, it works! Want to build something together?",
+     "language": "English"
+    }
+   ],
+   "prompt": "subject_definitions:\n<Subject 1> is the small friendly robot whose orange body, dark visor face with two round glowing blue eyes and a thin blue light for a mouth, yellow-bulb antenna, blue ear bolts and chest panel with three coloured buttons come from {picture:robot}.\n<Subject 1> speaks with the voice from {voice:robot}.\nThe workshop, its workbench, pegboard of tools, window and wooden crates come from {picture:workshop}.\n\nsummary:\n[reference generation] Same unbroken shot: the robot switches the repaired lamp on, it glows, and the robot invites the viewer to build something together.\n\nretention_analysis:\n<Subject 1> (appears throughout [Shot 1]): fully_preserved - retain the referenced shape, colours, visor face, antenna and chest panel while pose and movement follow the scene.\nThe workshop (throughout [Shot 1]): fully_preserved - same workbench, tools, window light and crates as the reference.\n\ndetailed_description:\nThe target video is a colourful stylized 3D animated short in the style of a family animated film, with soft toy-like materials, clean shapes and colours matching the references, gentle physically grounded camera movement, no on-screen text.\n[Shot 1] The incoming performer motion, camera trajectory, body momentum, facial state, lighting, environment and object state continue uninterrupted from the protected video context. The sound of the workshop also continues from the protected context. <Subject 1> presses the lamp's switch with a click; the lamp lights up with a warm yellow glow. The robot claps its hands once, turns back to the camera and spreads its arms. <Subject 1> (S1), delighted, says: <d>[English] Look, it works! Want to build something together?</d> It tilts its head, waiting for an answer. End with a quiet half second, mouth light still.\n\noverall_soundscape:\nThe click of the switch, a faint electric hum from the lamp, the robot's soft motor whirr, quiet room tone.\n\nnon_diegetic_music:\nNone."
+  }
+ ]
+}

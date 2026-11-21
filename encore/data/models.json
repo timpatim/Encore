@@ -1,0 +1,59 @@
+{
+  "_comment": "Default model files Encore can download. 'setting': the setting whose default value is this file. 'folder': sub-folder of ComfyUI/models. The path inside the repository is looked up through the Hugging Face API.",
+  "models": [
+    {
+      "id": "unet",
+      "setting": "unet_name",
+      "label": "MiniMax H3 diffusion model (ref2va, pruned int8)",
+      "file": "minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+      "repo": "Comfy-Org/MiniMax-H3",
+      "folder": "diffusion_models",
+      "required": true
+    },
+    {
+      "id": "clip",
+      "setting": "clip_name",
+      "label": "Qwen3-VL 32B text encoder (int8)",
+      "file": "qwen3vl_32b_minimax_h3_int8_convrot.safetensors",
+      "repo": "Comfy-Org/MiniMax-H3",
+      "folder": "text_encoders",
+      "required": true
+    },
+    {
+      "id": "video_vae",
+      "setting": "video_vae",
+      "label": "Video VAE (int8)",
+      "file": "minimax_h3_video_vae_int8_convrot.safetensors",
+      "repo": "Comfy-Org/MiniMax-H3",
+      "folder": "vae",
+      "required": true
+    },
+    {
+      "id": "audio_vae",
+      "setting": "audio_vae",
+      "label": "Audio VAE (fp32)",
+      "file": "minimax_h3_audio_vae_fp32.safetensors",
+      "repo": "Comfy-Org/MiniMax-H3",
+      "folder": "vae",
+      "required": true
+    },
+    {
+      "id": "turbo_lora",
+      "setting": "lora",
+      "label": "8-step turbo LoRA",
+      "file": "minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors",
+      "repo": "Comfy-Org/MiniMax-H3",
+      "folder": "loras",
+      "required": false
+    },
+    {
+      "id": "lbh3d",
+      "setting": "upscale_model",
+      "label": "LBH 3D latent upscale model (fp16)",
+      "file": "minimax_h3_latent_upscaler_3d_conv_v1_fp16.safetensors",
+      "repo": "LBH-123-AI/Minimax_h3_latent_Upscaler",
+      "folder": "latent_upscale_models",
+      "required": false
+    }
+  ]
+}

@@ -1,0 +1,72 @@
+{
+  "_comment": "Custom nodes Encore needs in ComfyUI. 'nodes': classes that must be loaded once ComfyUI is restarted. Add an entry to propose another pack.",
+  "core_nodes": [
+    "MiniMaxH3ReferenceToVideo",
+    "MiniMaxH3SigmaShift",
+    "MiniMaxH3AudioVAECompatibility"
+  ],
+  "packs": [
+    {
+      "id": "h3clipplan",
+      "name": "ComfyUI-H3-ClipPlan",
+      "url": "https://github.com/timpatim/ComfyUI-H3-ClipPlan.git",
+      "folder": "ComfyUI-H3-ClipPlan",
+      "required": true,
+      "nodes": [
+        "H3PlanClip",
+        "H3PlanSaveLatent",
+        "H3PlanAssemble",
+        "H3PlanReference",
+        "H3PlanVoice"
+      ],
+      "why": "plans, takes and assembly: the nodes Encore drives"
+    },
+    {
+      "id": "multiref",
+      "name": "ComfyUI-H3-Motion-Context-MultiRef",
+      "url": "https://github.com/seitanism/ComfyUI-H3-Motion-Context-MultiRef.git",
+      "folder": "ComfyUI-H3-Motion-Context-MultiRef",
+      "required": true,
+      "nodes": [
+        "MiniMaxH3SongMaskedAVContext",
+        "MiniMaxH3GeneratedAVMaskedContext",
+        "MiniMaxH3StreamLiveMusicVideoToVHS"
+      ],
+      "why": "seams between clips, injected song, final assembly"
+    },
+    {
+      "id": "vhs",
+      "name": "ComfyUI-VideoHelperSuite",
+      "url": "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git",
+      "folder": "ComfyUI-VideoHelperSuite",
+      "required": true,
+      "nodes": [
+        "VHS_VideoCombine"
+      ],
+      "why": "writing the videos"
+    },
+    {
+      "id": "kjnodes",
+      "name": "ComfyUI-KJNodes",
+      "url": "https://github.com/kijai/ComfyUI-KJNodes.git",
+      "folder": "ComfyUI-KJNodes",
+      "required": false,
+      "nodes": [
+        "ModelPreviewOverrideKJ"
+      ],
+      "why": "animated preview (with sound) during generation"
+    },
+    {
+      "id": "lbh",
+      "name": "Comfyui_Minimax_h3_latent_Upscaler",
+      "url": "https://github.com/LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler.git",
+      "folder": "Comfyui_Minimax_h3_latent_Upscaler",
+      "required": false,
+      "nodes": [
+        "MinimaxH3LatentUpscaler3D",
+        "MinimaxH3LatentUpscalerNode2D"
+      ],
+      "why": "latent upscale (LBH 3D and 2D nodes)"
+    }
+  ]
+}

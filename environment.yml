@@ -1,0 +1,7 @@
+# Encore - conda environment (alternative to install.bat):
+#   conda env create -f environment.yml
+#   conda activate encore
+#   Encore.bat
+name: encore
+dependencies:
+  - python>=3.10
