@@ -12,7 +12,47 @@
 <p align="center">
   <a href="LICENSE"><img alt="Licence : GPL v3" src="https://img.shields.io/badge/licence-GPL--3.0-blue"></a>
   <img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-blue">
-  <img alt="Windows **Éditeur de plan : les clips sur la chanson, prompts par section, références et contrôles**
+  <img alt="Windows, Linux" src="https://img.shields.io/badge/plateforme-Windows%20%7C%20Linux-lightgrey">
+  <a href="README.md"><img alt="English" src="https://img.shields.io/badge/read%20in-English-informational"></a>
+</p>
+
+> **Avertissement : ce projet est entièrement « vibe-codé ».** Tout son code, sa documentation et
+> ses tests ont été écrits par un assistant IA (Claude, d'Anthropic), à la demande de l'auteur.
+> L'auteur a défini les fonctionnalités et testé le résultat à l'usage, mais n'a ni écrit ni relu
+> le code. Lisez-le, testez-le sur votre propre installation et utilisez-le à vos risques ; les
+> signalements et corrections sont les bienvenus.
+
+![Onglet Prises : branches, prises et vidéo assemblée](docs/screenshots/takes.png)
+
+## Ce que fait Encore
+
+[MiniMax H3](https://huggingface.co/Comfy-Org/MiniMax-H3) produit des clips d'une dizaine de
+secondes, image et son, à partir d'images de référence. Un clip musical ou un court métrage est
+une suite de tels clips qui s'enchaînent. Le plugin ComfyUI
+[ComfyUI-H3-ClipPlan](https://github.com/timpatim/ComfyUI-H3-ClipPlan) décrit cette suite dans un
+**plan** (un fichier JSON : un prompt par clip, quel clip continue lequel, les références, la
+chanson). Encore est l'application autour :
+
+- **Éditeur de plan** : les clips sur une frise au-dessus de la chanson, prompts édités par
+  section, références et sujets en pastilles, contrôles du plan et de chaque clip.
+- **Prises en arbre** : chaque génération est une prise ; une suite est construite sur la prise
+  exacte qu'elle continue. Essayez plusieurs prises, gardez la meilleure chaîne, revenez à une
+  plus ancienne.
+- **Branches** : le même plan avec d'autres images, une autre taille, d'autres LoRA ou réglages
+  d'upscale, côte à côte, sans mélanger leurs prises.
+- **File de générations** : un travail à la fois dans ComfyUI, survit à un redémarrage de ComfyUI
+  ou d'Encore, réordonnable, en pause et reprise ; **▶▶ compléter** remplit toute une branche.
+- **Upscale latent** (optionnel) : générer petit, puis agrandir dans une seconde passe.
+- **Assemblage** : un clic met bout à bout les prises choisies sur la chanson en une vidéo.
+- **Points de sauvegarde**, **fenêtres de plan** qui disent exactement comment une prise a été
+  faite, un écran d'installation qui installe les packs de nœuds et télécharge les modèles,
+  anglais et français, thèmes sombre et clair.
+
+ComfyUI ne sert que de moteur : Encore lui parle à son adresse et ne modifie jamais ses workflows.
+
+## Captures d'écran
+
+**Éditeur de plan : les clips sur la chanson, prompts par section, références et contrôles**
 
 ![Éditeur de plan](docs/screenshots/plan_editor.png)
 

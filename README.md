@@ -12,7 +12,45 @@
 <p align="center">
   <a href="LICENSE"><img alt="License: GPL v3" src="https://img.shields.io/badge/license-GPL--3.0-blue"></a>
   <img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-blue">
-  <img alt="Windows **Plan editor: clips over the song, prompts by section, references and checks**
+  <img alt="Windows, Linux" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey">
+  <a href="README.fr.md"><img alt="Français" src="https://img.shields.io/badge/lire%20en-fran%C3%A7ais-informational"></a>
+</p>
+
+> **Disclaimer: this project is entirely vibe-coded.** All of its code, documentation and tests were
+> written by an AI assistant (Claude, by Anthropic), following the author's requests. The author
+> specified the features and tested the result in use, but neither wrote nor reviewed any of the
+> code. Read it, test it on your own setup and use it at your own risk; issues and corrections are
+> welcome.
+
+![Takes tab: branches, takes and the assembled video](docs/screenshots/takes.png)
+
+## What Encore does
+
+[MiniMax H3](https://huggingface.co/Comfy-Org/MiniMax-H3) makes clips of about ten seconds, with
+picture and sound, from reference images. A music video or a short is a series of such clips that
+follow one another. The ComfyUI plugin [ComfyUI-H3-ClipPlan](https://github.com/timpatim/ComfyUI-H3-ClipPlan)
+describes that series in a **plan** (a JSON file: one prompt per clip, which clip continues which,
+the references, the song). Encore is the application around it:
+
+- **Plan editor**: clips on a timeline over the song, prompts edited by section, references and
+  subjects as chips, checks of the plan and of each clip.
+- **Takes as a tree**: every generation is a take; a continuation is built on the exact take it
+  follows. Try several takes, keep the best chain, go back to an earlier one.
+- **Branches**: the same plan with other pictures, another size, other LoRA or upscale settings,
+  side by side, without mixing their takes.
+- **Generation queue**: runs one job at a time in ComfyUI, survives a restart of ComfyUI or of
+  Encore, can be reordered, paused and resumed; **▶▶ complete** fills a whole branch.
+- **Latent upscale** (optional): generate small, then upscale in a second pass.
+- **Assembly**: one click puts the chosen takes end to end on the song into a video.
+- **Checkpoints**, **plan windows** that say exactly how a take was made, an installation
+  screen that installs the node packs and downloads the models, English and French, dark and
+  light themes.
+
+ComfyUI is only the engine: Encore talks to it at its address and never changes its workflows.
+
+## Screenshots
+
+**Plan editor: clips over the song, prompts by section, references and checks**
 
 ![Plan editor](docs/screenshots/plan_editor.png)
 
