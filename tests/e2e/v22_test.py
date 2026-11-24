@@ -1,5 +1,5 @@
 import asyncio, json, os, shutil, subprocess, sys, time
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from common import ENCORE, CHROME, fixture, restart_mock  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from common import ENCORE, CHROME, fixture, restart_mock, plan_screen, takes_screen  # noqa: E402
 from playwright.async_api import async_playwright
 S = "http://127.0.0.1:8235"; M = "http://127.0.0.1:8771"
 root = "/tmp/h3s_v22"; shutil.rmtree(root, ignore_errors=True); os.makedirs(root)
@@ -18,15 +18,16 @@ async def main():
         page.on("pageerror", lambda e: errs.append(str(e)))
         await page.goto(S + "/"); await page.evaluate("localStorage.setItem('h3studio.project','robot')"); await page.reload(); await page.wait_for_timeout(1500)
         print("theme", await page.evaluate("document.documentElement.dataset.theme"))
+        await plan_screen(page)
         await page.locator(".clipitem").nth(1).click(); await page.wait_for_timeout(400)
         await page.screenshot(path="v22_plan.png")
         ta = page.locator(".sx-box").nth(1).locator("textarea"); await ta.click(); await page.keyboard.press("End"); await page.keyboard.type(" @"); await page.wait_for_timeout(200)
         await page.screenshot(path="v22_ac.png"); await page.keyboard.press("Escape")
         await page.goto(S + "/"); await page.evaluate("localStorage.setItem('h3studio.project','rue')"); await page.reload(); await page.wait_for_timeout(1500)
-        await page.click("#viewTabs >> text=Takes"); await page.wait_for_timeout(2500)
+        await takes_screen(page); await page.wait_for_timeout(2500)
         await page.screenshot(path="v22_takes.png")
         await page.click("#studioQueueBtn"); await page.wait_for_timeout(800); await page.screenshot(path="v22_queue.png"); await close(page)
-        await page.click("button:has-text('upscale…')"); await page.wait_for_timeout(800); await page.screenshot(path="v22_upscale.png"); await close(page)
+        await page.evaluate("H3Studio.kit.openUpscale('b1')"); await page.wait_for_timeout(800); await page.screenshot(path="v22_upscale.png"); await close(page)
         await page.click("#studioThemeBtn"); await page.wait_for_timeout(400)
         print("after toggle", await page.evaluate("document.documentElement.dataset.theme"), json.load(open(cfg)).get("theme"))
         await page.screenshot(path="v22_takes_dark.png")

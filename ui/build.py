@@ -20,7 +20,8 @@ from encore import theme  # noqa: E402
 SCRIPTS = [
     ("/*__I18N__*/", "plan_i18n.js"), ("/*__PLAN_CORE__*/", "plan_core.js"), ("/*__DIALOG__*/", "plan_dialog.js"),
     ("/*__PICK__*/", "plan_pick.js"), ("/*__SECTIONS__*/", "plan_sections.js"), ("/*__PLAN_UI__*/", "plan_ui.js"),
-    ("/*__TAKES_UI__*/", "plan_takes_ui.js"), ("/*__STUDIO__*/", "plan_studio.js"),
+    ("/*__TAKES_UI__*/", "plan_takes_ui.js"), ("/*__LAUNCH__*/", "plan_launch.js"), ("/*__STUDIO__*/", "plan_studio.js"),
+    ("/*__BRANCH__*/", "plan_branch.js"), ("/*__TRASH__*/", "plan_trash.js"),
 ]
 
 

@@ -1,5 +1,5 @@
 import asyncio, json, os, shutil, subprocess, sys, time, urllib.request, re
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from common import ENCORE, CHROME, fixture, restart_mock  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from common import ENCORE, CHROME, fixture, restart_mock, plan_screen, takes_screen  # noqa: E402
 from playwright.async_api import async_playwright
 S = "http://127.0.0.1:8232"; M = "http://127.0.0.1:8771"
 def call(base, path, body=None, method=None, raw=None):
@@ -25,14 +25,16 @@ async def main():
         page.on("pageerror", lambda e: errs.append(str(e)))
         await page.goto(S + "/"); await page.evaluate("localStorage.setItem('h3studio.project','rue')"); await page.reload(); await page.wait_for_timeout(1500)
         print("lang", await page.evaluate("H3I18n.lang()"))
+        await plan_screen(page)
         await page.locator(".clipitem").nth(1).click(); await page.wait_for_timeout(300)
         await scan(page, "plan en"); await page.screenshot(path="v21_plan_en.png")
-        await page.click("#viewTabs >> text=Takes"); await page.wait_for_timeout(2500)
+        await takes_screen(page); await page.wait_for_timeout(2500)
         await scan(page, "takes en"); await page.screenshot(path="v21_takes_en.png")
         await page.click("text=Default settings…"); await page.wait_for_timeout(800)
         await scan(page, "defaults en"); await page.screenshot(path="v21_defaults_en.png")
         await page.locator(".tk-modal select").first.select_option("fr"); await page.wait_for_timeout(2500)
         print("lang after", await page.evaluate("H3I18n.lang()"), call(S, "/api/config")["language"])
+        await plan_screen(page)
         await page.locator(".clipitem").nth(1).click(); await page.wait_for_timeout(300)
         await page.screenshot(path="v21_plan_fr.png")
         print("fr sample", (await page.evaluate("document.body.innerText"))[:300].replace("\n", " | "))

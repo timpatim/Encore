@@ -4,13 +4,13 @@ A project is a folder of the projects root:
 
     <root>/<name>/
         project.json     studio settings: models, sampling, picture size, which file is which reference
-        plan.json        the H3 Clip Plan
+        plans.json       the master plan of each branch and the suite of each take (encore/plans.py)
+        selection.json   the selected twig
         refs/images/     imported reference images
         refs/voices/     imported voice samples
         refs/songs/      imported songs
         refs/videos/     imported videos (a plan can start from a segment of one)
         takes/           generated takes (step 2)
-        checkpoints/     saved states (step 3)
         store/           files kept once, by content hash (step 3)
         exports/         final videos (step 4)
 """
@@ -21,14 +21,13 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import time
 import uuid
 from pathlib import Path
 
 from . import plan_core, takes
 
-STUDIO_VERSION = "0.40"
+STUDIO_VERSION = "0.45.1"
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 RESOURCE_KINDS = {
     "images": (".png", ".jpg", ".jpeg", ".webp", ".bmp"),
@@ -36,7 +35,7 @@ RESOURCE_KINDS = {
     "songs": (".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".opus"),
     "videos": (".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"),
 }
-SUBDIRS = ("refs/images", "refs/voices", "refs/songs", "refs/videos", "takes", "checkpoints", "store", "exports")
+SUBDIRS = ("refs/images", "refs/voices", "refs/songs", "refs/videos", "takes", "store", "exports")
 DEFAULT_SETTINGS = {
     "unet_name": "minimax_h3_ref2va_pruned_int8_convrot.safetensors", "weight_dtype": "default",
     "clip_name": "qwen3vl_32b_minimax_h3_int8_convrot.safetensors", "clip_type": "minimax",
@@ -65,7 +64,6 @@ def default_config():
     return {
         "projects_root": str(Path.home() / "Documents" / _t("projects.encore_projects")),
         "comfy_url": "http://127.0.0.1:8188",
-        "checkpoint_limit": 0,          # 0 = no limit (step 3)
         "purge_comfy_copy": True,       # remove ComfyUI's copy of the takes once they are in the project
         "assembly_engine": "ffmpeg",    # final videos made by Encore with ffmpeg ("plugin": by ComfyUI, as before 0.40)
     }
@@ -158,11 +156,9 @@ def active_loras(settings):
 
 
 # --------------------------------------------------------------------------- LoRA "en plus" and upscale per take
-# Project LoRA stack (settings) is always used. On top of it: the branch's LoRA and the clip's LoRA add up (same file at
-# two levels: the clip's strength wins), unless the clip says "sans les LoRA de branche". A generation can also give its
-# exact list, which replaces branch + clip. Upscale: the branch's settings, unless the generation gives its own (from the
-# « tuned take » dialog: the branch's settings changed for this take, « enabled » included). Since 0.28 a clip (column)
-# no longer has upscale settings: what earlier versions saved there is ignored.
+# Project LoRA stack (settings) is always used. On top of it: the branch's LoRA. A generation can also give its exact
+# list (launch panel), which replaces the branch's. Upscale: the branch's settings, unless the generation gives its own
+# (launch panel: the branch's settings changed for this take, « enabled » included).
 
 
 def clean_loras(value):
@@ -198,31 +194,9 @@ def merge_loras(*lists):
     return out
 
 
-def clip_default(meta_or_project, clip_name):
-    value = (meta_or_project.get("clip_defaults") or {}).get(clip_name) or {}
-    return {"loras": clean_loras(value.get("loras")), "no_branch_loras": bool(value.get("no_branch_loras"))}
-
-
-def default_extra_loras(branch, clip_def):
-    return merge_loras([] if clip_def["no_branch_loras"] else clean_loras(branch.get("loras")), clip_def["loras"])
-
-
-def set_clip_default(root, name, clip_name, value):
-    path = project_dir(root, name)
-    meta = read_meta(path)
-    clip_name = str(clip_name or "").strip()
-    if not clip_name:
-        raise StudioError(_t("projects.clip_without_a_name"))
-    if not isinstance(value, dict):
-        raise StudioError(_t("projects.invalid_clip_settings"))
-    clean = {"loras": clean_loras(value.get("loras")), "no_branch_loras": bool(value.get("no_branch_loras"))}
-    defaults = meta.setdefault("clip_defaults", {})
-    if clean["loras"] or clean["no_branch_loras"]:
-        defaults[clip_name] = clean
-    else:
-        defaults.pop(clip_name, None)
-    _write_json(path / "project.json", meta)
-    return {"clip_defaults": defaults}
+def default_extra_loras(branch):
+    """The LoRA a branch adds to its takes (on top of the project stack)."""
+    return clean_loras(branch.get("loras"))
 
 
 # --------------------------------------------------------------------------- default settings
@@ -346,12 +320,15 @@ def create_project(root, name: str, mode: str, defaults=None):
     _write_json(path / "project.json", {"studio_version": STUDIO_VERSION, "created": now,
                                         "settings": strip_branch_keys(migrate_settings(defaults)),
                                         "first_branch_size": first, "first_branch_ref_size": first_ref,
-                                        "legacy_ref_image_size": "match", "branches": []})
-    _write_json(path / "plan.json", skeleton_plan(name, mode))
+                                        "legacy_ref_image_size": "match", "branches": [],
+                                        "essence": {"mode": mode, "video": "none", "context_frames": plan_core.DEFAULT_CONTEXT},
+                                        "song": ""})
+    create_branch(root, name, master=skeleton_plan(name, mode))
     return read_project(root, name)
 
 
 def list_projects(root):
+    from . import plans
     root = Path(root)
     out = []
     if not root.is_dir():
@@ -361,72 +338,236 @@ def list_projects(root):
             continue
         item = {"name": child.name, "mode": None, "clips": 0, "updated": 0}
         try:
-            plan = _read_json(child / "plan.json")
-            item["mode"] = plan_core.plan_mode(plan)
+            meta = _read_json(child / "project.json")
+            first = (meta.get("branches") or [{}])[0].get("id")
+            plan = plans.load(child)["masters"].get(first) or {}
+            item["mode"] = plan_core.plan_mode(plan) if plan else None
             item["clips"] = len(plan.get("clips") or [])
-            item["updated"] = max((child / "plan.json").stat().st_mtime, (child / "project.json").stat().st_mtime)
-        except (OSError, ValueError):
-            item["error"] = "plan illisible"
+            files = [child / "project.json", child / plans.FILE]
+            item["updated"] = max(f.stat().st_mtime for f in files if f.is_file())
+        except (OSError, ValueError, AttributeError):
+            item["error"] = "projet illisible"
         out.append(item)
     return out
 
 
 def read_meta(path: Path):
-    """project.json, upgraded if needed: references and song move from the settings to the branches."""
+    """project.json (projects made before 0.42 are not read: they are recreated by importing their plan)."""
     meta = _read_json(path / "project.json")
-    if "branches" not in meta:
-        settings = meta.get("settings") or {}
-        refs, song = settings.get("refs") or {}, settings.get("song") or ""
-        has_takes = any((path / "takes").glob("clip_*/*.json"))
-        meta["branches"] = ([{"id": "b1", "name": _t("projects.branch_1"), "color": BRANCH_COLORS[0], "refs": refs, "song": song,
-                              "width": int(settings.get("width", 960)), "height": int(settings.get("height", 544)),
-                              "created": time.time()}] if (refs or song or has_takes) else [])
-        meta["settings"] = strip_branch_keys(settings)
-        _write_json(path / "project.json", meta)
-    for branch in meta["branches"]:          # branches of version 0.3: the picture size was global
-        if "width" not in branch:
-            settings = meta.get("settings") or {}
-            branch["width"] = int(settings.get("width", 960))
-            branch["height"] = int(settings.get("height", 544))
-            meta["_dirty"] = True
-    # 0.7: the size of the reference pictures moves from the plan to the branches; takes made before
-    # (which did not record it) were made with the value of the plan at that time
-    if "legacy_ref_image_size" not in meta:
-        legacy = "match"
-        try:
-            plan = json.loads((path / "plan.json").read_text(encoding="utf-8-sig"))
-            if plan.get("ref_image_size") in REF_SIZES:
-                legacy = plan["ref_image_size"]
-            if "ref_image_size" in plan:
-                plan.pop("ref_image_size")
-                _write_json(path / "plan.json", plan)
-        except (OSError, ValueError):
-            pass
-        meta["legacy_ref_image_size"] = legacy
-        meta["_dirty"] = True
-    for branch in meta["branches"]:          # branches made before 0.7 (restored from a checkpoint, too)
+    meta.setdefault("branches", [])
+    for branch in meta["branches"]:
         if branch.get("ref_image_size") not in REF_SIZES:
-            branch["ref_image_size"] = meta["legacy_ref_image_size"]
-            meta["_dirty"] = True
-    if meta.pop("_dirty", False):
-        meta["settings"] = strip_branch_keys(meta.get("settings") or {})
-        _write_json(path / "project.json", meta)
+            branch["ref_image_size"] = DEFAULT_REF_SIZE
+        branch["song"] = meta.get("song") or ""        # 0.43: the song is the project's, the same in every branch
     return meta
 
 
-def read_project(root, name):
+# --------------------------------------------------------------------------- the essence of the project (0.43)
+# What the video is: music video or free, made from no video, continuing one or editing one, and the context between
+# clips. The same for every branch (the plans carry it in their header); it can change while the project has no take.
+VIDEO_KINDS = ("none", "continue", "edit")
+
+
+def plan_essence(plan):
+    plan = plan or {}
+    video = "continue" if plan.get("start_video") else "edit" if plan.get("edit_video") else "none"
+    return {"mode": plan.get("mode") if plan.get("mode") in ("free", "music_video") else "free", "video": video,
+            "context_frames": int(plan.get("context_frames", plan_core.DEFAULT_CONTEXT))}
+
+
+def project_essence(path: Path, meta=None):
+    from . import plans
+    meta = meta or read_meta(path)
+    if meta.get("essence"):
+        return dict(meta["essence"])
+    masters = plans.load(path)["masters"]
+    first = masters.get(meta["branches"][0]["id"]) if meta["branches"] else None
+    return plan_essence(first)
+
+
+def apply_essence(plan, essence):
+    """The plan with the project's mode, video and context (same changes as the plan editor makes)."""
+    plan = json.loads(json.dumps(plan or {}))
+    clips = [c for c in plan.get("clips") or [] if isinstance(c, dict)]
+    mode = essence["mode"]
+    if plan.get("mode") != mode:
+        plan["mode"] = mode
+        if mode == "free":
+            plan.pop("song", None)
+            for c in clips:
+                if not isinstance(c.get("dialogue"), list):
+                    c["dialogue"] = []
+        else:
+            plan.pop("audio_feather_ticks", None)
+            plan.setdefault("song", {"file": "", "duration_seconds": 60})
+    plan["context_frames"] = int(essence["context_frames"])
+    current = plan_essence(plan)["video"]
+    want = essence["video"] if not (essence["video"] == "edit" and mode != "free") else "none"
+    if current != want:
+        old = plan.get("start_video") or plan.get("edit_video")
+        ref = (old or {}).get("ref")
+        refs = dict(plan.get("refs") or {})
+        if not ref:
+            ref, k = "video", 2
+            while ref in refs:
+                ref, k = f"video_{k}", k + 1
+        plan.pop("start_video", None)
+        plan.pop("edit_video", None)
+        if want == "none":
+            refs.pop(ref, None)
+            if clips:
+                clips[0]["continue"] = False
+        elif want == "continue":
+            refs[ref] = _t("plan.start_video_ref_desc")
+            plan["start_video"] = {"ref": ref, "start": (old or {}).get("start", 0), "end": (old or {}).get("end", 4)}
+            if clips:
+                clips[0]["continue"] = True
+        else:
+            refs[ref] = _t("plan.edit_video_ref_desc")
+            plan["edit_video"] = {"ref": ref, "start": (old or {}).get("start", 0), "end": (old or {}).get("end", 10)}
+            if clips:
+                clips[0]["continue"] = False
+        plan["refs"] = refs
+    return plan
+
+
+def _propagate_essence(path: Path, meta, essence, skip=None):
+    from . import plans
+    data = plans.load(path)
+    for branch_id, master in list(data["masters"].items()):
+        if branch_id != skip:
+            data["masters"][branch_id] = apply_essence(master, essence)
+    plans.save(path, data)
+    meta["essence"] = essence
+    _write_json(path / "project.json", meta)
+
+
+def fit_essence(path: Path, plan, branch_id=None, meta=None):
+    """A plan saved or imported: while the project has no take, its mode, video and context become the project's
+    (every master plan follows); after, the project's are imposed on it."""
+    meta = meta or read_meta(path)
+    if branches_with_takes(path, meta):
+        return apply_essence(plan, project_essence(path, meta))
+    essence = plan_essence(plan)
+    if essence != project_essence(path, meta):
+        _propagate_essence(path, meta, essence, skip=branch_id)
+    return plan
+
+
+def set_essence(root, name, changes):
+    """« Réglages du projet »: mode, video (none, continue, edit), context, song, video file. Refused once the
+    project has takes."""
     path = project_dir(root, name)
     meta = read_meta(path)
-    plan = _read_json(path / "plan.json")
+    essence = project_essence(path, meta)
+    new = dict(essence)
+    if "mode" in changes:
+        if changes["mode"] not in ("free", "music_video"):
+            raise StudioError(_t("projects.unknown_mode"))
+        new["mode"] = changes["mode"]
+    if "video" in changes:
+        if changes["video"] not in VIDEO_KINDS:
+            raise StudioError(_t("projects.unknown_video_kind"))
+        new["video"] = changes["video"]
+    if new["video"] == "edit" and new["mode"] != "free":
+        new["video"] = "none"
+    if "context_frames" in changes:
+        new["context_frames"] = int(changes["context_frames"])
+    song = changes.get("song", meta.get("song") or "")
+    if song and not (safe_join(path, song)).is_file():
+        raise StudioError(_t("engine.song_not_found", v0=song))
+    if branches_with_takes(path, meta) and (new != essence or (song or "") != (meta.get("song") or "")):
+        raise StudioError(_t("projects.project_frozen"))
+    meta["song"] = song or ""
+    if new != essence:
+        _propagate_essence(path, meta, new)
+    else:
+        meta["essence"] = new
+        _write_json(path / "project.json", meta)
+    if "video_file" in changes:
+        set_start_video_file(root, name, changes["video_file"])
+    return read_project(root, name)
+
+
+def read_project(root, name):
+    """The project, with the plan of the selected twig (or the master plan of the selected branch)."""
+    from . import plans
+    path = project_dir(root, name)
+    meta = read_meta(path)
     saved = meta.get("settings") or {}
     settings = dict(DEFAULT_SETTINGS)
     settings.update(strip_branch_keys(migrate_settings(saved)) if saved else {})
-    errors, warnings = plan_core.validate(plan)
-    return {"name": path.name, "path": str(path), "plan": plan, "settings": settings, "branches": meta["branches"],
+    twig = selected_plan(path, meta)
+    errors, warnings = plan_core.validate(json.loads(json.dumps(twig["plan"]))) if twig["plan"] else (["no plan"], [])
+    return {"name": path.name, "path": str(path), "plan": twig["plan"], "plan_locked": twig["locked"],
+            "plan_branch": twig["branch"], "plan_leaf": twig["leaf"], "plan_takes": twig["takes"],
+            "settings": settings, "branches": meta["branches"],
+            "branches_with_takes": sorted(branches_with_takes(path, meta)),
+            "branch_states": branch_states(path, meta),
+            "essence": project_essence(path, meta), "song": meta.get("song") or "",
+            "project_has_takes": bool(branches_with_takes(path, meta)),
+            "segments": {bid: (m or {}).get("start_video") or (m or {}).get("edit_video")
+                         for bid, m in plans.load(path)["masters"].items()},
+            "masters": {bid: len((m or {}).get("clips") or []) for bid, m in plans.load(path)["masters"].items()},
             "legacy_ref_image_size": meta.get("legacy_ref_image_size") or "match",
-            "clip_defaults": meta.get("clip_defaults") or {},
             "start_video_file": meta.get("start_video_file") or None,
             "resources": list_resources(root, name), "validation": {"errors": errors, "warnings": warnings}}
+
+
+def selected_plan(path: Path, meta=None):
+    """{"plan", "locked", "branch", "leaf", "takes"} of the selection: the twig it holds, or the master plan of
+    its branch (or of the first branch) when no take is chosen."""
+    from . import plans
+    meta = meta or read_meta(path)
+    selection = takes.read_selection(path)
+    branch = selection.get("branch") or (meta["branches"][0]["id"] if meta["branches"] else None)
+    _index, leaf = takes.leaf(selection)
+    if branch is None:
+        return {"plan": None, "locked": 0, "branch": None, "leaf": None, "takes": {}}
+    try:
+        twig = plans.plan_of(path, branch, leaf, project_name=path.name)
+    except StudioError:
+        leaf = None
+        twig = plans.plan_of(path, branch, None, project_name=path.name)
+    return {"plan": twig["plan"], "locked": twig["locked"], "branch": branch, "leaf": leaf,
+            "takes": {str(k): v for k, v in twig["takes"].items()}}
+
+
+def branches_with_takes(path: Path, meta=None):
+    """Branches having takes: their own, or clips taken over from another branch (duplication)."""
+    meta = meta or read_meta(path)
+    own = {takes.take_branch(r, None) for records in takes.list_takes(path).values() for r in records} - {None}
+    return own | {b["id"] for b in meta["branches"] if branch_base(b)}
+
+
+def branch_base(branch):
+    """[take id of clip 1, …, of clip k]: the clips a duplicated branch takes over from another one (by reference)."""
+    return list(((branch or {}).get("base") or {}).get("takes") or [])
+
+
+def refs_used(path: Path, branch_id, meta=None):
+    """The reference names the takes of a branch use (its own takes and the ones it takes over): their files can
+    no longer change in this branch."""
+    meta = meta or read_meta(path)
+    branch = next((b for b in meta["branches"] if b["id"] == branch_id), None)
+    base = set(branch_base(branch))
+    used = set()
+    for records in takes.list_takes(path).values():
+        for r in records:
+            if takes.take_branch(r, None) == branch_id or r["id"] in base:
+                clip = (((r.get("studio") or {}).get("portion") or {}).get("clip") or {})
+                used.update(str(n) for n in clip.get("refs") or [])
+                used.update((r.get("studio") or {}).get("files", {}).keys())
+    return used
+
+
+def branch_states(path: Path, meta=None):
+    """{branch id: {"has_takes", "refs_used": [names], "base": [take ids]}}: what the branch settings grey out."""
+    meta = meta or read_meta(path)
+    with_takes = branches_with_takes(path, meta)
+    return {b["id"]: {"has_takes": b["id"] in with_takes, "refs_used": sorted(refs_used(path, b["id"], meta)),
+                      "base": branch_base(b), "base_from": (b.get("base") or {}).get("from")}
+            for b in meta["branches"]}
 
 
 # --------------------------------------------------------------------------- start video
@@ -435,6 +576,8 @@ def read_project(root, name):
 def set_start_video_file(root, name, rel):
     path = project_dir(root, name)
     meta = read_meta(path)
+    if (rel or None) != (meta.get("start_video_file") or None) and branches_with_takes(path, meta):
+        raise StudioError(_t("projects.branch_frozen", what=_t("takes.the_start_video")))
     if rel:
         file = safe_join(path, rel)
         if not rel.startswith("refs/videos/") or not file.is_file():
@@ -473,25 +616,25 @@ def _branch_number(branch_id):
 
 
 def next_branch_number(path: Path, meta):
-    """A number never used before in the project: not by a branch, a deleted one or one in a checkpoint."""
+    """A number never used before in the project (deleted branches included)."""
     used = [int(meta.get("branch_seq") or 0)] + [_branch_number(b["id"]) for b in meta["branches"]]
-    for file in (path / "checkpoints").glob("cp_*.json"):
-        try:
-            cp = json.loads(file.read_text(encoding="utf-8"))
-            used += [_branch_number(b.get("id")) for b in ((cp.get("state") or {}).get("meta") or {}).get("branches") or []]
-        except (OSError, ValueError):
-            continue
     return max(used + [0]) + 1
 
 
-def create_branch(root, name):
-    """A new, empty branch; its set is a copy of the last branch created."""
+def create_branch(root, name, master=None, source=None, take_over=None, label=None):
+    """A new branch. Its settings and its master plan are copies of `source` (default: the last branch created);
+    master: its master plan instead (a plan file). take_over: [take ids of clips 1..k] of a twig of the source
+    branch the new branch takes over (duplication with clips: by reference, nothing is copied); its master plan is
+    then the plan of that twig (`master`, composed by the caller)."""
+    from . import plans
     path = project_dir(root, name)
     meta = read_meta(path)
     branches = meta["branches"]
     number = next_branch_number(path, meta)
     meta["branch_seq"] = number
     last = max(branches, key=lambda b: b.get("created", 0)) if branches else None
+    if source:
+        last = find_branch(branches, source)
     branch = {"id": f"b{number}", "name": _t("projects.branch", number=number), "color": BRANCH_COLORS[(number - 1) % len(BRANCH_COLORS)],
               "refs": json.loads(json.dumps(last["refs"])) if last else {}, "song": last["song"] if last else "",
               "width": int(last.get("width", DEFAULT_BRANCH_SIZE[0])) if last else int((meta.get("first_branch_size") or DEFAULT_BRANCH_SIZE)[0]),
@@ -500,8 +643,17 @@ def create_branch(root, name):
               "upscale": json.loads(json.dumps(last.get("upscale") or DEFAULT_UPSCALE)) if last else json.loads(json.dumps(DEFAULT_UPSCALE)),
               "loras": clean_loras(last.get("loras")) if last else [],
               "created": time.time()}
+    if label and str(label).strip():
+        branch["name"] = str(label).strip()[:60]
+    if take_over:
+        branch["base"] = {"from": last["id"], "takes": list(take_over)}
     branches.append(branch)
     _write_json(path / "project.json", meta)
+    if master is None:
+        master = (plans.master(path, last["id"]) if last else None) or skeleton_plan(path.name, "free")
+    master = strip_seeds(master)
+    master["project"] = path.name
+    plans.set_master(path, branch["id"], master)
     return {"branch": branch, "branches": branches, "copied_from": last["id"] if last else None}
 
 
@@ -509,6 +661,18 @@ def update_branch(root, name, branch_id, changes):
     path = project_dir(root, name)
     meta = read_meta(path)
     branch = find_branch(meta["branches"], branch_id)
+    if branch_id in branches_with_takes(path, meta):
+        frozen = []
+        if "refs" in changes and isinstance(changes["refs"], dict):
+            used = refs_used(path, branch_id, meta)
+            for ref, files in (branch.get("refs") or {}).items():
+                new = changes["refs"].get(ref) or {}
+                if ref in used and any((files or {}).get(k) and (new.get(k) or None) != files.get(k) for k in ("image", "voice")):
+                    frozen.append(ref)
+        if any(k in changes and int(changes[k]) != int(branch.get(k) or 0) for k in ("width", "height")):
+            frozen.append(_t("projects.frozen_size"))
+        if frozen:
+            raise StudioError(_t("projects.branch_frozen", what=", ".join(frozen)))
     if "name" in changes:
         label = str(changes["name"] or "").strip()
         if not label:
@@ -519,8 +683,6 @@ def update_branch(root, name, branch_id, changes):
             raise StudioError(_t("projects.invalid_references"))
         branch["refs"] = {str(k): {"image": (v or {}).get("image") or None, "voice": (v or {}).get("voice") or None}
                           for k, v in changes["refs"].items()}
-    if "song" in changes:
-        branch["song"] = str(changes["song"] or "")
     if "ref_image_size" in changes:
         branch["ref_image_size"] = check_ref_size(changes["ref_image_size"])
     if "upscale" in changes:                 # a generation setting: no take becomes invalid
@@ -542,28 +704,29 @@ def update_branch(root, name, branch_id, changes):
     return {"branch": branch, "branches": meta["branches"]}
 
 
-def read_plan(root, name):
-    return _read_json(project_dir(root, name) / "plan.json")
-
-
-def save_plan(root, name, plan):
+def save_plan(root, name, plan, branch_id, leaf_id=None):
+    """Saves the master plan of a branch (no leaf) or what can change in the plan of a twig (its suite)."""
+    from . import plans
     path = project_dir(root, name)
-    if not isinstance(plan, dict):
+    meta = read_meta(path)
+    find_branch(meta["branches"], branch_id)
+    if not isinstance(plan, dict) or not isinstance(plan.get("clips"), list):
         raise StudioError(_t("projects.the_plan_must_be_a_json"))
-    notes = []
-    if plan.get("project") != path.name:
-        notes.append(_t("projects.the_project_name_in_the_plan", name=path.name))
-        plan["project"] = path.name
+    plan = json.loads(json.dumps(plan))
+    plan["project"] = path.name
     plan["version"] = plan_core.PLAN_VERSION
-    if "ref_image_size" in plan:
-        plan.pop("ref_image_size")
-        notes.append(_t("projects.ref_image_size_is_removed_from"))
-    _write_json(path / "plan.json", plan)
-    errors, warnings = plan_core.validate(plan)
-    return {"plan": plan, "notes": notes, "validation": {"errors": errors, "warnings": warnings}}
+    plan.pop("ref_image_size", None)
+    plan = fit_essence(path, plan, branch_id, meta)
+    problems = plans.frozen_problems(path, branch_id, plan, branch_id in branches_with_takes(path))
+    if problems:
+        raise StudioError(_t("projects.plan_frozen", what=", ".join(problems)))
+    plans.save_twig_plan(path, branch_id, leaf_id, plan)
+    errors, warnings = plan_core.validate(json.loads(json.dumps(plan)))
+    return {"plan": plan, "validation": {"errors": errors, "warnings": warnings}}
 
 
 def save_settings(root, name, settings):
+    """« Réglages du projet »: models, sampling, LoRA stack, previews (the essence has its own route: set_essence)."""
     path = project_dir(root, name)
     if not isinstance(settings, dict):
         raise StudioError(_t("projects.invalid_settings"))
@@ -574,20 +737,116 @@ def save_settings(root, name, settings):
     return {"settings": settings}
 
 
-def import_plan(root, name, data: bytes, filename: str = "plan.json"):
-    """Copy a plan file into the project (the previous plan is kept as plan.previous.json)."""
+def use_twig_plan(root, name, branch_id, leaf, target="master", label=None, pending=None):
+    """« Utiliser ce plan… »: the plan of a twig (its generated clips as they were made, then what follows) becomes
+    the master plan of its branch (target "master": the master plan it had goes to the trash) or of a new branch with
+    the settings of that branch (target "new"; the current branch does not change)."""
+    from . import plans, trash
     path = project_dir(root, name)
+    meta = read_meta(path)
+    branch = find_branch(meta["branches"], branch_id)
+    if not leaf:
+        raise StudioError(_t("projects.duplicate_needs_a_selection"))
+    twig = plans.plan_of(path, branch_id, leaf, pending=pending, project_name=path.name)
+    plan = strip_seeds(twig["plan"])
+    if target == "new":
+        out = create_branch(root, name, master=plan, source=branch_id, label=label)
+    else:
+        master = plans.master(path, branch_id) or {}
+        new = plans.head(master) if master else plans.head(plan)
+        new["refs"], new["clips"] = plan.get("refs") or {}, plan["clips"]
+        trash.replace_master(path, branch_id, new, _t("trash.label_master", name=branch["name"]))
+        out = {"branch": branch}
+    out["project"] = read_project(root, name)
+    return out
+
+
+def strip_seeds(plan):
+    """A seed belongs to a take, never to a plan."""
+    plan = json.loads(json.dumps(plan))
+    plan.pop("seed", None)
+    for clip in plan.get("clips") or []:
+        if isinstance(clip, dict):
+            clip.pop("seed", None)
+    return plan
+
+
+def read_plan_file(data: bytes, filename: str):
     try:
         plan = json.loads(data.decode("utf-8-sig"))
     except (UnicodeDecodeError, ValueError) as exc:
         raise StudioError(_t("projects.is_not_a_readable_json_file", filename=filename, exc=exc)) from exc
     if not isinstance(plan, dict) or not isinstance(plan.get("clips"), list):
         raise StudioError(_t("projects.does_not_look_like_an_h3", filename=filename))
-    if (path / "plan.json").is_file():
-        shutil.copy2(path / "plan.json", path / "plan.previous.json")
-    result = save_plan(root, name, plan)
-    result["imported_from"] = filename
+    return strip_seeds(plan)
+
+
+def new_branch(root, name, how="empty", source=None, leaf=None, upto=None, data: bytes = None, filename="plan.json",
+               label=None):
+    """« + nouvelle branche »: how = "empty" (settings and master plan of the last branch), "file" (data: a plan
+    file as master plan), "copy" (settings and master plan of `source`, no clip), "clips" (the clips 1..upto of
+    the twig of `source` ending with `leaf` are taken over; master plan: the plan of that twig)."""
+    from . import plans
+    path = project_dir(root, name)
+    if how == "file":
+        return create_branch(root, name, master=fit_essence(path, read_plan_file(data or b"", filename)), label=label)
+    if how == "copy":
+        return create_branch(root, name, source=source, label=label)
+    if how == "clips":
+        meta = read_meta(path)
+        find_branch(meta["branches"], source)
+        if not leaf:
+            raise StudioError(_t("projects.duplicate_needs_a_selection"))
+        twig = plans.plan_of(path, source, leaf, project_name=path.name)
+        upto = int(upto or len(twig["chain"]))
+        if not 1 <= upto <= len(twig["chain"]):
+            raise StudioError(_t("projects.duplicate_upto_invalid", n=len(twig["chain"])))
+        master = twig["plan"]
+        master["clips"] = [dict(c) for c in master["clips"]]
+        return create_branch(root, name, master=master, source=source, take_over=twig["chain"][:upto], label=label)
+    return create_branch(root, name, label=label)
+
+
+def import_plan(root, name, data: bytes, filename: str = "plan.json", branch_id=None):
+    """A plan file becomes the master plan of a branch without takes (a branch with takes refuses it: a new branch is
+    made from the file instead, see new_branch)."""
+    path = project_dir(root, name)
+    plan = read_plan_file(data, filename)
+    meta = read_meta(path)
+    if not branch_id:          # the selected branch, else the first one
+        branch_id = takes.read_selection(path).get("branch") or (meta["branches"][0]["id"] if meta["branches"] else None)
+    branch = next((b for b in meta["branches"] if b["id"] == branch_id), None)
+    if not branch:
+        raise StudioError(_t("server.plan_branch_missing"))
+    if branch_id in branches_with_takes(path):
+        raise StudioError(_t("projects.import_branch_has_takes", branch=branch["name"]))
+    result = save_plan(root, name, plan, branch_id)
+    takes.write_selection(path, {"branch": branch_id})
+    result.update(imported_from=filename, branch=branch_id)
     return result
+
+
+# --------------------------------------------------------------------------- deleting a branch
+def _branch_exports(path: Path, branch_id):
+    out = []
+    for meta in (path / "exports").glob("*.json"):
+        if meta.name.endswith(".infos.json"):
+            continue
+        try:
+            if json.loads(meta.read_text(encoding="utf-8")).get("branch") == branch_id:
+                out.append(meta)
+        except (OSError, ValueError):
+            continue
+    return out
+
+
+def delete_branch(root, name, branch_id, confirm=False):
+    """Deletes a branch into the trash (trash.delete_branch); the project as it is now comes with the answer."""
+    from . import trash
+    out = trash.delete_branch(root, name, branch_id, confirm)
+    if out.get("deleted"):
+        out["project"] = read_project(root, name)
+    return out
 
 
 # --------------------------------------------------------------------------- resources

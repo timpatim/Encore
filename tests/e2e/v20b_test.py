@@ -1,5 +1,5 @@
 import asyncio, json, os, shutil, subprocess, sys, time, urllib.request
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from common import ENCORE, CHROME, fixture, restart_mock  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from common import ENCORE, CHROME, fixture, restart_mock, plan_screen, takes_screen  # noqa: E402
 from playwright.async_api import async_playwright
 S = "http://127.0.0.1:8230"; M = "http://127.0.0.1:8771"
 def call(base, path, body=None, method=None, raw=None):
@@ -15,19 +15,19 @@ call(S, "/api/projects", {"name": "rue", "mode": "free"})
 call(S, P + "/import-plan?filename=rue.json", raw=open(fixture("rue_test_v1.plan.json"), "rb").read(), method="POST")
 for kind, f in (("images", fixture("fillette.png")), ("images", fixture("rue.png")), ("voices", fixture("v20_song.wav"))):
     call(S, f"{P}/resources?kind={kind}&filename={os.path.basename(f)}", raw=open(f, "rb").read(), method="POST")
-call(S, P + "/branches", {}); call(S, P + "/branches/b1", {"refs": {"fillette": {"image": "refs/images/fillette.png", "voice": "refs/voices/v20_song.wav"}, "rue": {"image": "refs/images/rue.png"}}}, "PUT")
+call(S, P + "/branches/b1", {"refs": {"fillette": {"image": "refs/images/fillette.png", "voice": "refs/voices/v20_song.wav"}, "rue": {"image": "refs/images/rue.png"}}}, "PUT")
 orig = [c["prompt"] for c in call(S, P)["plan"]["clips"]]
-# a take of clip 1 made with an extra LoRA and the upscale
-c2 = call(S, P)["plan"]["clips"][4]["name"]
-call(S, P + "/clip-defaults", {"clip": c2, "value": {"loras": [{"name": "perso/style_07.safetensors", "strength": 0.6}], "no_branch_loras": False, "upscale": "off"}}, "PUT")
-call(S, P + "/branches/b1/fill", {"dry_run": False, "assemble": False})
-for _ in range(12):
-    time.sleep(1.2)
-    try: call(M, "/test/run", {})
-    except Exception: pass
-    time.sleep(1.2)
-    if not [j for j in call(S, P + "/jobs")["jobs"] if j["status"] in ("queued", "running")]: break
-call(S, P + "/clip-defaults", {"clip": c2, "value": {"loras": [], "no_branch_loras": False, "upscale": None}}, "PUT")
+# the whole branch, then a second take of clip 5 made with an extra LoRA and no upscale (0.42: set for the take)
+def drain():
+    for _ in range(40):
+        time.sleep(0.8)
+        try: call(M, "/test/run", {})
+        except Exception: pass
+        time.sleep(0.8)
+        if not [j for j in call(S, P + "/jobs")["jobs"] if j["status"] in ("queued", "running", "harvest")]: break
+call(S, P + "/branches/b1/fill", {"dry_run": False, "assemble": False}); drain()
+t4 = call(S, P)["plan_takes"]["4"]
+call(S, P + "/generate", {"clip": 5, "after": t4, "loras": [{"name": "perso/style_07.safetensors", "strength": 0.6}], "upscale_settings": {"enabled": False}}); drain()
 print("takes", {k: len(v) for k, v in call(S, P + "/takes")["takes"].items()} if isinstance(call(S, P + "/takes").get("takes"), dict) else "?")
 async def main():
     async with async_playwright() as pw:
@@ -35,6 +35,7 @@ async def main():
         page = await b.new_page(viewport={"width": 1500, "height": 950}); errs = []
         page.on("pageerror", lambda e: errs.append(str(e)))
         await page.goto(S + "/"); await page.evaluate("localStorage.setItem('h3studio.project','rue')"); await page.reload(); await page.wait_for_timeout(1500)
+        await plan_screen(page, master=True)          # the master plan: every clip can be edited
         same = []
         for i in range(5):
             await page.locator(".clipitem").nth(i).click(); await page.wait_for_timeout(250)
@@ -53,18 +54,18 @@ async def main():
         print("ac", items[:3])
         await page.keyboard.press("Escape")
         await page.screenshot(path="v20b_free.png")
-        # Prises: ↻▾ on the take of clip 1 opens prefilled -> clip 1 has no ↻ in studio; use clip 2? check the buttons
-        await page.click("#viewTabs >> text=Prises"); await page.wait_for_timeout(2500)
-        arrows = page.locator(".tk-retake + .tk-split-arrow")
-        print("retake arrows", await arrows.count())
-        for k in range(await arrows.count()):
-            await arrows.nth(k).evaluate("e => e.click()"); await page.wait_for_timeout(700)
-            title = await page.locator(".tk-modal .tk-box-head b").last.text_content()
-            vals = await page.eval_on_selector_all(".tk-modal .studio-lora select", "e => e.map(x => x.value)")
-            up = await page.eval_on_selector(".tk-modal .studio-up-line", "e => e.textContent")
-            print("retake dialog:", title, "| loras", vals, "| upscale", up)
-            if "clip 5" in title: await page.screenshot(path="v20b_retake.png")
-            await page.click(".tk-modal button:has-text('Annuler')"); await page.wait_for_timeout(300)
+        # Prises: ↻ « nouvelle prise » opens the launch panel, set like the take (its LoRA, its upscale)
+        await takes_screen(page); await page.wait_for_timeout(1600)
+        buttons = page.locator(".tk-retake")
+        print("retake buttons", await buttons.count())
+        for k in range(await buttons.count()):
+            await buttons.nth(k).evaluate("e => e.click()"); await page.wait_for_timeout(1200)
+            title = await page.locator("#launchPanel .launch-head b").text_content()
+            vals = await page.eval_on_selector_all("#launchPanel .studio-lora select", "e => e.map(x => x.value)")
+            up = await page.eval_on_selector("#launchPanel .studio-up-line", "e => e.textContent")
+            print("launch panel:", title, "| loras", vals, "| upscale", up[:60])
+            if vals: await page.screenshot(path="v20b_retake.png")
+            await page.click("#launchPanel .launch-foot button:has-text('Annuler')"); await page.wait_for_timeout(400)
         # pick filter on a LoRA select (branch LoRA dialog)
         await page.evaluate("H3Takes.state.studio.openBranchLoras('b1')"); await page.wait_for_timeout(800)
         await page.click(".tk-modal button:has-text('+ ajouter un LoRA')"); await page.wait_for_timeout(200)

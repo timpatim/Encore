@@ -36,18 +36,21 @@ P = "/api/projects/robot_beach"
 SRV = None
 
 
-def last_take(index, branch):
-    clip = [c for c in call(S, P + "/takes")["clips"] if c["index"] == index][0]
-    takes = [t for t in clip["takes"] if (t["record"].get("studio") or {}).get("branch", "b1") == branch]
-    if not takes: sys.exit(f"no take: {call(S, P + '/jobs')}")
-    return takes[-1]["id"]
+def take_of(job):
+    for _ in range(40):
+        j = next((x for x in call(S, P + "/jobs")["jobs"] if x["id"] == job.get("id")), {})
+        if j.get("take"):
+            return j["take"]
+        run_one()
+    sys.exit(f"no take: {job}")
 
 
-def gen(index, branch, parent=None, **extra):
-    body = {"clip": index, "branch": branch, "random": True, **extra}
-    if parent: body["parent"] = parent.split("_")[1]
-    call(S, P + "/generate", body); run_one()
-    return last_take(index, branch)
+def gen(index, branch, after=None):
+    body = {"clip": index, "branch": branch}
+    if after:
+        body["after"] = after
+    job = call(S, P + "/generate", body); run_one()
+    return take_of(job)
 
 
 def setup():
@@ -67,26 +70,25 @@ def setup():
     call(S, P + "/import-plan?filename=robot_beach.plan.json", raw=open(os.path.join(ex, "robot_beach.plan.json"), "rb").read(), method="POST")
     for kind, name in (("images", "robot.png"), ("images", "beach.png"), ("images", "workshop.png"), ("songs", "robot_beach_song.mp3")):
         call(S, f"{P}/resources?kind={kind}&filename={name}", raw=open(os.path.join(ex, name), "rb").read(), method="POST")
-    song = "refs/songs/robot_beach_song.mp3"
-    for k in range(3):
-        call(S, P + "/branches", {})
-    ids = [b["id"] for b in call(S, P)["branches"]]
-    b1, b2, b3 = ids[:3]
-    call(S, f"{P}/branches/{b1}", {"name": "Sunset", "song": song, "refs": {"robot": {"image": "refs/images/robot.png"}, "beach": {"image": "refs/images/beach.png"}},
+    call(S, P + "/essence", {"song": "refs/songs/robot_beach_song.mp3"}, "PUT")       # the song is the project's
+    for _ in range(2):
+        call(S, P + "/branches", {"how": "empty"})
+    b1, b2, b3 = [b["id"] for b in call(S, P)["branches"]][:3]
+    call(S, f"{P}/branches/{b1}", {"name": "Sunset", "refs": {"robot": {"image": "refs/images/robot.png"}, "beach": {"image": "refs/images/beach.png"}},
                                    "upscale": {"enabled": True, "model": M3D, "start_mp": 0.25, "upscaler": "lbh3d"}}, "PUT")
-    call(S, f"{P}/branches/{b2}", {"name": "Workshop version", "song": song, "refs": {"robot": {"image": "refs/images/robot.png"}, "beach": {"image": "refs/images/workshop.png"}}}, "PUT")
-    call(S, f"{P}/branches/{b3}", {"name": "First draft", "song": song, "refs": {"robot": {"image": "refs/images/robot.png"}, "beach": {"image": "refs/images/beach.png"}}}, "PUT")
+    call(S, f"{P}/branches/{b2}", {"name": "Workshop version", "refs": {"robot": {"image": "refs/images/robot.png"}, "beach": {"image": "refs/images/workshop.png"}}}, "PUT")
+    call(S, f"{P}/branches/{b3}", {"name": "First draft", "refs": {"robot": {"image": "refs/images/robot.png"}, "beach": {"image": "refs/images/beach.png"}}}, "PUT")
     # Sunset: two takes of clip 1, two continuations of the second, two takes of clip 3 (a new scene)
     a1 = gen(1, b1); a2 = gen(1, b1)
     gen(2, b1, a1); c1 = gen(2, b1, a2); gen(2, b1, a2)
-    gen(3, b1); d2 = gen(3, b1)
-    w1 = gen(1, b2); gen(2, b2, w1); gen(1, b2)
+    gen(3, b1, c1); d2 = gen(3, b1, c1)
+    w1 = gen(1, b2); w2 = gen(2, b2, w1); gen(1, b2)
     gen(1, b3)
-    call(S, P + "/assemble", {"clip": 3, "take": d2}); run_one()
+    call(S, P + "/selection", {"selection": {"branch": b1, "1": a2, "2": c1, "3": d2}}, "PUT")
+    job = call(S, P + "/assemble", {"clip": 3, "take": d2}); run_one(); run_one()
     # something waiting in the queue
     call(S, "/api/queue/pause", {})
-    call(S, P + "/generate", {"clip": 3, "branch": b2, "random": True})
-    call(S, P + "/generate", {"clip": 3, "branch": b1, "random": True})
+    call(S, P + "/generate", {"clip": 3, "after": w2, "branch": b2})
     return srv, (b1, b2, b3), c1, d2
 
 
@@ -98,36 +100,33 @@ async def shots(branches, c1, d2):
         page = await b.new_page(viewport={"width": 1680, "height": 1000})
         await page.goto(S + "/")
         await page.evaluate(f"localStorage.setItem('h3studio.project','robot_beach'); localStorage.setItem('encore.folded.robot_beach', JSON.stringify(['{b3}']))")
-        await page.reload(); await page.wait_for_timeout(1800)
-        # plan editor: clip 2
-        await page.locator(".clipitem").nth(1).click(); await page.wait_for_timeout(800)
-        await page.screenshot(path=os.path.join(DOCS, "plan_editor.png"))
-        # takes
-        await page.click("#viewTabs >> text=Takes"); await page.wait_for_timeout(2500)
-        await page.locator(f".tk-card[data-take='{c1}']").click(); await page.wait_for_timeout(1500)
+        await page.reload(); await page.wait_for_timeout(2500)
+        # the takes screen (the main screen), the twig 1 → 2 → 3 of Sunset chosen
+        await page.locator(f".tk-card[data-take='{d2}']").first.click(); await page.wait_for_timeout(1500)
+        # the takes screen (the main screen)
         close = page.locator(".tk-map-btn:has-text('✕')")
         if await close.count(): await close.first.click(); await page.wait_for_timeout(300)
-        await page.mouse.move(300, 300); await page.keyboard.down("Shift")
-        for _ in range(4):
-            await page.mouse.wheel(0, 100); await page.wait_for_timeout(150)
-        await page.keyboard.up("Shift"); await page.wait_for_timeout(500)
-        await page.evaluate("document.querySelector('.tk-viewport, .tk-vp, .tk-vpwrap > div').scrollTo(0, 0)"); await page.wait_for_timeout(500)
         await page.mouse.move(5, 5); await page.wait_for_timeout(1500)
-        await page.set_viewport_size({"width": 1680, "height": 1260}); await page.wait_for_timeout(1200)
+        await page.set_viewport_size({"width": 1680, "height": 1260}); await page.wait_for_timeout(1500)
         await page.screenshot(path=os.path.join(DOCS, "takes.png"))
         await page.set_viewport_size({"width": 1680, "height": 1000}); await page.wait_for_timeout(800)
+        # the launch panel: the next clip after a take
+        card = page.locator(f".tk-card[data-take='{c1}']").first
+        await card.hover(); await card.locator(".tk-retake").click(); await page.wait_for_timeout(2000)
+        await page.mouse.move(5, 300); await page.wait_for_timeout(500)
+        await page.screenshot(path=os.path.join(DOCS, "launch.png"))
+        await page.evaluate("H3Launch.close()"); await page.wait_for_timeout(500)
         # plan window of a take
-        card = page.locator(f".tk-card[data-take='{d2}']"); await card.hover()
+        card = page.locator(f".tk-card[data-take='{d2}']").first; await card.hover()
         await card.locator(".tk-plan-btn").click(); await page.wait_for_timeout(900)
         await page.locator(".tk-plan-modal .tk-plan-gen").scroll_into_view_if_needed(); await page.wait_for_timeout(300)
         await page.locator(".tk-plan-modal > *").first.screenshot(path=os.path.join(DOCS, "plan_window.png"))
         await page.click(".tk-plan-modal >> text=Close"); await page.wait_for_timeout(300)
-        # tuned take, upscale form unfolded
-        await card.hover(); await card.locator(".tk-split-arrow").first.click(); await page.wait_for_timeout(800)
-        dl = page.locator(".tk-modal").last
-        await dl.locator(".studio-up-line button:has-text('modify')").click(); await page.wait_for_timeout(400)
-        await dl.locator("> *").first.screenshot(path=os.path.join(DOCS, "tuned_take.png"))
-        await dl.locator(".tk-box-head button").click(); await page.wait_for_timeout(400)
+        # the plan of the selection: generated clips locked, then what follows
+        await page.click(".tk-twigplan"); await page.wait_for_timeout(1500)
+        await page.locator(".clipitem").nth(1).click(); await page.wait_for_timeout(800)
+        await page.screenshot(path=os.path.join(DOCS, "plan_editor.png"))
+        await page.click("#studioBackBtn"); await page.wait_for_timeout(800)
         # queue
         await page.click("#studioQueueBtn"); await page.wait_for_timeout(800)
         await page.locator(".tk-modal").last.locator("> *").first.screenshot(path=os.path.join(DOCS, "queue.png"))

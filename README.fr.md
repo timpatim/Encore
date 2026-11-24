@@ -22,7 +22,7 @@
 > le code. Lisez-le, testez-le sur votre propre installation et utilisez-le à vos risques ; les
 > signalements et corrections sont les bienvenus.
 
-![Onglet Prises : branches, prises et vidéo assemblée](docs/screenshots/takes.png)
+![Écran des prises : branches, prises et vidéo assemblée](docs/screenshots/takes.png)
 
 ## Ce que fait Encore
 
@@ -36,15 +36,16 @@ chanson). Encore est l'application autour :
 - **Éditeur de plan** : les clips sur une frise au-dessus de la chanson, prompts édités par
   section, références et sujets en pastilles, contrôles du plan et de chaque clip.
 - **Prises en arbre** : chaque génération est une prise ; une suite est construite sur la prise
-  exacte qu'elle continue. Essayez plusieurs prises, gardez la meilleure chaîne, revenez à une
-  plus ancienne.
+  exacte qu'elle continue. Essayez plusieurs prises, gardez la meilleure chaîne (une *brindille*),
+  revenez à une plus ancienne. Chaque brindille a son propre plan : les clips déjà générés sont
+  figés, les suivants restent modifiables.
 - **Branches** : le même plan avec d'autres images, une autre taille, d'autres LoRA ou réglages
   d'upscale, côte à côte, sans mélanger leurs prises.
 - **File de générations** : un travail à la fois dans ComfyUI, survit à un redémarrage de ComfyUI
   ou d'Encore, réordonnable, en pause et reprise ; **▶▶ compléter** remplit toute une branche.
 - **Upscale latent** (optionnel) : générer petit, puis agrandir dans une seconde passe.
 - **Assemblage** : un clic met bout à bout les prises choisies sur la chanson en une vidéo.
-- **Points de sauvegarde**, **fenêtres de plan** qui disent exactement comment une prise a été
+- **Fenêtres de plan** qui disent exactement comment une prise a été
   faite, un écran d'installation qui installe les packs de nœuds et télécharge les modèles,
   anglais et français, thèmes sombre et clair.
 
@@ -52,17 +53,17 @@ ComfyUI ne sert que de moteur : Encore lui parle à son adresse et ne modifie ja
 
 ## Captures d'écran
 
-**Éditeur de plan : les clips sur la chanson, prompts par section, références et contrôles**
+**Plan de la sélection : les clips générés 🔒 tels qu'ils ont servi, les clips sur la chanson, les prompts par section**
 
 ![Éditeur de plan](docs/screenshots/plan_editor.png)
+
+**Panneau de lancement : une nouvelle prise du clip 2, par-dessus les prises ; de quelle brindille partir, le clip, la graine**
+
+![Panneau de lancement](docs/screenshots/launch.png)
 
 **Fenêtre de plan ≡ d'une prise : le plan avec lequel elle a été faite et tout ce qui a servi à la générer**
 
 ![Fenêtre de plan d'une prise](docs/screenshots/plan_window.png)
-
-**« Prise réglée » (▾) : d'autres LoRA, réglages d'upscale ou graine pour une seule prise**
-
-![Fenêtre prise réglée](docs/screenshots/tuned_take.png)
 
 **File des générations : réordonner, suspendre, mettre en pause, reprendre**
 
@@ -96,13 +97,15 @@ Encore lui-même n'utilise que la bibliothèque standard de Python : rien à ins
    manquants, redémarrer ComfyUI, télécharger les modèles par défaut.
 4. **☰ Projets > Nouveau projet** : un nom, mode *libre* (H3 fait l'image et le son) ou *clip
    musical* (une chanson est posée sous les clips).
-5. **Importer un plan…** : un plan écrit à la main, par un LLM (le plugin donne le
+5. **plan maître…** (en-tête de branche), puis **Importer un plan…** : un plan écrit à la main, par un
+   LLM (le plugin donne le
    [prompt système](https://github.com/timpatim/ComfyUI-H3-ClipPlan/blob/main/docs/LLM_SYSTEM_PROMPT.md)
-   pour ça) ou l'un des `examples/` du plugin. Ou l'écrire dans l'onglet **Plan**.
-6. **Ressources…** : importer les images (et la chanson ou les voix) ; puis, dans l'onglet
-   **Prises**, le bouton **références…** de la branche donne une image à chaque référence du plan.
-7. Onglet **Prises** : cliquer la case du clip 1 pour générer une prise, la case à sa droite pour
-   le clip suivant, ou **▶▶ compléter** pour mettre toute la branche en file. Cliquer une prise pour
+   pour ça) ou l'un des `examples/` du plugin. Ou l'écrire là.
+6. **Ressources…** : importer les images (et la chanson ou les voix) ; la chanson se choisit dans
+   **Réglages du projet** ; le bouton **réglages…** de la branche donne une image à chaque référence du
+   plan.
+7. Sur l'écran des prises : cliquer la case du clip 1 pour générer une prise, **+ clip suivant…**
+   pour le clip suivant, ou **▶▶ compléter** pour mettre toute la branche en file. Cliquer une prise pour
    la choisir.
 8. Survoler la dernière prise : **▶ assembler 1–k** fait la vidéo ; elle apparaît dans le volet
    **▶ Vidéos**.
@@ -115,14 +118,14 @@ La suite de cette page est le guide complet.
 `http://127.0.0.1:8188` par défaut.
 
 Messages, confirmations et saisies s'ouvrent dans une fenêtre d'Encore, au centre de l'écran
-(Entrée valide, Échap annule ; pour une suppression ou une restauration, « Non » a le focus).
+(Entrée valide, Échap annule ; pour une suppression, « Non » a le focus).
 Seul l'avertissement de fermeture de l'onglet avec un plan non enregistré reste celui du navigateur.
 
 ## Langue
 
 Encore est en anglais par défaut. Page d'accueil > **Réglages par défaut…** > **Langue** : la page
 se recharge dans la langue choisie, messages du serveur, fiches `.infos.md` et libellés de la file
-compris (ce qui a déjà été écrit, comme un nom de point de sauvegarde, reste tel quel).
+compris (ce qui a déjà été écrit, comme un nom de branche, reste tel quel).
 
 Les textes sont dans `encore/locales/<code>.json` (`en.json`, `fr.json`) : `{"identifiant": "texte"}`,
 avec des valeurs `{nom}` remplacées à l'affichage. Pour ajouter une langue, copier `en.json` en
@@ -234,24 +237,25 @@ redémarrage), Encore relit les listes de nœuds et de modèles.
 
 ```text
 <dossier des projets>\<nom>\
-  project.json      réglages : modèles, taille, quel fichier va avec quelle référence
-  plan.json         le plan (plan.previous.json : le plan remplacé par le dernier import)
+  project.json      réglages : ce qu'est la vidéo (mode, vidéo, chanson, contexte), modèles, branches
+  plans.json        le plan maître de chaque branche et le plan de la suite de chaque prise
   refs\images\      images importées
   refs\voices\      voix importées
   refs\songs\       chansons importées
   refs\videos\      vidéos importées (vidéo de départ ou éditée)
   takes\clip_NNN\  prises : latent (.pt), signature (.json), aperçu (.mp4)
-  selection.json    prise choisie pour chaque clip
+  selection.json    la brindille sélectionnée (prise choisie des clips 1 à k, chacune continuant la précédente)
   jobs.json         générations en attente (présent seulement pendant qu'il y en a)
-  hidden_takes.json prises masquées par la restauration d'un point (toujours sur le disque)
-  checkpoints\      points de sauvegarde
   exports\          vidéos assemblées (.mp4) et leur fiche (.json)
+  trash\            ce qui a été supprimé, jusqu'à sa restauration ou son effacement (Corbeille…)
   store\            (réservé)
 ```
 
 - **☰ Projets** : liste, création (nom = nom du dossier ; mode libre ou clip musical).
-- **Importer un plan…** : copie un fichier de plan dans le projet. Le nom du projet dans le
-  plan devient celui du dossier.
+- **Importer un plan…** (sur l'écran du plan maître d'une branche) : le fichier remplace le plan maître
+  d'une branche qui n'a encore aucune prise ; grisé dès qu'elle en a (créer une nouvelle branche « à
+  partir d'un fichier de plan »). Les graines du fichier sont ignorées. Tant que le projet n'a aucune
+  prise, le mode, la vidéo et le contexte du plan deviennent ceux du projet.
 - **Ressources…** : importe des images, voix, chansons et vidéos (copiées dans `refs\`). Un gros fichier
   affiche une fenêtre de progression (annuler ne laisse rien derrière) ; il est écrit au fil de l'eau. Quand le
   dossier de ComfyUI est connu (écran de bienvenue), les fichiers sont ensuite copiés directement dans
@@ -261,19 +265,43 @@ redémarrage), Encore relit les listes de nœuds et de modèles.
   HEVC…) reçoit une copie légère en H.264 pour les lecteurs seulement, faite par ffmpeg (celui du
   Python de ComfyUI, ou du PATH) avec sa progression ; ComfyUI reçoit toujours l'original. 🗑 supprime un
   fichier : refusé tant qu'une branche ou la vidéo de départ l'utilise (le message dit où), après un
-  avertissement qui liste les points de sauvegarde et les prises qui en ont encore besoin, tout de
+  avertissement qui liste les prises qui en ont encore besoin, tout de
   suite sinon ; sa copie dans ComfyUI part aussi quand le dossier de ComfyUI est connu. Un fichier
-  identique n'est pas copié deux fois. Rien n'est supprimé (les points de sauvegarde en ont
-  besoin). Images acceptées : PNG, JPEG, WebP, BMP ; le contenu est vérifié, et les JPEG
+  identique n'est pas copié deux fois. Images acceptées : PNG, JPEG, WebP, BMP ; le contenu est vérifié, et les JPEG
   en `.jfif`, `.jfi`, `.jpe`, `.pjpeg` ou `.pjp` sont enregistrés en `.jpg` (octets identiques).
-- **Réglages…** : qualité des aperçus, modèles et échantillonnage, aperçu en direct. Boutons
-  « Enregistrer comme réglages par défaut » et « Reprendre les réglages par défaut ».
+- **Réglages du projet…** : d'abord **le projet** : mode (clip musical ou libre), vidéo (aucune,
+  continuer une vidéo, éditer une vidéo) et son fichier, chanson (clip musical), contexte. Ils sont les
+  mêmes pour toutes les branches et se figent avec la première prise du projet (grisés, avec la raison).
+  Puis qualité des aperçus, modèles et échantillonnage, aperçu en direct. Boutons « Enregistrer comme
+  réglages par défaut » et « Reprendre les réglages par défaut ».
 
-## Onglet Plan
+## Écran des prises et écran de plan
+
+L'**écran des prises** est l'écran principal : branches, prises, file, vidéos assemblées. Le plan se
+modifie sur l'**écran de plan**, ouvert depuis lui, qui le remplace jusqu'à **← Prises** (le plan est
+enregistré au retour s'il a été modifié) :
+
+- **plan maître…** (en-tête de branche) : le plan de la branche avant toute prise, point de départ de
+  ses nouvelles brindilles. Tous les clips sont modifiables.
+- **Plan de la sélection…** (barre de sélection, au-dessus du graphe) : le plan de la brindille
+  sélectionnée. Les clips déjà générés y portent 🔒 et sont en lecture seule (leur prompt est celui
+  avec lequel la prise a été faite) ; on peut ajouter, modifier ou retirer des clips après eux. Les
+  changements restent dans cette brindille : le plan maître et les autres brindilles ne changent pas.
+  **Utiliser ce plan…** en fait le plan maître de la branche (l'ancien part à la corbeille) ou d'une
+  nouvelle branche avec les réglages de celle-ci (aucun clip repris) : pour essayer ailleurs des
+  prompts qui marchent.
+
+**Plans d'une branche.** Une branche a un plan maître. Chaque prise a le plan de ce qui vient après elle
+(sa *suite*) : une nouvelle prise du clip k enregistre les clips k+1 à la fin avec lesquels elle a été
+lancée. Le plan d'une brindille, c'est la partie figée de chacune de ses prises, puis la suite de sa
+dernière prise. Rien n'est recopié : une bifurcation référence les prises qu'elle continue. Dès qu'une
+branche a une prise, les réglages du plan qui rendraient ses prises incohérentes (mode, vidéo de départ
+ou éditée, contexte) sont figés ; les options d'assemblage (vidéo de départ dans la vidéo finale, son et
+consigne commune d'une édition) ne le sont pas.
 
 Trois colonnes : la liste des clips, l'éditeur du clip, et à droite ce que le clip peut utiliser
 (références avec leurs miniatures, subjects, répliques ou paroles, phrases types) et les contrôles.
-Les réglages du plan (mode, contexte, fondu, graine, chanson, déclaration des références) sont dans
+Les réglages du plan (mode, contexte, fondu, chanson, déclaration des références) sont dans
 **⚙ Réglages du plan**.
 
 - **@ et glisser-déposer** : dans les sections, `<Subject N>` s'affiche `@nom`. Taper `@` ouvre une
@@ -282,7 +310,7 @@ Les réglages du plan (mode, contexte, fondu, graine, chanson, déclaration des 
   H3 reçoit toujours `<Subject N>` : les numéros sont recalculés à l'écriture du prompt.
 - **subject_definitions** : un bloc par subject (nom de travail, références, définition) ;
   ↑ ↓ renumérotent partout ; renommer ne change pas le prompt (le nom est gardé dans `_subjects`,
-  ignoré par les nœuds et par la validité des prises).
+  ignoré par les nœuds).
 - **retention_analysis** : une ligne par subject (mode en liste), ajoutée ou retirée avec lui.
   Une section d'une autre forme s'édite en texte.
 - **summary** : le préfixe `[reference generation]` est mis tout seul.
@@ -295,7 +323,7 @@ Les réglages du plan (mode, contexte, fondu, graine, chanson, déclaration des 
 - **Passage de la chanson** (clip musical) : « ▶ tout le passage » (chevauchement compris) et
   « ▶ partie nouvelle », lus dans la chanson de la branche ; barres du passage dans la chanson et
   du chevauchement. Les paroles du clip sont dessous.
-- Les miniatures, voix (▶) et chanson viennent de la branche de la sélection (sinon la première).
+- Les miniatures, voix (▶) et chanson viennent de la branche du plan affiché.
 - Afficher un clip ne modifie jamais son prompt : il n'est réécrit que pour la section modifiée.
 
 Partout dans l'application, une liste déroulante d'au moins 8 éléments (LoRA, modèles…) s'ouvre
@@ -311,65 +339,100 @@ existants. Enregistrés dans `defaults.json`, à côté de `config.json`. **LoRA
   l'autre. Les LoRA et modèles utilisés sont notés dans chaque prise (visibles dans l'aperçu
   agrandi) ; les changer ne supprime pas les prises. Les listes de modèles viennent de ComfyUI quand il
   répond ; sinon les noms se saisissent à la main.
-- **Enregistrer** (Ctrl+S) : enregistre le plan dans le projet.
+- **Enregistrer** (Ctrl+S, écran de plan) : enregistre le plan affiché (plan maître ou plan de la sélection).
+- **↶ ↷** (Ctrl+Z / Ctrl+Y) : annuler et rétablir les modifications du plan, sur l'écran de plan et dans le
+  panneau de lancement seulement (sur l'écran des prises, ils ne font rien).
 
 ## Branches
 
-La taille d'image, les références (image et voix de chaque nom du plan) et, pour un clip
-musical, la chanson ne sont plus des réglages du projet : elles appartiennent à des **branches**.
-La taille se choisit dans l'écran « références… » de la branche : préréglages par format (16:9,
+Le projet dit ce qu'est la vidéo (mode, vidéo, chanson, contexte : **Réglages du projet**). Les
+**branches** en essaient des variations : taille d'image, segment de la vidéo, références (image et voix
+de chaque nom du plan), LoRA, upscale, prompts. Elles se règlent dans la fenêtre **réglages…** de la
+branche (un bouton dans son en-tête). La taille : préréglages par format (16:9,
 9:16, 4:3, 3:4, 3:2, 2:3) et mégapixels (0,2 à 2 ; 0,5 MP par défaut, soit 960 × 544 en 16:9 ; mêmes tailles que ComfyUI,
 1 MP = 1024 × 1024 pixels), ou taille libre en multiples
 de 32. Une branche à 0,2 MP permet de tester vite un prompt avant une branche à 1 MP (une même
 graine ne donne pas la même vidéo à une autre taille). Le même écran règle la **taille des
 références** (`max` par défaut, ou `match`), passée à l'encodeur de références H3 : ce n'est plus un
-champ du plan (`ref_image_size` est retiré du plan à l'import ou à l'enregistrement ; dans un projet
-existant, sa valeur devient celle des branches déjà créées). Une branche part du
-clip 1 et garde son jeu de références jusqu'au bout ; plusieurs branches permettent d'essayer
-d'autres images, voix ou versions du morceau en parallèle.
+champ du plan (`ref_image_size` est retiré du plan à l'import ou à l'enregistrement). Une branche garde
+son jeu de références jusqu'au bout ; plusieurs branches permettent d'essayer d'autres images, voix ou
+tailles en parallèle. **Dès qu'une branche a une prise, sa taille, le segment de sa vidéo et les fichiers
+des références que ses prises utilisent sont figés** : grisés dans les fenêtres, avec une infobulle qui
+dit pourquoi (une référence pas encore utilisée peut encore recevoir un fichier). Pour d'autres valeurs,
+dupliquer la branche. LoRA, upscale et taille des références restent toujours modifiables.
 
-- Onglet Prises vide : **+ nouvelle branche**. La première ouvre l'écran de ses références ; les
-  suivantes copient celles de la dernière branche créée (bouton « références… » pour les changer).
+- Un nouveau projet a « Branche 1 », avec un plan maître vide. **+ nouvelle branche** ouvre une
+  fenêtre :
+  - **Vide** : références, réglages et plan maître de la dernière branche créée ;
+  - **À partir d'un fichier de plan…** : son plan maître est le fichier ;
+  - **Dupliquer une branche** : ses réglages et son plan maître, **sans clips** (tout reste modifiable
+    jusqu'à sa première prise), ou **avec les clips 1 à k de la sélection** : ils sont repris par
+    référence (aucun fichier copié), estompés dans la nouvelle bande (« ⇡ Branche 1 »), et on génère à
+    partir du clip k+1. Son plan maître est le plan de cette sélection. La fenêtre liste les références
+    avec le premier clip qui les utilise : celles des clips repris restent figées (« Marie dès le clip 6 :
+    reprendre au plus les clips 1 à 5 pour la garder libre »). Une branche dont des prises sont reprises
+    par une autre ne se supprime pas avant elle.
   Créer une branche ne lance aucune génération.
 - Chaque branche est une bande horizontale (en arbre ou en colonnes), avec à gauche sa couleur,
   son nom (double-clic ou « renommer »), ses images, ses voix, sa chanson (survol d'une miniature :
   l'image en grand).
-- **supprimer** (en-tête de la branche, impossible pendant une génération de la branche) : les prises
-  de la branche listées par un point de sauvegarde restent sur le disque, masquées (restaurer le point
-  fait revenir la branche) ; les autres sont supprimées définitivement, après une alerte qui les
-  compte. Ses vidéos assemblées quittent le volet ▶ Vidéos (marquées « branche retirée » dans
-  « Vidéos assemblées… ») et reviennent avec la branche ; elles ne sont supprimées que lorsque plus
-  aucun point de sauvegarde ne contient la branche. Un numéro de branche ne resert jamais.
-- Quand la limite de points automatiques en efface un, les prises masquées qu'aucun point ne liste
-  plus sont supprimées (elles ne pouvaient plus revenir).
-- **générer** : le clip 1 d'une branche, et le premier clip de chaque nouvelle scène (✂), quand
-  la branche n'en a pas encore.
-- **Case « + clip k à la suite »** : à droite de chaque prise qui n'a pas encore de suite (même une
-  prise encore en file), une case en pointillés lance le clip suivant à partir de cette prise. Ses
-  réglages (▾ réglée : LoRA, upscale, graine) sont ceux du clip à créer. Pas de case quand le clip
-  suivant commence une nouvelle scène (✂), sur le dernier clip, ni après une prise invalidée.
-- **↻** (flèche orange sur une prise) : une nouvelle prise du même clip, à partir de la même prise du
-  clip précédent (pas sur le clip 1 : une autre version du clip 1 = une nouvelle branche).
-- **▶▶ (en-tête de branche)** : comble tous les trous de la branche, dans l'ordre du plan : les clips
-  sans prise utilisable, les prises invalidées, et tout clip qui continue un clip refait. Il part de
-  la sélection quand elle est dans cette branche (sinon des prises utilisables les plus récentes).
-  Son libellé est toujours « ▶▶ compléter » ; son infobulle dit ce qu'il fera (« tout générer »,
-  « générer les clips 5 à 16 », « branche complète ») ; un récapitulatif (clips, raison, durée estimée) demande confirmation, avec la case
-  « assembler la branche à la fin » (cochée par défaut) : l'assemblage des clips 1 à la fin part
-  tout seul après les générations. Graines
-  aléatoires, réglages de la branche et des clips. Refusé tant que des générations de la branche
+- **supprimer** (en-tête de la branche, impossible pendant une génération de la branche) : met ses prises,
+  ses plans et ses vidéos assemblées à la corbeille, après une alerte qui les compte. Les prises qu'une
+  autre branche reprend restent (montrées dans cette branche). Un numéro de branche ne resert jamais.
+- **🗑** (au survol d'une prise) : la supprime avec toutes les prises faites après elle, dans toutes les
+  branches ; la confirmation les liste par clip et dit ce que garde une branche qui la reprenait. Refusé
+  tant qu'une génération en file ou en cours a besoin de l'une d'elles.
+- **Corbeille…** (barre du projet) : ce qui a été supprimé y attend. **Restaurer** remet un élément en
+  entier (une prise avec sa suite, une branche avec ses prises, son plan maître et ses vidéos, les clips
+  que d'autres branches reprenaient) ; **Effacer** ou **Vider la corbeille** supprime les fichiers pour de
+  bon.
+- **générer** : le clip 1 d'une branche, à partir de son plan maître.
+- **+ clip suivant…** (sur une prise qui n'a pas encore de suite, même une prise encore en file, et
+  dans la case en pointillés à sa droite, toujours présente, même après la fin du plan) : ouvre le
+  panneau de lancement du clip suivant après cette prise, pré-rempli avec le clip suivant du plan de la
+  sélection, sinon du plan maître, sinon une copie du clip précédent (prompt, durée, références,
+  répliques), qui le continue (↪).
+- **↻ nouvelle prise…** (flèche orange sur une prise, aussi sur une génération encore en file ou en
+  cours) : ouvre le panneau de lancement d'une nouvelle
+  prise du même clip, après la même prise du clip précédent (sur le clip 1 : à partir du plan maître).
+  C'est une bifurcation : une nouvelle brindille, avec son propre plan.
+- **▶▶ (en-tête de branche)** : complète la brindille sélectionnée (ou, quand la sélection est dans
+  une autre branche, la dernière brindille de celle-ci) jusqu'à la fin de son plan, dans l'ordre. Son
+  infobulle dit ce qu'il fera (« générer les clips 5 à 16 », « branche complète ») ; un récapitulatif
+  (clips, durée estimée) demande confirmation, avec la case « assembler à la fin » (cochée par
+  défaut). Graines aléatoires, réglages de la branche. Refusé tant que des générations de la branche
   sont déjà en file.
 - **▶ assembler 1–k** existe aussi au survol d'une prise encore en file : l'assemblage est planifié
   et partira dès que cette génération (et celles dont elle dépend) seront finies.
-- La sélection (clic sur une prise, ✓) sert à l'assemblage (scènes qui précèdent un plan coupé ✂) et
-  au bouton ▶▶. Choisir une prise d'une autre branche y fait basculer la sélection
-  (`selection.json` note la branche).
-- Changer les références ou la chanson d'une branche invalide seulement ses prises (mêmes règles
-  que ci-dessous).
+- **La sélection** (clic sur une prise) est une brindille : la prise cliquée et celles qu'elle
+  continue, jusqu'au clip 1. Les prises d'après qui la continuent toujours restent sélectionnées. La
+  barre de sélection au-dessus du graphe la nomme et ouvre son plan. Choisir une prise d'une autre
+  branche y fait basculer la sélection. Une génération encore en file ou en cours se choisit aussi : la
+  sélection passe par la prise qu'elle fera.
+- **Les nouvelles scènes (✂) suivent la sélection.** Une prise qui commence une nouvelle scène ne dépend
+  pas des images d'avant : elle se rattache à la prise sélectionnée pour le clip précédent si elle y
+  commence au même moment de la chanson (même durée avant elle ; en mode libre, toujours), et sa suite
+  la suit. Exemple : 3a ✂ faite après 2a (5 s) ; choisir 2b (5 s aussi) : 3a passe sous 2b, et
+  1 → 2b → 3a est une brindille, sans rien regénérer.
 
-Les projets des versions précédentes sont convertis à l'ouverture : leurs prises forment
-« Branche 1 », avec la taille, les références et la chanson qu'ils avaient.
+### Panneau de lancement
 
+**↻ nouvelle prise…** et **+ clip suivant…** ouvrent le même panneau, par-dessus l'écran des prises :
+
+- **Partir du plan de** : quand plusieurs brindilles passent par cette prise (par exemple 4a et 4b
+  après 3a), choisir de quel plan part la nouvelle prise ; le survol d'une brindille la surligne dans
+  le graphe ; « plan entier ▸ » l'affiche.
+- **Graine** : une nouvelle prise d'un clip part de la graine de la prise qu'elle refait (🎲 pour une
+  graine au hasard ; même graine et même prompt : Encore prévient que la prise sera identique) ; le
+  clip suivant reçoit une graine au hasard.
+- **LoRA et upscale** de cette prise (pré-remplis avec ceux de la prise refaite, ou ceux de la branche
+  pour le clip suivant).
+- **Le clip**, dans l'éditeur de plan : modifier son prompt avant de lancer. Seuls ce clip et les
+  suivants peuvent changer ; la modification est gardée dans le plan de la nouvelle prise.
+- **Générer** l'ajoute à la file.
+
+Taper une autre graine dans le champ graine d'une prise + Entrée lance tout de suite une nouvelle prise
+de ce clip, avec cette graine et les mêmes réglages.
 
 ### Replier une branche
 
@@ -385,29 +448,27 @@ n'a jamais la sélection : replier la branche de la sélection la fait passer à
 ## Partir d'une vidéo existante
 
 Un plan peut partir d'un segment d'une vidéo que vous avez déjà : le clip 1 la continue (même plan :
-ses 1,6 dernières secondes sont reprises, image et, en mode libre, son) ou coupe après elle. Tout se
-règle au même endroit, **⚙ Réglages du plan > Vidéo** :
+ses 1,6 dernières secondes sont reprises, image et, en mode libre, son) ou coupe après elle.
 
-1. Choisir « Continuer une vidéo (vidéo de départ) ».
-2. Choisir la vidéo dans la liste (les vidéos importées du projet) ou en **Importer…** une d'ici.
-   Une seule vidéo pour le projet : toutes les branches l'utilisent.
-3. Choisir le segment dans le lecteur : « Segment de … à … », ou « ⇤ ici » / « ici ⇥ » à la position
+1. Dans **Réglages du projet** : vidéo « Continuer une vidéo » et son fichier (les vidéos importées du
+   projet, ou **Importer…**). Une seule vidéo pour le projet : toutes les branches l'utilisent.
+2. Dans **⚙ Réglages du plan > Vidéo** du plan maître d'une branche, choisir le segment dans le lecteur : « Segment de … à … », ou « ⇤ ici » / « ici ⇥ » à la position
    du lecteur ; « ▶ lire le segment » le lit. Le segment est aimanté sur la grille des images : sa
    fin est gardée, son début avance de moins de 0,7 s (la ligne en dessous dit ce qui est utilisé).
-4. « le clip 1 continue la vidéo » ou « coupe après la vidéo », et si **le segment ouvre la vidéo
+3. « le clip 1 continue la vidéo » ou « coupe après la vidéo », et si **le segment ouvre la vidéo
    finale** (sinon il ne sert que de tremplin : la vidéo commence avec le clip 1).
-5. Clip musical, segment dans la vidéo finale : **la chanson commence avec la vidéo** (par défaut ;
+4. Clip musical, segment dans la vidéo finale : **la chanson commence avec la vidéo** (par défaut ;
    la vidéo perd son propre son et le clip 1 vient plus loin dans la chanson) ou **la vidéo garde son
    propre son et la chanson commence avec le clip 1**.
 
-Le segment apparaît sur la frise de l'onglet Plan avant le clip 1 (hachuré quand il n'est pas dans la
-vidéo finale). Quand il ouvre la vidéo finale, l'onglet Prises a une colonne **Vidéo de départ**
-avant le clip 1 : le segment, dans chaque branche, relié aux prises du clip 1 qui le continuent
-(survol : il se lit ; clic : ses réglages). Ce n'est pas une prise : il n'est ni généré ni choisi. La
-vidéo est lue à 24 images/s, agrandie pour couvrir la taille d'image de la branche et rognée au
-centre. Une autre vidéo ou un autre segment invalide les prises du clip 1 et celles qui les
-continuent (Encore demande confirmation quand on change de vidéo ; remettre l'ancienne valeur les rend
-de nouveau valides). Mettre ou non le segment dans la vidéo finale ne change rien en mode libre (en
+Le segment apparaît sur la frise de l'écran de plan avant le clip 1 (hachuré quand il n'est pas dans la
+vidéo finale). Quand il ouvre la vidéo finale, l'écran des prises a une colonne **Vidéo de départ**
+avant le clip 1 : le segment de chaque branche, relié aux prises du clip 1 qui le continuent
+(survol : il se lit ; clic : ses réglages, sur l'écran de plan). Ce n'est pas une prise : il n'est ni
+généré ni choisi. La vidéo est lue à 24 images/s, agrandie pour couvrir la taille d'image de la branche
+et rognée au centre. Le fichier ne se change que tant que le projet n'a aucune prise ; le segment d'une
+branche, tant qu'elle n'en a aucune.
+Mettre ou non le segment dans la vidéo finale ne change rien en mode libre (en
 clip musical, cela déplace la chanson sous les clips).
 
 ## Éditer une vidéo existante
@@ -415,10 +476,10 @@ clip musical, cela déplace la chanson sous les clips).
 Un plan en mode libre peut éditer un segment d'une vidéo que vous avez : changer son style, remplacer
 un personnage par une image de référence, etc. La frise du plan est le segment ; chaque clip édite son
 propre morceau, donné à H3 comme `<Video 1>` avec son son (les voix du clip viennent après, Encore les
-numérote). Dans **⚙ Réglages du plan > Vidéo** :
+numérote). Dans **Réglages du projet**, choisir la vidéo « Éditer une vidéo » et son fichier ; puis dans
+**⚙ Réglages du plan > Vidéo** du plan maître d'une branche :
 
-1. Choisir « Éditer une vidéo », puis la vidéo (ou en **Importer…** une) et le segment, comme pour une
-   vidéo de départ. Les branches doivent avoir les proportions de la vidéo, sinon son image est
+1. Choisir le segment, comme pour une vidéo de départ. Les branches doivent avoir les proportions de la vidéo, sinon son image est
    recadrée : Encore le signale et **leur donne les proportions de la vidéo** à la demande (à peu près
    le même nombre de pixels).
 2. Le son de la vidéo finale : **le son d'origine du segment** (par défaut) ou **le son fait par H3**
@@ -442,9 +503,9 @@ clip : on les ajoute avec « + clip » après le dernier (pas de `<Video 1>` dan
 sur les plans » ne remplace que les clips édités et garde ceux d'après. Avec le son d'origine, la vidéo
 finale le garde sur la partie éditée seulement.
 
-Un clip qui édite une vidéo dure de 2 à 15 s. Dans l'onglet Prises, la carte vide d'un clip montre,
-derrière le « + », la partie de la vidéo qu'il édite (survol : elle se lit). Une autre vidéo ou un
-autre segment rend toutes les prises périmées. Une vidéo de départ et une vidéo éditée ne se combinent
+Un clip qui édite une vidéo dure de 2 à 15 s. Sur l'écran des prises, la carte vide d'un clip montre,
+derrière le « + », la partie de la vidéo qu'il édite (survol : elle se lit). Le fichier se fige avec la
+première prise du projet, le segment d'une branche avec sa première prise. Une vidéo de départ et une vidéo éditée ne se combinent
 pas dans un même plan.
 
 ## File des générations (indicateur à droite de la barre du haut)
@@ -453,14 +514,14 @@ Encore garde sa propre file, commune à tous les projets, et n'envoie à ComfyUI
 fois. Chaque génération ou assemblage est figé au moment du clic (plan, réglages, références, graine,
 upscale) et envoyé quand vient son tour. La file survit à un redémarrage d'Encore.
 
-- Groupes : un travail et ceux qui le continuent (case « à la suite » ou ↻ lancés sur un travail
+- Groupes : un travail et ceux qui le continuent (« + clip suivant… » ou ↻ lancés sur un travail
   en attente). Leur ordre est fixe ; on déplace le groupe entier (glisser ≡, ou ⤒ ↑ ↓ ⤓).
 - **Lots** : tout ce qu'un ▶▶ de branche lance (générations et assemblage final) forme un seul bloc,
   « ▶▶ Branche 1 : clips 3 à 16 + assemblage ». On le déplace, le suspend ou l'annule en entier ;
   au-delà de 5 travaux, la liste se replie. Une génération lancée à la suite d'un travail du lot le
   rejoint ; une autre génération passe après le lot (on peut la remonter).
 - **Assemblage planifié** : il attend que toutes les générations dont il a besoin soient finies, et
-  prend leurs prises à ce moment-là (le point de sauvegarde est fait au départ de l'assemblage).
+  prend leurs prises à ce moment-là.
   Si une génération échoue, seuls les travaux qui en dépendent s'arrêtent (ses suites, et
   l'assemblage : « le clip 6 dont il dépend a échoué ») ; les clips d'une autre scène continuent.
   Relancer ▶▶ ne refait que les trous, assemblage compris.
@@ -484,7 +545,8 @@ upscale) et envoyé quand vient son tour. La file survit à un redémarrage d'En
 
 ## Upscale latent (optionnel, par branche)
 
-Bouton **upscale…** de la branche (« ⇧ upscale… » quand il est actif) : première passe à une taille
+Fenêtre **réglages…** de la branche, « modifier… » à côté de l'upscale (⇧ sur le bouton quand il est
+actif) : première passe à une taille
 réduite (en mégapixels, mêmes proportions que la branche), upscale du latent, seconde passe à la
 taille de la branche. Désactivé par défaut.
 
@@ -496,36 +558,27 @@ taille de la branche. Désactivé par défaut.
   l'échelle ; sampler et LoRA de la passe 2 réglables à part (par défaut ceux des réglages).
 - Le raccord avec le clip précédent et la chanson sont remis tels quels avant la passe 2 (nœuds
   Separate/Concat AV Latent, Latent Cut, Replace Video Latent Frames de ComfyUI ; plugin inchangé).
-- Changer ces réglages n'invalide aucune prise ; les prises faites avec portent la marque ⇧ (détail
+- Changer ces réglages ne modifie aucune prise ; les prises faites avec portent la marque ⇧ (détail
   au survol). Une prise seule peut utiliser d'autres réglages, ou aucun (voir plus bas).
 - Temps restant estimé à part pour les générations avec upscale.
 
-## LoRA et upscale par branche, par clip, par prise
+## LoRA et upscale par branche et par prise
 
 La pile de LoRA des Réglages du projet s'applique toujours. On peut ajouter des LoRA « en plus » :
 
-- **Branche** : bouton **LoRA…** de l'en-tête de branche. Ajoutés à toutes les prises de la branche.
-  Le bouton **Upscale…** de la branche porte les réglages d'upscale de ses prises.
-- **Clip** : bouton ⚙ de l'en-tête de colonne (onglet Prises), valable dans toutes les branches :
-  LoRA du clip et case « sans les LoRA de branche ». Gardé par Encore sous le nom du clip : survit au
-  réimport du plan. Le bouton affiche L, L×2. Un clip n'a pas de réglages d'upscale à lui (depuis
-  0.28 : le choix « avec / sans upscale » des anciens projets est ignoré).
-- **Prise** : la flèche **▾** à côté de ↻, et « ▾ réglée » sur les cases « générer » et « à la
-  suite », ouvre « prise réglée » : la liste des LoRA, l'upscale et la graine, pour cette prise
-  seulement. La ligne upscale est repliée et dit « comme la branche « X » » ou « modifié pour cette
-  prise » ; **modifier…** déplie le formulaire complet (activé ou non, modèle, taille de départ,
-  passes…), parti des réglages de la branche ; **réinitialiser aux paramètres de la branche** y
-  revient. Depuis ↻ ▾ d'une prise, la fenêtre est pré-remplie avec les LoRA et l'upscale de cette
-  prise ; ailleurs, avec ceux de la branche et du clip.
+- **Branche** : dans sa fenêtre **réglages…** (⇧ et L sur le bouton quand ils sont actifs). Ajoutés à
+  toutes les prises de la branche ; « modifier… » ouvre les réglages d'upscale de ses prises.
+- **Prise** : dans le panneau de lancement (↻ nouvelle prise…, + clip suivant…) : la liste des LoRA et
+  l'upscale, pour cette prise seulement. La ligne upscale est repliée et dit « comme la branche « X » »
+  ou « modifié pour cette prise » ; **modifier…** déplie le formulaire complet (activé ou non, modèle,
+  taille de départ, passes…), parti des réglages de la branche ; **réinitialiser aux paramètres de la
+  branche** y revient. Depuis ↻, le panneau est pré-rempli avec les LoRA et l'upscale de cette prise ;
+  pour le clip suivant, avec ceux de la branche.
 
-Règles : branche et clip s'additionnent ; pour un même fichier, la force du clip l'emporte.
-La liste de la fenêtre ▾ remplace branche + clip pour la prise. Upscale : les réglages de la prise
-si elle les a changés, sinon ceux de la branche. Un clic simple utilise branche + clip (le survol du
-bouton dit ce qui sera utilisé). Une suite n'hérite pas des LoRA du clip précédent. Ces LoRA
-s'appliquent aussi à la passe 2 de l'upscale. Rien de tout cela n'invalide de prise : chaque vignette
-porte ses badges (L, L×2 : LoRA en plus, ⇧ : upscale ; détail au survol), comme la file et les infos
-de la vidéo. « ⟲ refaire » refait une prise avec les mêmes LoRA et le même upscale qu'elle. Le plugin
-n'est pas modifié : Encore ajoute les chargeurs de LoRA dans le workflow qu'il envoie.
+Une suite n'hérite pas des LoRA du clip précédent. Ces LoRA s'appliquent aussi à la passe 2 de
+l'upscale. Chaque vignette porte ses badges (L, L×2 : LoRA en plus, ⇧ : upscale ; détail au survol),
+comme la file et les infos de la vidéo. Le plugin n'est pas modifié : Encore ajoute les chargeurs de
+LoRA dans le workflow qu'il envoie.
 
 La fenêtre de plan **≡** (sur une prise, une génération en cours, un emplacement vide ou un en-tête
 de colonne) finit par un bloc **Génération** : modèles, LoRA, réglages d'upscale (et d'où ils
@@ -535,15 +588,13 @@ seraient utilisés en lançant maintenant.
 ## Assemblage
 
 Au survol, chaque prise montre un bouton **▶ assembler 1–k** : il ajoute à la file l'assemblage des clips 1 à k
-le long de cette chaîne (scènes précédentes, après une coupe : prises de la sélection si elle est
-dans la même branche). La sélection ne change pas. Si un clip de la chaîne n'a pas de
-prise utilisable, le bouton devient ⚠ (voir plus bas). Encore envoie ces prises à ComfyUI et lance le nœud d'assemblage du plugin
+le long de cette brindille (la prise et celles qu'elle continue). La sélection ne change pas. Encore envoie ces prises à ComfyUI et lance le nœud d'assemblage du plugin
 (même résultat que dans ComfyUI) : chanson de la branche pour un clip musical, son généré par les
 clips en mode libre, taille de la branche.
 
 - La vidéo est copiée dans `exports\` : `projet_branche_AAAA-MM-JJ_HHhMM.mp4`, avec une fiche
   (branche, prises, clips couverts).
-- Elle apparaît dans le volet « ▶ Vidéos » à droite de l'onglet Prises, sous le nom de sa branche
+- Elle apparaît dans le volet « ▶ Vidéos » à droite de l'écran des prises, sous le nom de sa branche
   (survol : lecture et prises sources surlignées ; clic : en grand ; « ⌖ prises » : centrer la vue).
 - **Vidéos assemblées…** (barre du haut) les liste toutes, avec un lecteur.
 - À côté de la vidéo, `<nom>.infos.md` (résumé lisible : tableau des clips avec début/fin dans la
@@ -553,61 +604,23 @@ clips en mode libre, taille de la branche.
   couleurs d'Encore (résumé, tableau des clips avec leur durée, une carte par clip avec la pastille
   de sa branche, prompts), avec des liens vers le .md et le .json. Les vidéos
   assemblées avant la v0.11 n'en ont pas.
-- Chaque assemblage crée un point de sauvegarde automatique dont la sélection est la chaîne
-  assemblée : « restaurer l'état de cette vidéo » y revient.
 - Chaque assemblage a sa propre copie de travail dans ComfyUI (purgée à la fin) : on peut en mettre
   plusieurs en file, même pendant des générations ; ComfyUI les traite dans l'ordre. Une copie de
   la vidéo reste aussi dans `ComfyUI\output\h3_clip_plan\h3studio_…\`.
 
-### Assembler des prises invalidées
-
-Sur une prise invalidée (ou une chaîne qui en contient une), le bouton devient **⚠ ▶ assembler 1–k** :
-il assemble les prises **réellement faites**, en suivant les vrais parents de la prise (avant une
-coupe : la sélection si elle est utilisable, sinon la dernière prise de la branche). Une confirmation
-liste les prises invalidées et la raison. Encore envoie à ComfyUI une copie de travail du plan
-reconstituée à partir des prises (chaque clip avec la longueur, l'enchaînement et le prompt avec
-lesquels il a été fait), que le plugin accepte ; votre plan et vos prises ne changent pas.
-
-- Refusé si les prises n'ont pas été faites à la même taille d'image.
-- Avertissements : une suite dont la prise du clip précédent n'existe plus (saut au raccord) ; pour un
-  clip musical, la longueur des clips a changé depuis une prise (son passage de la chanson est décalé,
-  le chant ne sera pas synchrone).
-- La fiche infos a une section « Prises invalidées », les prises sont marquées ⚠ dans son tableau, et
-  la file affiche ⚠ à côté d'un tel assemblage.
-- ▶▶ ne change pas : il ne remplit qu'avec des prises valides.
-
 ### Plan d'un clip, plan d'une prise
 
-- **≡** devant le nom d'un clip (en-tête de colonne de l'onglet Prises) : le clip tel qu'il est dans
-  le plan, en lecture seule (longueur, enchaînement, place dans la vidéo, références avec leurs images
+- **≡** devant le nom d'un clip (en-tête de colonne) : le clip tel qu'il est dans le plan de la
+  sélection, en lecture seule (longueur, enchaînement, place dans la vidéo, références avec leurs images
   dans la branche affichée, paroles ou répliques, le prompt par section).
-- **≡** sur une case « générer » ou « à la suite » (au survol) : le plan actuel du clip, avec les images
-  de cette branche — pour relire le prompt avant de lancer.
-- **≡** sur une génération encore en file ou en cours (au survol) : le plan avec lequel elle a été
-  lancée, comparé au plan actuel (même fenêtre que pour une prise).
-- **≡** en haut à gauche d'une prise (au survol) : le plan avec lequel cette prise a été faite,
-  comparé au plan actuel : champs modifiés surlignés, prompt comparé mot à mot par section (retiré /
-  ajouté), images de référence d'alors et d'aujourd'hui (« autre fichier maintenant », « fichier
-  modifié depuis »), passage de la chanson décalé. Les prises faites depuis la v0.24 enregistrent leur
-  plan ; pour les plus anciennes, Encore le cherche par son empreinte dans le plan actuel, le plan
-  importé précédent, les points de sauvegarde et les fiches infos des vidéos assemblées (« plan
-  introuvable » sinon).
+- **≡** sur un emplacement vide (au survol) : le plan actuel du clip, avec les images de cette branche —
+  pour relire le prompt avant de lancer.
+- **≡** sur une génération encore en file ou en cours (au survol) : le plan avec lequel elle a été lancée.
+- **≡** en haut à gauche d'une prise (au survol) : la partie figée de cette prise — le clip exactement
+  tel qu'il a été généré (longueur, enchaînement, références avec leurs images, paroles ou répliques,
+  le prompt par section, la consigne commune d'une édition) — puis le bloc Génération.
 
-## Points de sauvegarde
-
-Bouton **Points de sauvegarde…** dans la barre du haut.
-
-- **créer un point** (nom facultatif) : enregistre le plan, les réglages, les branches (taille,
-  références, chanson), la sélection et la liste des prises présentes. Rien n'est copié : les
-  prises et les fichiers importés ne sont jamais modifiés ni supprimés.
-- **restaurer** : remet le projet à l'identique. Un point automatique de l'état actuel est créé
-  juste avant (« avant la restauration de … ») ; les prises faites depuis le point restauré sont
-  masquées, et réapparaissent si l'on restaure ce point automatique. Refusé tant que des
-  générations sont en attente.
-- Points automatiques : avant une restauration, avant l'import d'un plan et à chaque assemblage. Leur nombre par projet
-  se limite sur la page d'accueil (0 = sans limite) ; les points manuels ne sont jamais retirés.
-
-## Générer (onglet Prises)
+## Générer
 
 Chaque vignette de prise affiche la longueur de son clip (ex. « 8,7 s »).
 
@@ -628,31 +641,18 @@ Volet ▶ Vidéos (à droite, quand des vidéos sont assemblées, repliable avec
 branche, la plus récente en haut ; survol = lecture et prises sources surlignées, clic = lecteur,
 « ⌖ prises » centre la vue sur la dernière prise de la vidéo.
 
-Même fonctionnement que l'appli servie par le plugin : « + » ou « générer » sur un clip,
-↻ pour une autre version, la case « à la suite » pour le clip suivant à partir d'une prise, même
-en attente. Plusieurs générations peuvent être lancées : barre de progression sur celle en
+« générer » sur le clip 1, ↻ nouvelle prise… pour une autre version, + clip suivant… pour le clip
+suivant à partir d'une prise, même en attente. Plusieurs générations peuvent être lancées : barre de progression sur celle en
 cours, ⏳ sur celles en attente, bouton « annuler » sur chacune. Un clic choisit une prise : le
 choix est enregistré tout de suite dans le projet (`selection.json`).
 
-**Rien n'est jamais supprimé.** Une prise est **invalidée** (rayures jaunes, raison affichée) :
-
-- quand ce avec quoi elle a été faite ne correspond plus au projet : image ou voix d'une
-  référence qu'elle utilise, taille d'image, taille des références, ou son clip dans le plan (prompt, durée…). Remettre
-  l'ancienne valeur la rend de nouveau valide ;
-- quand une prise plus récente a été faite depuis avec une autre valeur : c'est alors définitif,
-  seul un point de sauvegarde permet de revenir en arrière ;
-- quand la prise qu'elle continue est invalidée.
-
-Changer une référence ou la taille demande confirmation en indiquant les prises qui seront
-invalidées ; c'est refusé tant que des générations sont en attente. Sur une prise invalidée,
-**⟲ refaire** fait une nouvelle prise de ce clip seulement, avec la même graine ; pour une
-suite, à partir de la prise choisie (ou en attente) du clip précédent. Pour refaire d'un coup tout
-ce qui en dépend : le bouton ▶▶ de la branche.
+**Une prise ne se périme jamais.** Elle garde le plan avec lequel elle a été faite : modifier le plan
+maître ou le plan d'une autre brindille ne change rien pour elle. Les réglages qui la rendraient
+incohérente sont figés (voir Branches). Les prises ne sont supprimées qu'avec leur branche.
 
 **Graines** : chaque prise affiche sa graine complète, sélectionnable. Une autre valeur + Entrée
 (ou ↵) lance une nouvelle prise de ce clip avec cette graine (même prise de départ pour une suite,
-même branche). Les boutons « générer » ont un champ graine facultatif (vide = graine du plan pour la
-première prise, sinon au hasard).
+même branche).
 
 **Temps restant** : les vignettes en cours affichent « reste ≈ … », celles en attente « début ≈ … ».
 Les estimations viennent du rythme des étapes de la génération en cours et des durées des
@@ -661,7 +661,8 @@ la taille et du nombre d'images) : elles s'affinent au fil des générations.
 
 Ce que Encore fait pour chaque génération :
 
-1. il enregistre le plan s'il a été modifié ;
+1. il compose le plan de la brindille (partie figée de chaque prise précédente, puis le clip et ceux
+   d'après) et enregistre le plan de la suite de la nouvelle prise ;
 2. il envoie à ComfyUI le plan (`input\h3studio\<projet>\<branche>\plan.json`), les fichiers des
    références (même dossier, nommés d'après leur contenu ; la chanson : `input\h3studio_<projet>_…`)
    et, pour une suite, la prise continuée avec celles sur lesquelles elle est construite ;
@@ -702,6 +703,8 @@ de ComfyUI fait de même.
 
 ## Développement
 
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) : quel fichier fait quoi, où intervenir pour une évolution,
+  quels tests lancer pour chaque fichier.
 - `encore/` : le serveur (bibliothèque standard de Python uniquement). `encore/locales/` : un fichier par
   langue.
 - `ui/` : les sources de la page (JavaScript, `editor_shell.html`). Après une modification, reconstruire

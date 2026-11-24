@@ -1,7 +1,7 @@
 """v0.31: resources — big files imported piece by piece (progress window, cancel leaves nothing), deletion refused
 while the project uses a file, after a warning when only a checkpoint or takes need it, directly otherwise."""
 import asyncio, json, os, shutil, subprocess, sys, time, urllib.request, urllib.error
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from common import ENCORE, CHROME, fixture  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from common import ENCORE, CHROME, fixture, plan_screen, takes_screen, launch_go  # noqa: E402
 from playwright.async_api import async_playwright
 S = "http://127.0.0.1:8242"; M = "http://127.0.0.1:8771"
 OK = []
@@ -46,7 +46,6 @@ try:
           and not [f for f in os.listdir(f"{root}/projets/rue/refs/images") if f.endswith(".part")], wrong)
 
     # ---- deletion
-    call(S, P + "/branches", {})
     call(S, P + "/branches/b1", {"refs": {"fillette": {"image": "refs/images/fillette.png"}, "rue": {"image": "refs/images/rue.png"}}}, "PUT")
     use = call(S, f"{P}/resources/usage?path=refs/images/fillette.png")
     check("usage: the picture of « fillette » in Branch 1", use["current"] and "fillette" in use["current"][0], use)
@@ -59,13 +58,10 @@ try:
     call(S, P + "/start-video", {"file": "refs/videos/big.mp4"}, "PUT")
     refused = call(S, f"{P}/resources?path=refs/videos/big.mp4", method="DELETE")
     check("deleting the start video: refused", refused.get("code") == "in_use" and "start video" in refused.get("error", ""), refused)
-    call(S, P + "/checkpoints", {"name": "with big"})
     call(S, P + "/start-video", {"file": None}, "PUT")
-    ask = call(S, f"{P}/resources?path=refs/videos/big.mp4", method="DELETE")
-    check("a file only a checkpoint needs: a warning first (nothing deleted)", ask.get("needs_confirm") and ask["checkpoints"] == ["with big"]
-          and os.path.exists(f"{VID}/big.mp4"), ask)
-    done = call(S, f"{P}/resources?path=refs/videos/big.mp4&confirm=1", method="DELETE")
-    check("…then deleted when confirmed", done.get("deleted") == "refs/videos/big.mp4" and not os.path.exists(f"{VID}/big.mp4"), done)
+    # 0.42: no checkpoints any more; no take was made with it: deleted at once
+    done = call(S, f"{P}/resources?path=refs/videos/big.mp4", method="DELETE")
+    check("a file nothing uses any more: deleted at once", done.get("deleted") == "refs/videos/big.mp4" and not os.path.exists(f"{VID}/big.mp4"), done)
     shutil.copy(fixture("v30_intro.mp4"), "/tmp/v31_small.mp4")
     call(S, f"{P}/resources?kind=videos&filename=small.mp4", raw=open("/tmp/v31_small.mp4", "rb").read(), method="POST")
     free = call(S, f"{P}/resources?path=refs/videos/small.mp4", method="DELETE")

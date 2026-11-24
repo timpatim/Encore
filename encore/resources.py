@@ -1,8 +1,8 @@
 """Encore - deleting an imported file (picture, voice, song, video) of a project.
 
 A file the project uses now (a branch's reference or song, the start video) cannot be deleted: it must be
-replaced first. A file only a checkpoint or takes need can be deleted after a warning: restoring that
-checkpoint, or redoing those takes with the same references, will then lack it. The copy sent to ComfyUI
+replaced first. A file only takes were made with can be deleted after a warning (a take keeps its latent and
+its preview; only its record names the file). The copy sent to ComfyUI
 (its input folder) goes too, when Encore knows where ComfyUI is installed.
 """
 from __future__ import annotations
@@ -11,7 +11,7 @@ import json
 from pathlib import Path
 
 from .i18n import t as _t
-from . import checkpoints, comfy_setup, previews, projects, takes
+from . import comfy_setup, plans, previews, projects, takes
 from .projects import StudioError
 
 INPUT_DIR = "h3studio"      # same as engine.INPUT_DIR
@@ -44,23 +44,13 @@ def _uses(meta, plan, rel):
 
 
 def usage(root, name, rel):
-    """{'current': [...], 'checkpoints': [names], 'takes': number} for an imported file."""
+    """{'current': [...], 'takes': number} for an imported file."""
     path = projects.project_dir(root, name)
     _resource(path, rel)
     meta = projects.read_meta(path)
-    try:
-        plan = json.loads((path / "plan.json").read_text(encoding="utf-8-sig"))
-    except (OSError, ValueError):
-        plan = {}
-    held = []
-    for file in sorted((path / "checkpoints").glob("cp_*.json")):
-        try:
-            cp = json.loads(file.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        state = cp.get("state") or {}
-        if _uses(state.get("meta") or {}, state.get("plan") or {}, rel):
-            held.append(cp.get("name") or cp.get("id"))
+    current = []
+    for plan in plans.load(path)["masters"].values():
+        current += [u for u in _uses(meta, plan or {}, rel) if u not in current]
     made = 0
     for folder in (path / "takes").glob("clip_*"):
         for record in folder.glob("*.json"):
@@ -70,7 +60,7 @@ def usage(root, name, rel):
                 continue
             if any(rel in (f or {}).values() for f in files.values()):
                 made += 1
-    return {"path": rel, "current": _uses(meta, plan, rel), "checkpoints": held, "takes": made}
+    return {"path": rel, "current": current, "takes": made}
 
 
 def delete(root, name, rel, confirm=False, comfy_dir=None):
@@ -80,7 +70,7 @@ def delete(root, name, rel, confirm=False, comfy_dir=None):
     use = usage(root, name, rel)
     if use["current"]:
         raise StudioError(_t("resources.in_use", file=file.name, v1="; ".join(use["current"])), code="in_use")
-    if (use["checkpoints"] or use["takes"]) and not confirm:
+    if use["takes"] and not confirm:
         return dict(use, needs_confirm=True)
     sha = takes.file_sha(file)
     file.unlink()

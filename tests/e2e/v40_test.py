@@ -3,7 +3,7 @@ length on the timeline, the sound of each take where it shows, the original soun
 still assembles when a take has no preview."""
 import json, os, shutil, subprocess, sys, time, urllib.request, urllib.error
 import numpy as np
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from common import ENCORE, fixture  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from common import ENCORE, fixture, plan_screen, takes_screen, launch_go  # noqa: E402
 sys.path.insert(0, ENCORE); from encore import plan_core  # noqa: E402
 S = "http://127.0.0.1:8250"; M = "http://127.0.0.1:8771"
 OK = []
@@ -27,6 +27,8 @@ def wait_last(P):
         if jobs and jobs[-1]["status"] in ("done", "error", "cancelled"): break
     return call(S, P + "/jobs")["jobs"][-1]
 def gen(P, body):
+    if body.get("clip", 1) > 1 and "after" not in body:      # 0.42: after the take chosen for the clip before
+        body = dict(body, after=call(S, P)["plan_takes"].get(str(body["clip"] - 1)))
     call(S, P + "/generate", body); return wait_last(P)
 def frames_of(path):
     out = subprocess.run(["ffprobe", "-v", "error", "-count_frames", "-select_streams", "v:0", "-show_entries", "stream=nb_read_frames",
@@ -58,7 +60,6 @@ try:
     call(S, P + "/import-plan?filename=rue.json", raw=open(fixture("rue_test_v1.plan.json"), "rb").read(), method="POST")
     for f in (fixture("fillette.png"), fixture("rue.png")):
         call(S, f"{P}/resources?kind=images&filename={os.path.basename(f)}", raw=open(f, "rb").read(), method="POST")
-    call(S, P + "/branches", {})
     call(S, P + "/branches/b1", {"refs": {"fillette": {"image": "refs/images/fillette.png"}, "rue": {"image": "refs/images/rue.png"}},
                                  "width": 1024, "height": 576}, "PUT")
     for k in (1, 2, 3):
@@ -100,7 +101,6 @@ try:
     for f in (fixture("fillette.png"), fixture("rue.png")):
         call(S, f"{P}/resources?kind=images&filename={os.path.basename(f)}", raw=open(f, "rb").read(), method="POST")
     call(S, f"{P}/resources?kind=videos&filename=source.mp4", raw=open(SRC, "rb").read(), method="POST")
-    call(S, P + "/branches", {})
     call(S, P + "/branches/b1", {"refs": {"fillette": {"image": "refs/images/fillette.png"}, "rue": {"image": "refs/images/rue.png"}},
                                  "width": 1024, "height": 576}, "PUT")
     raw = call(S, P)["plan"]

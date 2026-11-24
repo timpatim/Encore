@@ -3,7 +3,7 @@ the Plan tab, the pictures it names added to the clips) and clips after the segm
 (segment end on the timeline, 🎞 on the edited clips, no <Video 1> after the segment, no slice of the video for
 them, the original sound kept only over the edited part)."""
 import asyncio, json, os, shutil, subprocess, sys, time, urllib.request, urllib.error
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from common import ENCORE, CHROME, fixture  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from common import ENCORE, CHROME, fixture, plan_screen, takes_screen, launch_go  # noqa: E402
 from playwright.async_api import async_playwright
 S = "http://127.0.0.1:8247"; M = "http://127.0.0.1:8771"
 OK = []
@@ -21,6 +21,8 @@ def run_mock():
     try: call(M, "/test/run", {})
     except Exception: pass
 def gen(body):            # until the job is over: the mock runs what ComfyUI has received
+    if body.get("clip", 1) > 1 and "after" not in body:      # 0.42: after the take chosen for the clip before
+        body = dict(body, after=call(S, P)["plan_takes"].get(str(body["clip"] - 1)))
     out = call(S, P + "/generate", body)
     for _ in range(40):
         time.sleep(0.7); run_mock()
@@ -45,7 +47,6 @@ try:
     for f in (fixture("fillette.png"), fixture("rue.png")):
         call(S, f"{P}/resources?kind=images&filename={os.path.basename(f)}", raw=open(f, "rb").read(), method="POST")
     call(S, f"{P}/resources?kind=videos&filename=source.mp4", raw=open(SRC, "rb").read(), method="POST")
-    call(S, P + "/branches", {})
     call(S, P + "/branches/b1", {"refs": {"fillette": {"image": "refs/images/fillette.png"}, "rue": {"image": "refs/images/rue.png"}},
                                  "width": 1024, "height": 576}, "PUT")
     plan = call(S, P)["plan"]
@@ -61,6 +62,7 @@ try:
             page = await b.new_page(viewport={"width": 1600, "height": 950}); errs = []
             page.on("pageerror", lambda e: errs.append(str(e)))
             await page.goto(S + "/"); await page.evaluate("localStorage.setItem('h3studio.project','rue')"); await page.reload(); await page.wait_for_timeout(1500)
+            await plan_screen(page)
             await page.click("text=Plan settings"); await page.wait_for_timeout(800)
             box = page.locator(".start-video")
             check("settings: one line for the common instruction", await box.locator(".sv-instr").count() == 1)
@@ -75,6 +77,7 @@ try:
                   and all("{edit}" in c["prompt"] and "TODO" not in c["prompt"] for c in plan["clips"]), [[c["frames"], c["continue"]] for c in plan["clips"]])
             # the common instruction, from the settings line
             await page.locator(".start-video .sv-instr button").click(); await page.wait_for_timeout(600)
+            await plan_screen(page)
             check("the instruction entry opens in the Plan tab", await page.locator(".clipitem.instr.sel").count() == 1 and await page.locator("textarea.instr-text").count() == 1)
             check("its palette lists the plan's references (not the video)", "fillette" in await page.locator("#side").inner_text() and "source" not in await page.locator("#side").inner_text())
             ta = page.locator("textarea.instr-text")
@@ -90,12 +93,14 @@ try:
             errors = await page.evaluate("H3.validate(H3Editor.state.plan).filter((m) => m.level === 'error').map((m) => m.text)")
             check("the plan is valid (fillette added to the clips by the instruction)", not errors, errors)
             # a clip after the segment
+            await plan_screen(page)
             await page.locator(".clipitem").nth(3).click(); await page.wait_for_timeout(300)
             await page.click("#list >> text=+ clip"); await page.wait_for_timeout(600)
             plan = await page.evaluate("H3Editor.state.plan")
             last = plan["clips"][-1]
             check("a clip added after the segment continues the video, without <Video 1>", len(plan["clips"]) == 4 and last["continue"] and "<Video" not in last["prompt"], last)
             check("the timeline shows the end of the segment", await page.locator(".tl .segend").count() == 1)
+            await plan_screen(page)
             badges = await page.locator("#list .clipitem:not(.instr) .nm").all_inner_texts()
             check("🎞 on the 3 edited clips only", [t.startswith("🎞") for t in badges] == [True, True, True, False], badges)
             await page.click("text=Plan settings"); await page.wait_for_timeout(600)

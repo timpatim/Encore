@@ -161,11 +161,16 @@
         header.classList.add("studio-project-row");
         showThemeButton();
         $("viewTabs").before(h("span", { class: "studio-project-label" }, _t("studio.project"), h("b", { id: "studioProject", class: "studio-project" }, "")));
+        // the plan screen (plan of the selection, master plan of a branch): « ← Prises » and what it shows
+        $("viewTabs").after(h("span", { class: "studio-plan-head" },
+            h("button", { id: "studioBackBtn", class: "primary", onclick: () => closePlanScreen() }, _t("studio.back_to_takes")),
+            h("b", { id: "studioPlanTitle" }, ""),
+            h("button", { id: "studioImportBtn", onclick: importPlan, title: _t("studio.import_a_plan_title") }, _t("studio.import_a_plan")),
+            h("button", { id: "studioUsePlanBtn", onclick: () => useThisPlan(), title: _t("studio.use_this_plan_title") }, _t("studio.use_this_plan"))));
         const anchor = $("btnSave");
         const bar = h("span", { class: "studio-bar" },
-            h("button", { onclick: importPlan }, _t("studio.import_a_plan")),
             h("button", { onclick: openResources }, _t("studio.resources")),
-            h("button", { onclick: openCheckpoints }, _t("studio.checkpoints_2")),
+            h("button", { class: "studio-trash-btn", onclick: () => window.H3Trash.open() }, _t("trash.button")),
             h("button", { onclick: openExports }, _t("studio.assembled_videos")),
             h("button", { onclick: () => openSettings() }, _t("studio.project_settings")));
         anchor.before(bar);
@@ -188,10 +193,19 @@
 
     // the Plan tab shows the pictures, voices and song of a branch: the one of the current selection, else the first
     function mediaBranch() {
-        const id = window.H3Takes && window.H3Takes.activeBranch ? window.H3Takes.activeBranch() : null;
+        const id = P.mediaOverride || (P.editTarget && P.editTarget.branch) || (window.H3Takes && window.H3Takes.activeBranch ? window.H3Takes.activeBranch() : null);
         return P.branches.find((b) => b.id === id) || P.branches[0] || null;
     }
     const media = {
+        // 0.43: the mode, the video and its file, the song and the context are the project's (« Réglages du projet »);
+        // the plan settings keep the segment of the video, the branch's, fixed by its first take
+        studio: true,
+        openProjectSettings: () => openSettings(),
+        segmentFrozen: () => {
+            const id = (P.editTarget && P.editTarget.branch) || null;
+            if (P.editTarget && P.editTarget.leaf) return _t("branch.frozen_why", { name: (branchById(id) || {}).name || "?" });
+            return id && window.H3Takes && window.H3Takes.branchHasTakes(id) ? _t("branch.frozen_why", { name: (branchById(id) || {}).name || "?" }) : null;
+        },
         label: () => (mediaBranch() || {}).name || "?",
         image: (name) => { const r = ((mediaBranch() || {}).refs || {})[name]; return r && r.image ? fileUrl(r.image) : null; },
         voice: (name) => { const r = ((mediaBranch() || {}).refs || {})[name]; return r && r.voice ? fileUrl(r.voice) : null; },
@@ -239,41 +253,114 @@
     async function openProject(name) {
         const data = await api(`/api/projects/${encodeURIComponent(name)}`);
         P.name = data.name;
-        P.settings = data.settings;
-        P.branches = data.branches || [];
-        P.legacyRefSize = data.legacy_ref_image_size || "match";
-        P.clipDefaults = data.clip_defaults || {};
-        P.startVideoFile = data.start_video_file || null;
-        P.resources = data.resources;
-        ed().media = media;
-        ed().setPlan(data.plan, `${data.name} · plan.json`, null);
-        if (window.H3Takes) window.H3Takes.resetProject();
+        applyProject(data);
         $("studioProject").textContent = data.name;
         document.title = `${data.name} — Encore`;
         try { localStorage.setItem("h3studio.project", data.name); } catch (_) { /* ignore */ }
         closeHome();
+        ed().showView(true);
         if (data.validation.errors.length) toast(_t("studio.the_plan_has_error_s_see", { length: data.validation.errors.length }));
+    }
+    function applyProject(data) {
+        P.settings = data.settings;
+        P.branches = data.branches || [];
+        P.legacyRefSize = data.legacy_ref_image_size || "match";
+        P.startVideoFile = data.start_video_file || null;
+        P.segments = data.segments || {};
+        P.resources = data.resources;
+        P.twig = { plan: data.plan, locked: data.plan_locked || 0, branch: data.plan_branch, leaf: data.plan_leaf, takes: data.plan_takes || {} };
+        P.editTarget = { branch: P.twig.branch, leaf: P.twig.leaf };
+        ed().media = media;
+        ed().setPlan(data.plan, `${data.name}`, null, { locked: P.twig.locked, takes: P.twig.takes });
+        if (window.H3Takes) window.H3Takes.resetProject();
+    }
+
+    // ------------------------------------------------------------------ the plan screen (chantier A)
+    // The plan of the selected twig (its generated clips read-only, then what comes after) or the master plan of a
+    // branch. It replaces the Takes screen while it is open; « ← Prises » saves and goes back.
+    async function openPlanScreen(target) {
+        if (!P.name) return;
+        const t = target || { branch: P.twig.branch, leaf: P.twig.leaf };
+        let res;
+        try { res = await api(`/api/projects/${encodeURIComponent(P.name)}/plan?branch=${encodeURIComponent(t.branch || "")}&leaf=${encodeURIComponent(t.leaf || "")}`); }
+        catch (e) { alert(e.message); return; }
+        P.editTarget = { branch: res.branch, leaf: res.leaf || null };
+        const br = P.branches.find((b) => b.id === res.branch) || { name: res.branch };
+        const chain = (res.chain || []).map((id, k) => `${k + 1}:${id.slice(-4)}`).join(" → ");
+        const title = res.leaf ? _t("studio.plan_of_selection_title", { branch: br.name, chain }) : _t("studio.master_plan_title", { branch: br.name });
+        $("studioPlanTitle").textContent = title;
+        // « Importer un plan… »: the master plan of a branch that has no take yet
+        const imp = $("studioImportBtn"), taken = !!(window.H3Takes && window.H3Takes.branchHasTakes(res.branch));
+        imp.hidden = !!res.leaf;
+        $("studioUsePlanBtn").hidden = !res.leaf;
+        imp.disabled = taken;
+        imp.title = taken ? _t("studio.import_disabled_has_takes", { branch: br.name }) : _t("studio.import_a_plan_title");
+        ed().setPlan(res.plan, title, null, { locked: res.locked, takes: res.takes });
+        ed().onLockedRetake = (n, take) => { closePlanScreen().then(() => window.H3Takes && window.H3Takes.launchForkById(n, take)); };
+        ed().showView(false);
+    }
+    async function closePlanScreen() {
+        try { await saveIfDirty(); } catch (e) { alert(e.message); return; }
+        P.editTarget = { branch: P.twig.branch, leaf: P.twig.leaf };
+        ed().showView(true);
+        if (window.H3Takes) window.H3Takes.rescan();
+    }
+    async function saveIfDirty() {
+        if (ed().state.dirty) { await savePlan(ed().state.plan); ed().state.dirty = false; ed().render(); }
     }
 
     async function savePlan(planObject) {
         if (!P.name) throw new Error(_t("studio.no_project_open"));
-        const res = await put(`/api/projects/${encodeURIComponent(P.name)}/plan`, planObject);
-        if (res.plan.project !== planObject.project) planObject.project = res.plan.project;
+        const t = P.editTarget || { branch: P.twig.branch, leaf: P.twig.leaf };
+        const res = await put(`/api/projects/${encodeURIComponent(P.name)}/plan`, { branch: t.branch, leaf: t.leaf || null, plan: planObject });
+        if (!t.leaf) P.segments = { ...(P.segments || {}), [t.branch]: res.plan.start_video || res.plan.edit_video || null };
+        if (P.twig && t.branch === P.twig.branch && (t.leaf || null) === (P.twig.leaf || null)) {
+            P.twig = { plan: res.plan, locked: res.locked, branch: res.branch, leaf: res.leaf, takes: res.takes || {} };
+        }
         planObject.version = 3;
         const e = res.validation.errors.length;
-        toast(res.notes.length ? res.notes.join(" ; ") : e ? _t("studio.plan_saved_error_s_to_fix", { e }) : _t("studio.plan_saved_in_the_project"));
+        toast(e ? _t("studio.plan_saved_error_s_to_fix", { e }) : t.leaf ? _t("studio.plan_saved_twig") : _t("studio.plan_saved_master"));
     }
 
+    // « Utiliser ce plan… » (plan of a selection): it becomes the master plan of its branch, or of a new branch
+    function useThisPlan() {
+        const t = P.editTarget || {};
+        if (!t.leaf) return;
+        const br = P.branches.find((b) => b.id === t.branch) || { name: t.branch };
+        const nameIn = h("input", { placeholder: _t("branch.name_auto"), style: "flex:1" });
+        const run = async (target) => {
+            try {
+                await saveIfDirty();
+                const res = await post(`/api/projects/${encodeURIComponent(P.name)}/use-plan`, { branch: t.branch, leaf: t.leaf, target, name: nameIn.value.trim() || null });
+                dlg.close();
+                applyProject(res.project);
+                await openPlanScreen(t);
+                toast(target === "new" ? _t("studio.use_plan_done_new", { name: res.branch.name }) : _t("studio.use_plan_done_master", { name: br.name }));
+            } catch (e) { alert(e.message); }
+        };
+        const dlg = modal(_t("studio.use_this_plan"), h("div", { class: "use-plan" },
+            h("div", { class: "br-opt" }, h("button", { class: "primary use-master", onclick: () => run("master") }, _t("studio.use_plan_master", { name: br.name })),
+                h("p", { class: "hint" }, _t("studio.use_plan_master_hint"))),
+            h("div", { class: "br-opt" }, h("div", { class: "tk-inline" }, nameIn, h("button", { class: "primary use-new", onclick: () => run("new") }, _t("studio.use_plan_new"))),
+                h("p", { class: "hint" }, _t("studio.use_plan_new_hint", { name: br.name })))));
+    }
+
+    // a plan file becomes the master plan of the branch shown on the plan screen (a branch without takes)
     async function importPlan() {
         if (!P.name) return showHome();
+        const t = P.editTarget || {};
+        if (!t.branch || t.leaf) return;
+        const br = P.branches.find((b) => b.id === t.branch) || { name: t.branch };
         const [file] = await pickFiles(".json,application/json");
         if (!file) return;
-        if (ed().state.dirty && !await H3Dialog.confirm(_t("studio.the_plan_shown_has_unsaved_changes"))) return;
+        if (!await H3Dialog.confirm(_t("studio.replace_master_with", { branch: br.name, name: file.name }))) return;
         try {
-            const res = await api(`/api/projects/${encodeURIComponent(P.name)}/import-plan?filename=${encodeURIComponent(file.name)}`,
+            const res = await api(`/api/projects/${encodeURIComponent(P.name)}/import-plan?filename=${encodeURIComponent(file.name)}&branch=${encodeURIComponent(t.branch)}`,
                 { method: "POST", body: await file.arrayBuffer() });
-            ed().setPlan(res.plan, `${P.name} · plan.json`, null);
-            toast(_t("studio.copied_into_the_project_the_old", { name: file.name }));
+            ed().state.dirty = false;
+            applyProject(res.project);
+            await openPlanScreen({ branch: t.branch, leaf: null });
+            toast(_t("studio.imported_into_branch", { name: file.name }));
         } catch (e) { alert(e.message); }
     }
 
@@ -325,11 +412,6 @@
             h("section", {}, h("h3", {}, _t("studio.default_settings")),
                 h("div", { class: "tk-inline" }, h("button", { onclick: () => openSettings({ defaults: true }) }, _t("studio.default_settings_2")),
                     h("span", { class: "hint" }, _t("studio.models_lora_sampling_previews_and_first")))),
-            h("section", {}, h("h3", {}, _t("studio.checkpoints")),
-                h("div", { class: "tk-inline" }, h("label", {}, _t("studio.automatic_checkpoints_kept_per_project")),
-                    h("input", { type: "number", min: 0, value: P.config.checkpoint_limit || 0, style: "width:80px",
-                        onchange: (e) => saveCfg({ checkpoint_limit: Math.max(0, Math.trunc(Number(e.target.value) || 0)) }) }),
-                    h("span", { class: "hint" }, _t("studio.0_no_limit_manual_checkpoints_are")))),
             h("section", {}, h("h3", {}, _t("studio.new_project")),
                 h("div", { class: "tk-inline" }, nameIn, modeSel, h("button", { class: "primary", onclick: create }, _t("studio.create"))),
                 h("div", { class: "hint" }, _t("studio.letters_digits_and_it_is_also"))),
@@ -375,32 +457,7 @@
     }
     const joinPath = (base, name) => (/[\\/]$/.test(base) ? base + name : base + (base.includes("\\") ? "\\" : "/") + name);
 
-    // ------------------------------------------------------------------ checkpoints
-    async function saveIfDirty() {
-        if (ed().state.dirty) { await savePlan(ed().state.plan); ed().state.dirty = false; ed().render(); }
-    }
-    function applyProject(data) {
-        P.settings = data.settings;
-        P.branches = data.branches || [];
-        P.legacyRefSize = data.legacy_ref_image_size || "match";
-        P.clipDefaults = data.clip_defaults || {};
-        P.startVideoFile = data.start_video_file || null;
-        P.resources = data.resources;
-        ed().media = media;
-        ed().setPlan(data.plan, `${data.name} · plan.json`, null);
-        if (window.H3Takes) window.H3Takes.resetProject();
-    }
-    async function restoreCheckpoint(id, label) {
-        if (!await H3Dialog.confirm(_t("studio.restore_the_plan_settings_branches_and", { label }) +
-            _t("studio.a_checkpoint_of_the_current_state"))) return false;
-        try {
-            await saveIfDirty();
-            const res = await post(`/api/projects/${encodeURIComponent(P.name)}/checkpoints/${encodeURIComponent(id)}/restore`, {});
-            applyProject(res.project);
-            toast(_t("studio.state_restored_previous_state", { name: res.saved_before.name }));
-            return true;
-        } catch (e) { alert(e.message); return false; }
-    }
+    // ------------------------------------------------------------------ assembled videos
     async function openExports() {
         if (!P.name) return showHome();
         let list = [];
@@ -412,55 +469,12 @@
                 h("video", { controls: true, preload: "metadata", src: `${fileUrl(ex.file)}?t=1` }),
                 h("div", { class: "studio-export-info" },
                     h("b", {}, `${ex.name}.mp4`),
-                    ex.removed ? h("div", { class: "tk-band-warn" }, _t("studio.branch_removed_restore_the_state_of")) : null,
                     h("div", { class: "hint" }, _t("studio.clips_1_to", { v0: ex.branch_name || "", clips: ex.clips, v2: ex.size ? ex.size.join(" × ") : "", v3: when(ex.created) })),
                     ex.infos ? h("button", { class: "small", title: _t("studio.infos_md_file_the_full_details"), onclick: () => window.open(`/api/projects/${encodeURIComponent(P.name)}/infos?file=${encodeURIComponent(ex.infos)}`, "_blank") }, "infos") : null,
-                    ex.checkpoint ? h("button", { class: "small", onclick: async () => { if (await restoreCheckpoint(ex.checkpoint, _t("studio.the_state_of", { name: ex.name }))) dlg.close(); } }, _t("studio.restore_the_state_of_this_video")) : null))))
+                    null))))
                 : h("p", { class: "hint" }, _t("studio.no_assembled_video_yet_assemble_button")));
-        const dlg = modal(_t("studio.assembled_videos_of", { name: P.name }), body, { wide: true });
+        modal(_t("studio.assembled_videos_of", { name: P.name }), body, { wide: true });
     }
-    async function openCheckpoints() {
-        if (!P.name) return showHome();
-        const base = `/api/projects/${encodeURIComponent(P.name)}/checkpoints`;
-        const body = h("div", {});
-        const when = (t) => new Date(t * 1000).toLocaleString("fr-FR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
-        const draw = async () => {
-            let list = [];
-            try { list = (await api(base)).checkpoints; } catch (e) { alert(e.message); }
-            const nameIn = h("input", { placeholder: _t("studio.checkpoint_name_optional"), style: "flex:1" });
-            fill(body, 
-                h("div", { class: "tk-inline" }, nameIn, h("button", { class: "primary", onclick: async () => {
-                    try { await saveIfDirty(); await post(base, { name: nameIn.value }); toast(_t("studio.checkpoint_created")); draw(); } catch (e) { alert(e.message); }
-                } }, _t("studio.create_a_checkpoint"))),
-                h("p", { class: "hint" }, _t("studio.a_checkpoint_records_the_plan_settings") +
-                    _t("studio.restoring_puts_everything_back_as_it")),
-                list.length ? h("div", { class: "studio-cps" }, list.map((cp) => h("div", { class: `studio-cp ${cp.kind}` },
-                    h("div", { class: "studio-cp-main" },
-                        h("b", {}, cp.name),
-                        h("span", { class: "hint" }, ` ${when(cp.created)}`),
-                        h("div", { class: "hint" }, _t("studio.branch_es_take_s_clip_s", { v0: cp.kind === "auto" ? _t("studio.automatic") + (cp.reason ? " — " + cp.reason : "") : _t("studio.manual"), branches: cp.branches, takes: cp.takes, clips: cp.clips }))),
-                    h("button", { class: "small", onclick: async () => {
-                        const label = await H3Dialog.prompt(_t("studio.checkpoint_name"), cp.name);
-                        if (!label || !label.trim()) return;
-                        try { await put(`${base}/${encodeURIComponent(cp.id)}`, { name: label.trim() }); draw(); } catch (e) { alert(e.message); }
-                    } }, _t("studio.rename")),
-                    h("button", { class: "small primary", onclick: async () => {
-                        if (!await H3Dialog.confirm(_t("studio.restore_the_plan_settings_branches_and_2", { name: cp.name }) +
-                            _t("studio.a_checkpoint_of_the_current_state"))) return;
-                        try {
-                            await saveIfDirty();
-                            const res = await post(`${base}/${encodeURIComponent(cp.id)}/restore`, {});
-                            applyProject(res.project);
-                            toast(_t("studio.restored_previous_state", { name: cp.name, v1: res.saved_before.name }));
-                            draw();
-                        } catch (e) { alert(e.message); }
-                    } }, _t("studio.restore")))))
-                    : h("p", { class: "hint" }, _t("studio.no_checkpoint_yet")));
-        };
-        modal(_t("studio.checkpoints_of", { name: P.name }), body, { wide: true });
-        draw();
-    }
-
     // ------------------------------------------------------------------ settings storage
     function saveSettings() {
         clearTimeout(P.saveTimer);
@@ -573,14 +587,13 @@
         if (!P.name) return showHome();
         const body = h("div", {});
         const mb = (size) => _t("studio.mb_2", { v0: (size / 1e6).toFixed(1).replace(".", H3I18n.decimal()) });
-        // delete a file: refused while the project uses it, a warning when checkpoints or takes still need it
+        // delete a file: refused while the project uses it, a warning when takes were made with it
         const remove = async (it) => {
             const base = `/api/projects/${encodeURIComponent(P.name)}/resources?path=${encodeURIComponent(it.path)}`;
             try {
                 const use = await api(`/api/projects/${encodeURIComponent(P.name)}/resources/usage?path=${encodeURIComponent(it.path)}`);
                 if (use.current.length) { await H3Dialog.alert(_t("resources.in_use", { file: it.name, v1: use.current.join("; ") })); return; }
-                const why = [use.checkpoints.length ? _t("studio.used_by_checkpoints", { v0: use.checkpoints.join(", ") }) : null,
-                    use.takes ? _t("studio.used_by_takes", { count: use.takes }) : null].filter(Boolean);
+                const why = [use.takes ? _t("studio.used_by_takes", { count: use.takes }) : null].filter(Boolean);
                 const ok = await H3Dialog.confirm(why.length ? _t("studio.delete_resource_used", { file: it.name, v1: mb(it.size), v2: why.map((w) => "• " + w).join("\n") })
                     : _t("studio.delete_resource_confirm", { file: it.name, v1: mb(it.size) }));
                 if (!ok) return;
@@ -659,7 +672,7 @@
         if (window.H3Takes) window.H3Takes.recompute();
         return res.branch;
     }
-    // remove a whole branch; its takes kept by a checkpoint stay on disk, the others are deleted
+    // remove a whole branch with its takes and its assembled videos (after confirmation)
     async function deleteBranch(id) {
         const br = branchById(id);
         if (!br) return;
@@ -668,16 +681,14 @@
             await saveIfDirty();
             let res = await api(url, { method: "DELETE" });
             if (res.needs_confirm) {
-                const videos = res.delete_videos ? _t("studio.its_assembled_video_s_will_be", { delete_videos: res.delete_videos }) : "";
-                const msg = res.keep
-                    ? _t("studio.take_s_of_are_in_no", { delete: res.delete, name: br.name }) +
-                      _t("studio.the_other_s_stay_in_checkpoint", { keep: res.keep, checkpoints: res.checkpoints, videos })
-                    : _t("studio.is_in_no_checkpoint_its_take", { name: br.name, delete: res.delete, videos });
+                const videos = res.videos ? _t("studio.its_assembled_video_s_will_be", { delete_videos: res.videos }) : "";
+                const kept = res.kept ? " " + _t("trash.branch_kept", { count: res.kept }) : "";
+                const msg = _t("studio.delete_branch_confirm", { name: br.name, delete: res.delete, videos }) + kept + "\n\n" + _t("trash.to_trash");
                 if (!await H3Dialog.confirm(msg)) return;
                 res = await api(url + "?confirm=1", { method: "DELETE" });
             }
             applyProject(res.project);
-            toast(res.checkpoints ? _t("studio.removed_stays_in_checkpoint_s", { name: br.name, checkpoints: res.checkpoints }) : _t("studio.deleted", { name: br.name }));
+            toast(_t("studio.deleted", { name: br.name }));
         } catch (e) { alert(e.message); }
     }
     async function renameBranch(id) {
@@ -1273,6 +1284,7 @@
                 } }, _t("studio.apply_the_default_settings")));
         const body = h("div", {},
             intro,
+            !defaults && window.H3Branch ? window.H3Branch.essenceBox() : null,
             infoError ? h("div", { class: "msgs" }, h("div", { class: "warning" }, _t("studio.model_lists_unavailable_type_the_names", { infoError }))) : null,
             h("h3", {}, _t("studio.take_previews")),
             h("p", { class: "hint" }, _t("studio.the_picture_size_is_set_in")),
@@ -1503,11 +1515,8 @@
         }
         return out;
     }
-    function clipDefault(index) {
-        const clip = (plan().clips || [])[index - 1];
-        const d = (clip && P.clipDefaults && P.clipDefaults[clip.name]) || {};
-        return { loras: d.loras || [], no_branch_loras: !!d.no_branch_loras };
-    }
+    // (the settings of a clip for every branch are gone since 0.42: a take is set in the launch panel)
+    function clipDefault(_index) { return { loras: [], no_branch_loras: false }; }
     // what a plain click (no dialog) will use for this clip in this branch
     function effectiveTake(branchId, index) {
         const br = branchById(branchId) || {}, cd = clipDefault(index);
@@ -1574,42 +1583,49 @@
             h("p", { class: "hint" }, projectStackHint()),
             loraEditor(list, values, save)));
     }
-    async function openClipDefaults(index) {
-        const clip = (plan().clips || [])[index - 1];
-        if (!clip) return;
-        const values = await loraValues();
-        const cd = clipDefault(index);
-        const value = { loras: JSON.parse(JSON.stringify(cd.loras)), no_branch_loras: cd.no_branch_loras };
-        const send = () => put(`/api/projects/${encodeURIComponent(P.name)}/clip-defaults`, { clip: clip.name, value: { ...value, loras: cleanList(value.loras) } })
-            .then((res) => { P.clipDefaults = res.clip_defaults || {}; if (window.H3Takes) window.H3Takes.recompute(); });
-        let timer = null;
-        const save = () => { clearTimeout(timer); timer = setTimeout(() => send().catch((e) => toast(_t("studio.clip_settings_not_saved", { message: e.message }))), 250); };
-        modal(_t("studio.clip_lora_of", { index, name: clip.name }), h("div", { class: "studio-upscale" },
-            h("p", { class: "hint" }, _t("studio.valid_for_this_clip_in_every")
-                + _t("studio.the_arrow_of_these_buttons_tunes")),
-            h("h3", {}, _t("studio.clip_lora")),
-            h("p", { class: "hint" }, projectStackHint()),
-            loraEditor(value.loras, values, save),
-            h("label", { class: "tk-check", style: "margin-top:8px" }, h("input", { type: "checkbox", checked: value.no_branch_loras || null,
-                onchange: (e) => { value.no_branch_loras = e.target.checked; save(); } }), _t("studio.without_the_branch_lora_for_this"))),
-            { onClose: () => { clearTimeout(timer); send().catch(() => {}); } });
-    }
     // "prise réglée": the dialog of the ▾ buttons. Resolves {loras, upscale, seed} or null.
     // preset: {loras, upscale: "on"|"off"} of the take the ▾ belongs to; without it, the branch + clip settings
-    async function takeDialog({ clip: index, branch: branchId, title, preset }) {
+    // the LoRA and latent upscale of one take: the branch's, or those of a take (preset: {loras, upscale_settings,
+    // upscale}). Used by the launch panel and the « prise réglée » window. value(): {loras, upscale_settings} (explicit)
+    async function generationBox(branchId, preset) {
         const values = await loraValues();
         if (!P.info) { try { P.info = await api("/api/comfy/object_info"); } catch (e) { /* lists unknown: free text */ } }
-        const eff = effectiveTake(branchId, index);
+        const eff = effectiveTake(branchId, 0);
         const br = branchById(branchId) || {};
-        const list = JSON.parse(JSON.stringify(preset ? preset.loras : eff.loras));
-        // upscale: the branch's settings, which this take may change (« enabled » included). From a take, its own
-        // settings when it had some, else the branch's with its « with / without »
+        const list = JSON.parse(JSON.stringify(preset ? preset.loras || [] : eff.loras));
         const base = branchUpscale(br);
         const key = (u) => JSON.stringify(Object.keys(UP_DEFAULT).sort().map((k) => [k, u[k] ?? null]));
         let up = branchUpscale(br);
-        if (preset && preset.upscale_settings) up = Object.assign({}, UP_DEFAULT, JSON.parse(JSON.stringify(preset.upscale_settings)), { enabled: true });
+        if (preset && preset.upscale_settings) up = Object.assign({}, UP_DEFAULT, JSON.parse(JSON.stringify(preset.upscale_settings)), { enabled: preset.upscale_settings.enabled !== false });
         else if (preset && preset.upscale) up.enabled = preset.upscale === "on";
+        const start = key(up) + JSON.stringify(cleanList(list));
         let open = false;
+        const line = h("div", {}), form = h("div", {});
+        const drawLine = () => {
+            const changed = key(up) !== key(base);
+            const sum = up.enabled ? upscaleSummary(up, Number(br.width), Number(br.height), Number(P.settings.steps) || 8) : null;
+            const text = !up.enabled ? _t("studio.upscale_off") : sum.error ? "⚠ " + sum.error : sum.text;
+            line.className = `studio-up-line${changed ? " changed" : ""}`;
+            fill(line, ...[
+                h("span", {}, (changed ? _t("studio.upscale_changed_for_this_take") : _t("studio.upscale_like_the_branch", { name: br.name || "?" })) + " — " + text),
+                h("button", { class: "small", onclick: () => { open = !open; drawForm(); drawLine(); } }, open ? _t("studio.fold") : _t("studio.modify")),
+                changed ? h("button", { class: "small", onclick: () => { up = branchUpscale(br); drawForm(); drawLine(); } }, _t("studio.reset_to_branch_settings")) : null,
+            ].filter(Boolean));
+        };
+        const drawForm = () => fill(form, ...(open ? [upscaleEditor(up, [Number(br.width), Number(br.height)], drawLine, { enabled: true, take: true })] : []));
+        drawLine();
+        const node = h("div", { class: "studio-upscale" },
+            h("h3", {}, _t("studio.extra_lora")),
+            h("p", { class: "hint" }, projectStackHint() + (preset ? _t("studio.list_pre_filled_with_those_of") : _t("studio.list_pre_filled_with_those_of_2"))),
+            loraEditor(list, values, () => {}),
+            h("h3", {}, _t("studio.latent_upscale")),
+            h("div", {}, line, form));
+        return { node, value: () => ({ loras: cleanList(list), upscale_settings: JSON.parse(JSON.stringify(up)) }),
+            changed: () => key(up) + JSON.stringify(cleanList(list)) !== start };
+    }
+    async function takeDialog({ clip: index, branch: branchId, title, preset }) {
+        const box = await generationBox(branchId, preset);
+        const br = branchById(branchId) || {};
         return new Promise((resolve) => {
             let done = false;
             const finish = (v) => { if (done) return; done = true; resolve(v); dlg.close(); };
@@ -1618,32 +1634,11 @@
                 const raw = seed.value.trim();
                 const n = raw === "" ? null : Number(raw);
                 if (raw !== "" && !(Number.isInteger(n) && n >= 0 && n <= 2 ** 48)) { alert(_t("studio.invalid_seed_an_integer_from_0", { v0: 2 ** 48 })); return; }
-                const changed = key(up) !== key(base);
-                finish({ loras: cleanList(list), upscale: null, seed: n, upscale_settings: changed ? JSON.parse(JSON.stringify(up)) : null });
+                finish({ ...box.value(), seed: n });
             };
-            // a summary line (« like the branch » / « changed for this take ») and the form, folded by default
-            const line = h("div", {}), form = h("div", {});
-            const upBox = h("div", {}, line, form);
-            const drawLine = () => {
-                const changed = key(up) !== key(base);
-                const sum = up.enabled ? upscaleSummary(up, Number(br.width), Number(br.height), Number(P.settings.steps) || 8) : null;
-                const text = !up.enabled ? _t("studio.upscale_off") : sum.error ? "⚠ " + sum.error : sum.text;
-                line.className = `studio-up-line${changed ? " changed" : ""}`;
-                fill(line, ...[
-                    h("span", {}, (changed ? _t("studio.upscale_changed_for_this_take") : _t("studio.upscale_like_the_branch", { name: br.name || "?" })) + " — " + text),
-                    h("button", { class: "small", onclick: () => { open = !open; drawForm(); drawLine(); } }, open ? _t("studio.fold") : _t("studio.modify")),
-                    changed ? h("button", { class: "small", onclick: () => { up = branchUpscale(br); drawForm(); drawLine(); } }, _t("studio.reset_to_branch_settings")) : null,
-                ].filter(Boolean));
-            };
-            const drawForm = () => fill(form, ...(open ? [upscaleEditor(up, [Number(br.width), Number(br.height)], drawLine, { enabled: true, take: true })] : []));
-            drawLine();
             const dlg = modal(title || _t("studio.take_of_clip", { index }), h("div", { class: "studio-upscale" },
                 h("p", { class: "hint" }, _t("studio.branch_these_settings_only_apply_to", { v0: br.name || "?" })),
-                h("h3", {}, _t("studio.extra_lora")),
-                h("p", { class: "hint" }, projectStackHint() + (preset ? _t("studio.list_pre_filled_with_those_of") : _t("studio.list_pre_filled_with_those_of_2"))),
-                loraEditor(list, values, () => {}),
-                h("h3", {}, _t("studio.latent_upscale")),
-                upBox,
+                box.node,
                 h("h3", {}, _t("studio.seed")),
                 seed,
                 h("div", { class: "studio-dlg-actions" }, h("button", { onclick: () => finish(null) }, _t("studio.cancel")), h("button", { class: "primary", onclick: go }, _t("studio.start_2")))),
@@ -1658,17 +1653,23 @@
             listTakes: () => api(`${base()}/takes`),
             saveSelection: (selection) => put(`${base()}/selection`, { selection }),
             deleteTakes: (takes) => post(`${base()}/delete-takes`, { takes }),
-            assemble: (clip, take, allowInvalid) => post(`${base()}/assemble`, { clip, take, allow_invalid: !!allowInvalid }),
-            assembleCheck: (clip, take) => post(`${base()}/assemble-check`, { clip, take }),
+            assemble: (clip, take) => post(`${base()}/assemble`, { clip, take }),
             takePlan: (clip, take) => api(`${base()}/takes/${clip}/${encodeURIComponent(take)}/plan`),
             exports: () => api(`${base()}/exports`),
             // the start video's segment, small (made once by ffmpeg): GET its state, POST to have it made
             segmentThumb: (file, start, end, method) => api(`${base()}/resources/thumb?path=${encodeURIComponent(file)}&start=${start}&end=${end}`, { method: method || "GET" }),
-            restoreCheckpoint,
-            generate: (clip, parent, random, seed, branch, upscale, loras, upscaleSettings) => post(`${base()}/generate`, { clip, parent, random: !!random, seed: seed ?? null, branch: branch || null, upscale: upscale || null, loras: loras ?? null, upscale_settings: upscaleSettings || null }),
+            generate: (body) => post(`${base()}/generate`, body),
+            // the plan of a twig (leaf: its last take) or the master plan of a branch
+            twigPlan: (branch, leaf) => api(`${base()}/plan?branch=${encodeURIComponent(branch || "")}&leaf=${encodeURIComponent(leaf || "")}`),
+            twig: () => P.twig,
+            // the launch panel shows the pictures, voices and song of the branch it launches in
+            setMediaBranch: (id) => { P.mediaOverride = id || null; },
+            segment: (id) => (P.segments || {})[id] || null,
+            setTwig: (t) => { if (t && t.plan) { P.twig = { plan: t.plan, locked: t.locked || 0, branch: t.branch, leaf: t.leaf, takes: t.takes || {} }; if (!document.body.classList.contains("planscreen")) P.editTarget = { branch: P.twig.branch, leaf: P.twig.leaf }; } },
+            openPlanScreen, generationBox,
             jobPlan: (id) => api(`${base()}/jobs/${encodeURIComponent(id)}/plan`),
-            clipDefault, effectiveTake, generationNow, openBranchLoras, openClipDefaults, takeDialog, fmtLoras,
-            fillBranch: (id, dryRun, assemble = true) => post(`${base()}/branches/${encodeURIComponent(id)}/fill`, { dry_run: !!dryRun, assemble: !!assemble }),
+            clipDefault, effectiveTake, generationNow, openBranchLoras, takeDialog, fmtLoras,
+            fillBranch: (id, dryRun, assemble = true, leaf = null) => post(`${base()}/branches/${encodeURIComponent(id)}/fill`, { dry_run: !!dryRun, assemble: !!assemble, leaf }),
             assembleAfter: (job) => post(`${base()}/assemble`, { job }),
             jobs: () => (P.name ? api(`${base()}/jobs`) : Promise.resolve({ jobs: [] })),
             cancel: (ids) => post(`${base()}/cancel`, { ids }),
@@ -1706,11 +1707,7 @@
             infosUrl: (path) => `${base()}/infos?file=${encodeURIComponent(path)}`,
             openSettings,
             async savePlan() {
-                if (!ed().state.dirty) return "plan.json";
-                await savePlan(ed().state.plan);
-                ed().state.dirty = false;
-                ed().render();
-                return "plan.json";
+                return "plan.json";          // (the plan screen saves when it is left)
             },
             async digests(images, voices) {
                 const find = (kind, path) => (P.resources[kind] || []).find((it) => it.path === path);
@@ -1723,6 +1720,11 @@
         };
     }
 
-    window.H3Studio = { state: P, presets, openProject, showHome };
+    window.H3Studio = { state: P, presets, openProject, showHome, openPlanScreen, closePlanScreen,
+        // what plan_branch.js (new branch, branch settings) works with
+        kit: { api, post, put, modal, pickFiles, importFiles, fileUrl, fill, toast, sizePicker, refSizePicker, putBranch, branchById,
+            loraValues, loraEditor, cleanList, projectStackHint, upscaleSummary: (up, br) => upscaleSummary(up, Number(br.width), Number(br.height), Number(P.settings.steps) || 8),
+            branchUpscale, openUpscale, applyProject, zoom, refreshResources, saveIfDirty, openPlanScreen, ACCEPT,
+            plan: () => plan(), base: () => `/api/projects/${encodeURIComponent(P.name)}` } };
     start();
 })();

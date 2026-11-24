@@ -650,115 +650,8 @@ const H3 = (() => {
         });
         return result;
     }
-    // H3 Studio rules (same as takes.py studio_resolve; keep both identical). Every take belongs to a branch
-    // (record.studio.branch), which holds its reference files and song. A take is "invalid" when something it was
-    // made with differs from the project now (undone by putting the old value back), or from a more recent take that
-    // shares it (final), or when the take it continues is invalid or missing. Takes of another branch than the
-    // selected one are "other".
-    // selection: {index: id, branch: id}; current: {branches: {id: {refs: {name: {image, voice}}, song, size: [w, h]}},
-    // default_branch}; fingerprints: {index: take fingerprint}. The result also has .branch (the selected branch).
+    // the branch of a take (record.studio.branch)
     function takeBranch(r, def) { return (r.studio && r.studio.branch) || def || null; }
-    function studioResolveTakes(plan, takes, selection, fingerprints, current) {
-        const free = mode(plan) === "free";
-        const def = current.default_branch || null;
-        const sel = { ...(selection || {}) };
-        const wantedBranch = sel.branch || null;
-        delete sel.branch;
-        const J = (v) => JSON.stringify(v === undefined ? null : v);
-        const now = {};
-        (plan.clips || []).forEach((clip, k) => { now[`plan:${k + 1}`] = J([fingerprints[k + 1], clip.frames]); });
-        for (const [bid, bset] of Object.entries(current.branches || {})) {
-            for (const [name, kinds] of Object.entries((bset && bset.refs) || {})) {
-                now[`${bid}|image:${name}`] = J((kinds || {}).image ?? null);
-                now[`${bid}|voice:${name}`] = J((kinds || {}).voice ?? null);
-                now[`${bid}|video:${name}`] = J((kinds || {}).video ?? null);
-            }
-            now[`${bid}|song`] = J((bset || {}).song ?? null);
-            now[`${bid}|size`] = J((bset || {}).size || [null, null]);
-            now[`${bid}|refsize`] = J((bset || {}).ref_image_size ?? null);
-        }
-        const keysOf = (r, index, branch) => {
-            const st = r.studio || {};
-            const keys = { [`${branch}|size`]: J([r.width ?? null, r.height ?? null]),
-                [`${branch}|refsize`]: J(st.ref_image_size || current.legacy_ref_image_size || "match"),
-                [`plan:${index}`]: J([r.fingerprint ?? null, r.frames ?? null]) };
-            const refs = st.refs || {};
-            for (const name of Object.keys(refs).sort()) {
-                keys[`${branch}|image:${name}`] = J((refs[name] || {}).image ?? null);
-                if (free) keys[`${branch}|voice:${name}`] = J((refs[name] || {}).voice ?? null);
-                if ((refs[name] || {}).video) keys[`${branch}|video:${name}`] = J(refs[name].video);
-            }
-            if (!free && "song" in st) keys[`${branch}|song`] = J(st.song ?? null);
-            return keys;
-        };
-        const reason = (key, final) => {
-            const k = key.includes("|") ? key.slice(key.indexOf("|") + 1) : key;
-            const [kind, ...rest] = k.split(":");
-            const name = rest.join(":");
-            const what = { size: _t("check.the_picture_size"), refsize: _t("check.the_reference_size"), plan: _t("check.the_clip_s_plan"), image: _t("check.the_picture_of", { name }), voice: _t("check.the_voice_of", { name }), song: _t("check.the_song"), video: _t("check.the_video_of", { name }) }[kind];
-            return final ? _t("check.redone_since_with_another_value", { what }) : _t("check.has_changed", { what });
-        };
-        const records = [], branchOf = {};
-        for (const [index, list] of Object.entries(takes)) {
-            for (const r of list) {
-                const b = takeBranch(r, def);
-                branchOf[r.id] = b;
-                records.push([+index, r, keysOf(r, +index, b)]);
-            }
-        }
-        records.sort((a, b) => (a[1].saved_at || 0) - (b[1].saved_at || 0));
-        const why = {};
-        for (const [, r, keys] of records) {
-            for (const [key, value] of Object.entries(keys)) {
-                if (value !== (now[key] ?? "null")) { if (!(r.id in why)) why[r.id] = reason(key, false); break; }
-            }
-        }
-        const later = {};
-        for (const [, r, keys] of [...records].reverse()) {
-            for (const [key, value] of Object.entries(keys)) {
-                const seen = later[key] = later[key] || [];
-                if (seen.some((v) => v !== value)) why[r.id] = reason(key, true);
-                if (!seen.includes(value)) seen.push(value);
-            }
-        }
-        const branches = new Set(Object.values(branchOf));
-        let active = branches.has(wantedBranch) ? wantedBranch : null;
-        if (active === null) {
-            for (const index of Object.keys(sel).map(Number).sort((a, b) => a - b)) {
-                if (sel[index] in branchOf) { active = branchOf[sel[index]]; break; }
-            }
-        }
-        if (active === null) {
-            const first = records.filter(([i, r]) => i === 1 && !(r.id in why));
-            active = first.length ? branchOf[first[first.length - 1][1].id] : (branches.size ? [...branches].sort()[0] : null);
-        }
-        const result = {};
-        (plan.clips || []).forEach((clip, k) => {
-            const index = k + 1;
-            const previous = result[index - 1];
-            const states = {};
-            const list = [...(takes[index] || [])].sort((a, b) => (a.saved_at || 0) - (b.saved_at || 0));
-            for (const r of list) {
-                if (r.id in why) { states[r.id] = ["invalid", why[r.id]]; continue; }
-                if (clip.continue && index > 1) {
-                    const ps = previous ? previous.takes[r.parent] : undefined;
-                    if (!ps) { states[r.id] = ["invalid", _t("check.the_take_it_continues_does_not")]; continue; }
-                    if (ps[0] === "invalid") { states[r.id] = ["invalid", _t("check.built_on_an_invalidated_take")]; continue; }
-                }
-                if (branchOf[r.id] !== active) states[r.id] = ["other", _t("check.other_branch")];
-                else if (clip.continue && index > 1 && r.parent !== previous.chosen) states[r.id] = ["other", _t("check.built_on_another_take_of_the")];
-                else states[r.id] = ["ok", ""];
-            }
-            let chosen = sel[index];
-            if (!states[chosen] || states[chosen][0] !== "ok") {
-                const ok = Object.entries(states).filter(([, st]) => st[0] === "ok").map(([id]) => id);
-                chosen = ok.length ? ok[ok.length - 1] : null;
-            }
-            result[index] = { chosen, takes: states, kinds: {} };
-        });
-        Object.defineProperty(result, "branch", { value: active, enumerable: false });
-        return result;
-    }
     function usablePrefix(plan, resolved) {
         let count = 0;
         for (let i = 1; i <= (plan.clips || []).length; i++) { if (!resolved[i] || !resolved[i].chosen) break; count = i; }
@@ -771,7 +664,7 @@ const H3 = (() => {
         isRun, largestRun, isAvBoundary, avContextValues, mode, placeholders, timeline, framesLegal, validate,
         PLAN_VERSION, startVideo, startRow, finalStart, songOffset, pyRound, editVideo, editSlice, editCuts, EDIT_MAX_FRAMES, EDIT_MARK, expandEdit, expandedClip, editClipCount,
         parseSections, composeSections, skeleton, renameRef, referenceKinds, contextOf, squash,
-        pyDumps, takeFingerprints, resolveTakes, studioResolveTakes, takeBranch, usablePrefix, sha256Plain,
+        pyDumps, takeFingerprints, resolveTakes, takeBranch, usablePrefix, sha256Plain,
     };
 })();
 if (typeof module !== "undefined") module.exports = H3;

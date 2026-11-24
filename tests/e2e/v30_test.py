@@ -3,7 +3,7 @@ same for every branch), clip 1 continuing the segment (context read from the fil
 assembly with or without the segment, and the interface (plan settings without « null », timeline, start video
 column of the Takes tab, resources)."""
 import asyncio, copy, json, os, shutil, subprocess, sys, time, urllib.request, urllib.error
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from common import ENCORE, CHROME, fixture  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from common import ENCORE, CHROME, fixture, plan_screen, takes_screen, launch_go  # noqa: E402
 sys.path.insert(0, ENCORE)
 from encore import plan_core, takes as takes_mod, projects  # noqa: E402
 from playwright.async_api import async_playwright
@@ -38,13 +38,9 @@ for f in (fixture("fillette.png"), fixture("rue.png")):
 res = call(S, f"{P}/resources?kind=videos&filename=intro.mp4", raw=open(fixture("v30_intro.mp4"), "rb").read(), method="POST")
 
 
-def state():
-    """Validity of the takes as the server computes it."""
-    project = projects.read_project(root + "/projets", "rue")
-    plan = plan_core.normalize(json.loads(json.dumps(project["plan"])))
-    local = takes_mod.list_takes(__import__("pathlib").Path(PDIR), project["plan"])
-    cur = takes_mod.current_state(__import__("pathlib").Path(PDIR), plan, project["settings"], project["branches"])
-    return takes_mod.studio_resolve(plan, local, takes_mod.read_selection(__import__("pathlib").Path(PDIR)), cur)
+def twig():
+    """The takes of the selected twig (0.42: a take never becomes invalid)."""
+    return {int(k): v for k, v in call(S, P)["plan_takes"].items()}
 
 
 try:
@@ -58,7 +54,6 @@ try:
     plan["clips"][0]["continue"] = True
     saved = call(S, P + "/plan", plan, "PUT")
     check("plan saved in the current version without error", saved["plan"]["version"] == plan_core.PLAN_VERSION and not saved["validation"]["errors"], saved.get("validation"))
-    call(S, P + "/branches", {})
     call(S, P + "/branches/b1", {"refs": {"fillette": {"image": "refs/images/fillette.png"}, "rue": {"image": "refs/images/rue.png"}}}, "PUT")
     refused = call(S, P + "/generate", {"clip": 1, "branch": "b1", "random": True})
     check("no start video chosen: clip 1 refused with a clear message", "start video: no file chosen" in (refused.get("error") or ""), refused)
@@ -85,9 +80,10 @@ try:
     t1 = t1[-1]["id"]
     # 0.33: with the upscale, pass 2 gets the video's context frames back (with their noise mask)
     call(S, P + "/branches/b1", {"upscale": {"model": "minimax_h3_latent_upscaler_3d_fp16.safetensors"}}, "PUT")
-    gen({"clip": 1, "branch": "b1", "random": True, "upscale": "on"})
+    up = dict(call(S, P)["branches"][0]["upscale"], enabled=True)
+    gen({"clip": 1, "branch": "b1", "upscale_settings": up})
     wf = json.load(open("/tmp/mock_last_prompt.json"))
-    from encore.engine import latent_frames
+    from encore.workflows import latent_frames
     check("upscale, clip 1 continuing the video: the context goes back into pass 2",
           "71" in wf and wf["70"]["inputs"]["amount"] == latent_frames(39) and wf["72"]["inputs"]["video_latent"] == ["71", 0],
           {k: wf.get(k) for k in ("70", "71", "72")})
@@ -95,10 +91,9 @@ try:
     check("the upscaled take is done", up_take != t1, up_take)
     call(S, P + "/branches/b1", {"upscale": {"enabled": False}}, "PUT")
     call(S, P + "/selection", {"selection": {"1": t1, "branch": "b1"}}, "PUT")    # the rest of the test goes on from t1
-    gen({"clip": 2, "branch": "b1", "random": True})
+    gen({"clip": 2, "after": t1})
     t2 = call(S, P + "/takes")["clips"][1]["takes"][-1]["id"]
-    st = state()
-    check("both takes valid", st[1]["takes"][t1][0] == "ok" and st[2]["takes"][t2][0] == "ok", (st[1], st[2]))
+    check("the twig: clip 1 then clip 2", twig() == {1: t1, 2: t2}, twig())
 
     # assembly: the segment opens the video
     call(S, P + "/assemble", {"clip": 2, "take": t2}); time.sleep(1.5); run_mock(); time.sleep(3)
@@ -113,32 +108,24 @@ try:
 
     # springboard only: same takes, assembly without the segment
     plan = call(S, P)["plan"]; plan["start_video"]["in_assembly"] = False
-    call(S, P + "/plan", plan, "PUT")
-    st = state()
-    check("« not in the video »: takes stay valid (free mode)", st[1]["takes"][t1][0] == "ok" and st[2]["takes"][t2][0] == "ok", st[1])
+    saved = call(S, P + "/plan", plan, "PUT")
+    check("« not in the video »: an assembly setting, free to change", "error" not in saved and saved["plan"]["start_video"]["in_assembly"] is False, saved.get("error"))
     call(S, P + "/assemble", {"clip": 2, "take": t2}); time.sleep(1.5); run_mock(); time.sleep(3)
     asm = call(M, "/test/cap", {})["assembly"]
     first = plan_core.timeline(plan_core.normalize(json.loads(json.dumps(plan))))[0]["raw_start"]
     check("assembled without the segment: 2 clips, sound from clip 1's start",
           asm.get("input_count") == 2 and abs(asm["audio_samples"] / asm["audio_rate"] - (end2 - first) / 24) < 0.05, (asm, first))
 
-    # another video for the project invalidates clip 1 and what continues it, the old one makes them valid again
+    # 0.42: with takes, the start video and its segment are fixed (another branch is made to change them)
     shutil.copy(fixture("v30_intro.mp4"), "/tmp/intro_b.mp4"); open("/tmp/intro_b.mp4", "ab").write(b"\0" * 64)
     other = call(S, f"{P}/resources?kind=videos&filename=intro_b.mp4", raw=open("/tmp/intro_b.mp4", "rb").read(), method="POST")
-    call(S, P + "/start-video", {"file": other["path"]}, "PUT")
-    st = state()
-    check("another start video: clip 1 and clip 2 invalidated", st[1]["takes"][t1][0] == "invalid" and st[2]["takes"][t2][0] == "invalid", (st[1], st[2]))
-    call(S, P + "/start-video", {"file": "refs/videos/intro.mp4"}, "PUT")
-    check("the first video back: valid again", state()[1]["takes"][t1][0] == "ok")
-
-    # another segment invalidates clip 1 and what continues it
+    out = call(S, P + "/start-video", {"file": other["path"]}, "PUT")
+    check("another start video refused once there are takes", "error" in out and call(S, P)["start_video_file"] == "refs/videos/intro.mp4", out)
     plan["start_video"]["end"] = 7.0
-    call(S, P + "/plan", plan, "PUT")
-    st = state()
-    check("another segment: clip 1 and clip 2 invalidated", st[1]["takes"][t1][0] == "invalid" and st[2]["takes"][t2][0] == "invalid", (st[1], st[2]))
+    out = call(S, P + "/plan", plan, "PUT")
+    check("another segment refused once there are takes", "error" in out, out)
     plan["start_video"]["end"] = 6.0
-    call(S, P + "/plan", plan, "PUT")
-    check("segment put back: valid again", state()[1]["takes"][t1][0] == "ok")
+    check("the twig is still there", twig() == {1: t1, 2: t2}, twig())
 
     async def main():
         async with async_playwright() as p:
@@ -146,6 +133,7 @@ try:
             page = await b.new_page(viewport={"width": 1600, "height": 950}); errs = []
             page.on("pageerror", lambda e: errs.append(str(e)))
             await page.goto(S + "/"); await page.evaluate("localStorage.setItem('h3studio.project','rue')"); await page.reload(); await page.wait_for_timeout(1500)
+            await plan_screen(page)
             # Plan tab: the segment before clip 1 on the timeline
             block = page.locator(".tl .block.startvid")
             check("timeline: start video block", await block.count() == 1 and "intro" in await block.inner_text())
@@ -155,34 +143,27 @@ try:
             box = page.locator(".start-video")
             check("plan settings: start video section", await box.count() == 1)
             check("plan settings: no « null » written", "null" not in await box.inner_text(), await box.inner_text())
-            sel = box.locator(".sv-file select")
-            check("plan settings: the project's videos to choose from, the current one selected",
-                  await sel.locator("option").count() == 3 and await sel.input_value() == "refs/videos/intro.mp4")
-            check("plan settings: an Import… button next to the list", await box.locator(".sv-file button").count() == 1)
+            # 0.43: the video file is chosen in the project settings; the plan settings keep the branch's segment
+            check("plan settings: no file list (project settings)", await box.locator(".sv-file").count() == 0)
             check("plan settings: player on the project's video", await box.locator("video.sv-player").count() == 1
                   and "intro" in (await box.locator("video.sv-player").get_attribute("src") or ""))
-            check("plan settings: warning that clip 1 has takes", "Clip 1 has" in await box.inner_text())
+            check("plan settings: the segment is greyed (the branch has takes)", await box.locator(".sv-range input").first.is_disabled())
             check("the start video's reference is not in the plan's reference list",
                   await page.locator("#refRows input.rname[value='intro']").count() == 0)
             info = await box.locator(".sv-info").inner_text()
             check("plan settings: segment used shown on the grid", "124 frames" in info and "0.833" in info and "6.000" in info and "moves forward" in info, info)
             await page.screenshot(path="v30_plan_settings.png")
-            # the « ⇤ here » button takes the player's position
-            await page.evaluate("document.querySelector('video.sv-player').currentTime = 1.2")
-            await page.wait_for_timeout(600)
-            await box.locator("button", has_text="⇤").click(); await page.wait_for_timeout(500)
-            start = await page.evaluate("H3Editor.getPlan ? H3Editor.getPlan().start_video.start : null")
-            if start is None:
-                start = await box.locator("input[type=number]").first.input_value()
-            check("« ⇤ here » sets the start from the player", abs(float(start) - 1.2) < 0.05, start)
+            # the « ⇤ here » button: greyed too, with the reason
+            here = box.locator("button", has_text="⇤")
+            check("« ⇤ here » greyed with the reason", await here.is_disabled() and "Fixed" in (await here.get_attribute("title") or ""), await here.get_attribute("title"))
             await page.locator(".tk-box-head button", has_text="Close").last.click(); await page.wait_for_timeout(300)
             # Takes tab: not in the final video, no start video column
-            await page.click("#viewTabs >> text=Takes"); await page.wait_for_timeout(1500)
+            await takes_screen(page); await page.wait_for_timeout(1500)
             check("Takes tab: no start video column while it is not in the video", await page.locator(".tk-card.tk-startvid").count() == 0)
             plan_now = call(S, P)["plan"]; plan_now["start_video"]["in_assembly"] = True
             call(S, P + "/plan", plan_now, "PUT")
             await page.reload(); await page.wait_for_timeout(1500)
-            await page.click("#viewTabs >> text=Takes"); await page.wait_for_timeout(1500)
+            await takes_screen(page); await page.wait_for_timeout(1500)
             card = page.locator(".tk-card.tk-startvid")
             check("Takes tab: a start video card before clip 1", await card.count() == 1 and "intro.mp4" in await card.inner_text(), await card.count())
             head = await page.locator(".tk-col-head.tk-col-start").inner_text()

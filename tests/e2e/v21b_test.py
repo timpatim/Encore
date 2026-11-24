@@ -1,5 +1,5 @@
 import asyncio, json, os, shutil, subprocess, sys, time, re
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from common import ENCORE, CHROME, fixture, restart_mock  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from common import ENCORE, CHROME, fixture, restart_mock, plan_screen, takes_screen  # noqa: E402
 from playwright.async_api import async_playwright
 S = "http://127.0.0.1:8233"; M = "http://127.0.0.1:8771"
 root = "/tmp/h3s_v21b"; shutil.rmtree(root, ignore_errors=True); os.makedirs(root)
@@ -24,11 +24,12 @@ async def main():
         page = await b.new_page(viewport={"width": 1500, "height": 950}); errs = []
         page.on("pageerror", lambda e: errs.append(str(e)))
         await page.goto(S + "/"); await page.evaluate("localStorage.setItem('h3studio.project','rue')"); await page.reload(); await page.wait_for_timeout(1500)
-        for label in ["Checkpoints…", "Resources…", "Assembled videos…", "Project settings…"]:
+        for label in ["Resources…", "Assembled videos…", "Project settings…"]:
             await page.click(f"text={label}"); await page.wait_for_timeout(900); await scan(page, label); await close(page)
-        await page.click("#viewTabs >> text=Takes"); await page.wait_for_timeout(2000)
-        await page.click("button:has-text('upscale…')"); await page.wait_for_timeout(900); await scan(page, "upscale"); await page.screenshot(path="v21_upscale.png"); await close(page)
-        await page.click("button:has-text('references…')"); await page.wait_for_timeout(900); await scan(page, "branch refs"); await close(page)
+        await takes_screen(page); await page.wait_for_timeout(2000)
+        await page.evaluate("H3Studio.kit.openUpscale('b1')"); await page.wait_for_timeout(900); await scan(page, "upscale"); await page.screenshot(path="v21_upscale.png"); await close(page)
+        await page.click(".tk-brsettings >> nth=0"); await page.wait_for_timeout(1200); await scan(page, "branch settings"); await close(page)
+        await page.click(".tk-newbranch"); await page.wait_for_timeout(900); await scan(page, "new branch"); await close(page)
         await page.click("#studioQueueBtn"); await page.wait_for_timeout(900); await scan(page, "queue"); await close(page)
         await page.click("text=Installation…"); await page.wait_for_timeout(1500); await scan(page, "setup"); await page.screenshot(path="v21_setup.png")
         await page.keyboard.press("Escape"); await page.reload(); await page.wait_for_timeout(1200)

@@ -1,6 +1,6 @@
 """v0.25 UI: buttons of an invalidated take, ▶▶ label while generating, Encore opened from the local network."""
 import asyncio, json, subprocess, sys, time, urllib.request, os
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from common import ENCORE, CHROME, fixture, restart_mock  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from common import ENCORE, CHROME, fixture, restart_mock, plan_screen, takes_screen, launch_go  # noqa: E402
 from playwright.async_api import async_playwright
 OK = []
 def check(name, cond, info=""):
@@ -20,18 +20,18 @@ async def main():
             secure = await page.evaluate("window.isSecureContext && !!(window.crypto && crypto.subtle)")
             await page.evaluate("localStorage.setItem('h3studio.project','rue'); localStorage.removeItem('encore.folded.rue')")
             await page.reload(); await page.wait_for_timeout(1500)
-            await page.click("#viewTabs >> text=Takes"); await page.wait_for_timeout(1200)
+            await takes_screen(page); await page.wait_for_timeout(1200)
             cards = await page.locator(".tk-card").count()
             states = await page.eval_on_selector_all(".tk-card", "e => e.map(x => x.className)")
-            check(f"{base}: takes shown (secure context: {secure})", cards >= 3 and any("invalid" in s or "ok" in s for s in states) and not errs, (cards, errs))
+            check(f"{base}: takes shown (secure context: {secure})", cards >= 3 and any("chosen" in s or "ok" in s or "other" in s for s in states) and not errs, (cards, errs))
             if base.startswith("http://127"):
-                card = page.locator(".tk-card.invalid >> nth=0"); await card.hover(); await page.wait_for_timeout(300)
-                box = await card.locator(".tk-actions button").bounding_box()
+                card = page.locator(".tk-card[data-take] >> nth=0"); await card.hover(); await page.wait_for_timeout(300)
+                box = await card.locator(".tk-actions button.tk-retake").bounding_box()
                 top = await page.evaluate(f"document.elementFromPoint({box['x'] + box['width'] / 2}, {box['y'] + box['height'] / 2}).textContent")
-                check("redo reachable on an invalidated take", "assemble" not in top.lower(), top)
+                check("« new take » reachable on a take (0.42: no invalidated takes)", "assemble" not in top.lower(), top)
                 asm = await card.locator(".tk-asm-btn").bounding_box()
-                check("assemble button visible on the picture", asm and asm["y"] > box["y"] + 20, asm)
-                await page.screenshot(path="v25_invalid_card.png", clip={"x": box["x"] - 230, "y": box["y"] - 30, "width": 320, "height": 200})
+                check("assemble button visible, apart from « new take »", asm and (asm["y"] >= box["y"] + box["height"] or asm["y"] + asm["height"] <= box["y"] or asm["x"] >= box["x"] + box["width"] or asm["x"] + asm["width"] <= box["x"]), (asm, box))
+                await page.screenshot(path="v25_take_card.png", clip={"x": box["x"] - 230, "y": box["y"] - 30, "width": 320, "height": 200})
                 # ▶▶ while a generation of the branch is queued
                 await page.evaluate("fetch('/api/queue/pause', {method: 'POST', headers: {'X-Encore': '1'}, body: '{}'})")
                 await page.evaluate("fetch('/api/projects/rue/generate', {method: 'POST', headers: {'X-Encore': '1', 'Content-Type': 'application/json'}, body: JSON.stringify({clip: 1, branch: 'b1', random: true})})")

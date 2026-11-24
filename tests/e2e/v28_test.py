@@ -2,7 +2,7 @@
 upscale settings of a take (the branch's, changed in the folded form of the ▾ dialog), no upscale at the column level,
 version banner, no « null » written in the dialogs."""
 import asyncio, json, os, shutil, subprocess, sys, time, urllib.request, urllib.error
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from common import ENCORE, CHROME, fixture, restart_mock  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from common import ENCORE, CHROME, fixture, restart_mock, plan_screen, takes_screen, launch_go  # noqa: E402
 from playwright.async_api import async_playwright
 import re
 VERSION = re.search(r'STUDIO_VERSION = "([^"]+)"', open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "encore", "projects.py")).read()).group(1)
@@ -38,13 +38,10 @@ call(S, "/api/projects", {"name": "rue", "mode": "free"})
 call(S, P + "/import-plan?filename=rue.json", raw=open(fixture("rue_test_v1.plan.json"), "rb").read(), method="POST")
 for f in (fixture("fillette.png"), fixture("rue.png")):
     call(S, f"{P}/resources?kind=images&filename={os.path.basename(f)}", raw=open(f, "rb").read(), method="POST")
-call(S, P + "/branches", {})
 call(S, P + "/branches/b1", {"refs": {"fillette": {"image": "refs/images/fillette.png"}, "rue": {"image": "refs/images/rue.png"}},
                              "upscale": {"enabled": False, "model": M3D, "start_mp": 0.2, "upscaler": "lbh3d"}}, "PUT")
 try:
     check("ping gives the version", call(S, "/api/ping").get("version") == VERSION)
-    cps = call(S, P + "/checkpoints")
-    check("checkpoint before an import is in English", any("before importing" in (c.get("reason") or c.get("name") or "") for c in cps.get("checkpoints", cps if isinstance(cps, list) else [])), cps)
     # a clip (column) no longer has upscale settings: what is sent is ignored, the branch decides (off)
     names = [c["name"] for c in call(S, P)["plan"]["clips"]]
     r = call(S, P + "/clip-defaults", {"clip": names[0], "value": {"loras": [], "upscale": "on",
@@ -62,13 +59,13 @@ try:
     up = t1b["record"]["studio"].get("upscale") or {}
     check("take made with its own settings", up.get("source") == "take" and up.get("model") == M3D and up.get("settings", {}).get("start_mp") == 0.25, up)
     # clip 2 with its own settings too (its ▾ starts again from them, below)
-    call(S, P + "/generate", {"clip": 2, "branch": "b1", "parent": t1b["id"].split("_")[1], "random": True,
+    call(S, P + "/generate", {"clip": 2, "after": t1b["id"],
                               "upscale_settings": {"enabled": True, "upscaler": "lbh3d", "model": M3D, "start_mp": 0.25}})
     time.sleep(2); run_mock(); time.sleep(3)
     t2 = [c for c in call(S, P + "/takes")["clips"] if c["index"] == 2][0]["takes"][-1]
     # plan of a queued generation
     call(S, "/api/queue/pause", {})
-    job = call(S, P + "/generate", {"clip": 2, "branch": "b1", "parent": t1b["id"].split("_")[1], "random": True})
+    job = call(S, P + "/generate", {"clip": 2, "after": t1b["id"]})
     jp = call(S, f"{P}/jobs/{job['id']}/plan")
     check("plan of a queued generation", jp.get("source") == "job" and jp.get("snapshot", {}).get("name") == names[1], jp)
     check("plan of a queued generation gives its models", ((jp.get("generation") or {}).get("models") or {}).get("unet_name"), jp.get("generation"))
@@ -81,7 +78,7 @@ try:
             page.on("pageerror", lambda e: errs.append(str(e)))
             await page.goto(S + "/"); await page.evaluate("localStorage.setItem('h3studio.project','rue')"); await page.reload(); await page.wait_for_timeout(1500)
             check("no version banner when page and server agree", await page.locator("#encoreVersionBanner").count() == 0)
-            await page.click("#viewTabs >> text=Takes"); await page.wait_for_timeout(1200)
+            await takes_screen(page); await page.wait_for_timeout(1200)
             # ▶▶: fixed label, inside the branch header
             fill = page.locator(".tk-band-head .tk-fill").first
             text, title = await fill.text_content(), await fill.get_attribute("title")
@@ -104,27 +101,22 @@ try:
             nulls.append(await page.locator(".tk-plan-modal").inner_text())
             await page.locator(".tk-plan-modal .tk-plan-gen").scroll_into_view_if_needed(); await page.screenshot(path="v28_boxplan.png")
             await page.click(".tk-plan-modal >> text=Close"); await page.wait_for_timeout(300)
-            # ▾ dialog: own settings for one take
+            # 0.42: « new take » opens the launch panel with the take's own settings (the ▾ dialog is gone)
             card = page.locator(f".tk-card[data-take='{t2['id']}']"); await card.hover()
-            await card.locator(".tk-split-arrow").first.click(); await page.wait_for_timeout(800)
-            dl = page.locator(".tk-modal").last
+            await card.locator("button.tk-retake").click(); await page.wait_for_timeout(1200)
+            dl = page.locator("#launchPanel")
             line = dl.locator(".studio-up-line")
-            check("▾ dialog: folded, « changed for this take » from the take's settings", "Changed for this take" in await line.inner_text()
+            check("panel: folded, « changed for this take » from the take's settings", "Changed for this take" in await line.inner_text()
                   and await dl.locator(".studio-up-sum").count() == 0, await line.inner_text())
             await line.locator("button:has-text('modify')").click(); await page.wait_for_timeout(300)
-            check("▾ dialog: « modify » unfolds the form with « enabled »", await dl.locator(".studio-up-sum").count() == 1
+            check("panel: « modify » unfolds the form with « enabled »", await dl.locator(".studio-up-sum").count() == 1
                   and await dl.locator(".tk-row:has(label:text('Enabled'))").count() == 1)
             await page.screenshot(path="v28_takedialog.png")
-            nulls.append(await dl.inner_text())
+            nulls.append(await dl.locator(".launch-gen").inner_text())
             await line.locator("button:has-text('reset')").click(); await page.wait_for_timeout(300)
-            check("▾ dialog: reset gives the branch's settings back", "Like branch" in await line.inner_text(), await line.inner_text())
-            await dl.locator(".tk-box-head button").click(); await page.wait_for_timeout(400)
-            # clip (column) dialog: LoRA only
-            await page.locator(".tk-col-head").nth(1).locator(".tk-clipdef").click(); await page.wait_for_timeout(700)
-            dl = page.locator(".tk-modal").last
-            check("column dialog: LoRA only, no upscale", "upscale" not in (await dl.inner_text()).lower() and await dl.locator(".studio-loras").count() == 1, await dl.inner_text())
-            nulls.append(await dl.inner_text())
-            await dl.locator(".tk-box-head button").click(); await page.wait_for_timeout(500)
+            check("panel: reset gives the branch's settings back", "Like branch" in await line.inner_text(), await line.inner_text())
+            await dl.locator(".launch-foot button:has-text('Cancel')").click(); await page.wait_for_timeout(400)
+            check("no column settings any more (0.42)", await page.locator(".tk-col-head .tk-clipdef").count() == 0)
             # the queue window and the folder chooser had « null » parts too
             await page.click("#studioQueueBtn"); await page.wait_for_timeout(600)
             nulls.append(await page.locator(".tk-modal").last.inner_text())

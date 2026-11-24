@@ -2,7 +2,7 @@
 a clear message when ComfyUI refuses an upload as too big (413), and a playable copy (H.264) of the videos the
 browser cannot play (here an AVI), made with its progress, used by the players, deleted with the video."""
 import asyncio, json, os, shutil, subprocess, sys, time, urllib.request, urllib.error
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from common import ENCORE, CHROME, fixture  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from common import ENCORE, CHROME, fixture, plan_screen, takes_screen, launch_go  # noqa: E402
 from playwright.async_api import async_playwright
 S = "http://127.0.0.1:8243"; M = "http://127.0.0.1:8771"
 OK = []
@@ -39,7 +39,6 @@ try:
     call(S, P + "/import-plan?filename=rue.json", raw=open(fixture("rue_test_v1.plan.json"), "rb").read(), method="POST")
     for f in (fixture("fillette.png"), fixture("rue.png")):
         call(S, f"{P}/resources?kind=images&filename={os.path.basename(f)}", raw=open(f, "rb").read(), method="POST")
-    call(S, P + "/branches", {})
     call(S, P + "/branches/b1", {"refs": {"fillette": {"image": "refs/images/fillette.png"}, "rue": {"image": "refs/images/rue.png"}}}, "PUT")
 
     # ---- ComfyUI's folder unknown: the upload route, and its 413 explained
@@ -70,6 +69,8 @@ try:
     check("an AVI imported", res.get("path") == "refs/videos/clip.avi", res)
     check("preview status of a file that is not a video: refused", "error" in call(S, f"{P}/resources/preview?path=refs/images/rue.png"))
     check("no playable copy yet", call(S, f"{P}/resources/preview?path=refs/videos/clip.avi")["state"] == "none")
+    # 0.42: a start video is fixed once a branch has takes: a fresh branch for this part
+    call(S, P + "/branches/b1?confirm=1", method="DELETE"); call(S, P + "/branches", {})
     plan = call(S, P)["plan"]
     plan["refs"]["intro"] = "start video"; plan["start_video"] = {"ref": "intro", "start": 0, "end": 4}; plan["clips"][0]["continue"] = True
     call(S, P + "/plan", plan, "PUT")
@@ -81,6 +82,7 @@ try:
             page = await b.new_page(viewport={"width": 1600, "height": 950}); errs = []
             page.on("pageerror", lambda e: errs.append(str(e)))
             await page.goto(S + "/"); await page.evaluate("localStorage.setItem('h3studio.project','rue')"); await page.reload(); await page.wait_for_timeout(1500)
+            await plan_screen(page)
             await page.locator(".tl .block.startvid").click(); await page.wait_for_timeout(1500)
             box = page.locator(".start-video")
             note = box.locator(".studio-preview-note")

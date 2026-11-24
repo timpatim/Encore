@@ -41,3 +41,28 @@ def restart_mock():
             return
         time.sleep(0.1)
     raise RuntimeError("the fake ComfyUI did not start: see tests/e2e/out/mock.log")
+
+
+# ---- chantier A (0.42): the Takes screen is the main screen; the plan editor is the plan screen
+async def plan_screen(page, master=False, wait=900):
+    """Opens the plan screen: the plan of the selection (or the master plan of the selected branch)."""
+    if await page.is_visible("#studioBackBtn"):
+        return
+    await page.wait_for_selector(".tk-twigplan, .tk-master", timeout=15000)
+    await page.click(".tk-master" if master else ".tk-twigplan")
+    await page.wait_for_timeout(wait)
+
+
+async def takes_screen(page, wait=900):
+    """Back to the Takes screen (the plan screen saves what changed)."""
+    if await page.is_visible("#studioBackBtn"):
+        await page.click("#studioBackBtn")
+        await page.wait_for_timeout(wait)
+
+
+async def launch_go(page, wait=900):
+    """The launch panel opened by a click on a take, a « + » box or « nouvelle prise »: generate."""
+    await page.wait_for_selector("#launchPanel .launch-foot button.primary:not([disabled])", timeout=15000)
+    await page.wait_for_timeout(400)
+    await page.click("#launchPanel .launch-foot button.primary")
+    await page.wait_for_timeout(wait)

@@ -3,7 +3,7 @@ proportions, « cut on the shots » (a new scene per change of shot, long shots 
 other), each clip given its slice of the video as <Video 1> with its sound (voices numbered after it), the source
 slice behind the empty take cards, and the assembly with the original sound."""
 import asyncio, json, os, shutil, subprocess, sys, time, urllib.request, urllib.error
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from common import ENCORE, CHROME, fixture  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from common import ENCORE, CHROME, fixture, plan_screen, takes_screen, launch_go  # noqa: E402
 from playwright.async_api import async_playwright
 S = "http://127.0.0.1:8246"; M = "http://127.0.0.1:8771"
 OK = []
@@ -21,6 +21,8 @@ def run_mock():
     try: call(M, "/test/run", {})
     except Exception: pass
 def gen(body):            # until the job is over: the mock runs what ComfyUI has received
+    if body.get("clip", 1) > 1 and "after" not in body:      # 0.42: after the take chosen for the clip before
+        body = dict(body, after=call(S, P)["plan_takes"].get(str(body["clip"] - 1)))
     out = call(S, P + "/generate", body)
     for _ in range(40):
         time.sleep(0.7); run_mock()
@@ -50,11 +52,14 @@ try:
     subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=500:duration=4", voice], check=True)
     call(S, f"{P}/resources?kind=voices&filename=voix.wav", raw=open(voice, "rb").read(), method="POST")
     res = call(S, f"{P}/resources?kind=videos&filename=source.mp4", raw=open(SRC, "rb").read(), method="POST")
-    call(S, P + "/branches", {})
     call(S, P + "/branches/b1", {"refs": {"fillette": {"image": "refs/images/fillette.png", "voice": "refs/voices/voix.wav"},
                                           "rue": {"image": "refs/images/rue.png"}}, "width": 768, "height": 768}, "PUT")
     cuts = call(S, f"{P}/resources/scenes?path=refs/videos/source.mp4&start=0&end=672")
     check("changes of shot found in the segment", cuts.get("cuts") == [216, 504], cuts)
+
+    # 0.43: the video (edit) and its file are the project's (« Project settings »)
+    out = call(S, P + "/essence", {"video": "edit", "video_file": "refs/videos/source.mp4"}, "PUT")
+    check("project: edit a video, its file", out.get("essence", {}).get("video") == "edit" and out.get("start_video_file") == "refs/videos/source.mp4", out.get("error"))
 
     async def main():
         async with async_playwright() as p:
@@ -62,14 +67,12 @@ try:
             page = await b.new_page(viewport={"width": 1600, "height": 950}); errs = []
             page.on("pageerror", lambda e: errs.append(str(e)))
             await page.goto(S + "/"); await page.evaluate("localStorage.setItem('h3studio.project','rue')"); await page.reload(); await page.wait_for_timeout(1500)
+            await plan_screen(page)
             await page.click("text=Plan settings"); await page.wait_for_timeout(800)
             box = page.locator(".start-video")
-            check("plan settings: a Video section with the 3 choices", await box.locator(".sv-kind option").count() == 3)
-            await box.locator(".sv-kind").select_option("edit"); await page.wait_for_timeout(600)
-            box = page.locator(".start-video")
+            check("plan settings: the project's video kind shown, not chosen there", await box.locator(".sv-kind").count() == 0 and await box.locator(".sv-kind-label").count() == 1)
             check("« Edit a video »: its explanation", "each clip edits its own slice" in await box.inner_text())
-            await box.locator(".sv-file select").select_option("refs/videos/source.mp4"); await page.wait_for_timeout(1500)
-            box = page.locator(".start-video")
+            await page.wait_for_timeout(1000)
             end = box.locator(".sv-range input[type=number]").nth(1)
             await end.fill("28"); await end.dispatch_event("change"); await page.wait_for_timeout(500)
             check("the segment shown", "0.000 s → 28.000 s" in (await box.locator(".sv-info").inner_text()).replace(",", "."),
@@ -107,7 +110,7 @@ try:
             saved = call(S, P + "/plan", plan, "PUT")
             check("plan saved (current version)", saved.get("plan", {}).get("version") == 6 and not saved["validation"]["errors"], saved.get("validation"))
             await page.reload(); await page.wait_for_timeout(1500)
-            await page.click("#viewTabs >> text=Takes"); await page.wait_for_timeout(2500)
+            await takes_screen(page); await page.wait_for_timeout(2500)
             src = page.locator(".tk-placeholder .tk-src-thumb").first
             state = ""
             for _ in range(60):

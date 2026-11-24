@@ -1,5 +1,5 @@
 import asyncio, json, os, shutil, subprocess, sys, time, urllib.request
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from common import ENCORE, CHROME, fixture, restart_mock  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from common import ENCORE, CHROME, fixture, restart_mock, plan_screen, takes_screen, launch_go  # noqa: E402
 from playwright.async_api import async_playwright
 S = "http://127.0.0.1:8220"; M = "http://127.0.0.1:8771"
 def call(base, path, body=None, method=None, raw=None):
@@ -15,21 +15,21 @@ call(S, "/api/projects", {"name": "rue", "mode": "free"})
 call(S, P + "/import-plan?filename=rue.json", raw=open(fixture("rue_test_v1.plan.json"), "rb").read(), method="POST")
 for kind, f in (("images", fixture("fillette.png")), ("images", fixture("rue.png"))):
     call(S, f"{P}/resources?kind={kind}&filename={os.path.basename(f)}", raw=open(f, "rb").read(), method="POST")
-call(S, P + "/branches", {}); call(S, P + "/branches/b1", {"refs": {"fillette": {"image": "refs/images/fillette.png"}, "rue": {"image": "refs/images/rue.png"}}}, "PUT")
+call(S, P + "/branches/b1", {"refs": {"fillette": {"image": "refs/images/fillette.png"}, "rue": {"image": "refs/images/rue.png"}}}, "PUT")
 async def main():
     async with async_playwright() as p:
         b = await p.chromium.launch(executable_path=CHROME, args=["--no-sandbox"])
         page = await b.new_page(viewport={"width": 1700, "height": 1000}); errs = []
         page.on("pageerror", lambda e: errs.append(str(e)))
         await page.goto(S + "/"); await page.evaluate("localStorage.setItem('h3studio.project','rue')"); await page.reload(); await page.wait_for_timeout(1300)
-        await page.click("#viewTabs >> text=Prises"); await page.wait_for_timeout(800)
+        await takes_screen(page); await page.wait_for_timeout(800)
         run = lambda: call(M, "/test/run", {})
         msgs = []
         async def on_dialog(d):
             msgs.append(d.message); await d.accept()
         page.on("dialog", on_dialog)
         call(S, "/api/queue/pause", {"mode": "after"})
-        A = call(S, P + "/generate", {"clip": 1, "branch": "b1"}); B = call(S, P + "/generate", {"clip": 2, "parent": A["token"]})
+        A = call(S, P + "/generate", {"clip": 1, "branch": "b1"}); B = call(S, P + "/generate", {"clip": 2, "after": A["take_id"]})
         C = call(S, P + "/generate", {"clip": 1, "random": True, "branch": "b1"})
         await page.wait_for_timeout(2500)
         print("ghosts", await page.eval_on_selector_all(".tk-ghost-label", "e => e.map(x => x.textContent)"))

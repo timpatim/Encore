@@ -4,6 +4,118 @@ Versions of Encore (called H3 Studio up to 0.16). Each version is delivered as `
 Encore needs the ComfyUI plugin [ComfyUI-H3-ClipPlan](https://github.com/timpatim/ComfyUI-H3-ClipPlan)
 3.11 or newer.
 
+## 0.45.1
+
+- README: new screenshots (takes screen, launch panel, plan of the selection, plan window, queue); the
+  screenshot script works again (the song is the project's since 0.43). No change to the application.
+
+## 0.45
+
+- **« Use this plan… »** on the plan of a selection: its plan (the generated clips as they were made, then what
+  follows) becomes **the master plan of its branch** (the previous one goes to the trash, from which it comes back
+  in one click) or the master plan of **a new branch** with the settings of that branch (nothing taken over,
+  everything to generate; the current branch does not change). To try prompts that work in other branches.
+- **A generation still queued or running can be chosen** with a click, like a take: the selection goes through the
+  take it will make; « Plan of the selection… », « Use this plan… » and « ▶ assemble » (planned after it) work
+  without waiting. Once made, the take stays chosen.
+- Development: `projects.use_twig_plan`, `trash.replace_master`; the twig of a selection can go through a take not
+  made yet (`plans.PENDING`). Tests in `a3_api_test`, `a3_ui_test`.
+
+## 0.44.1
+
+- Fixed: the **Project settings** (diffusion model, sampling, LoRA stack, previews…) were no longer saved since
+  0.42 (« internal error … save_settings »), and « Apply the default settings » failed the same way. A test now
+  changes the model of a project and checks that the next generation uses it.
+
+## 0.44
+
+**Deleting and the trash** (chantier A, lot 3).
+
+- **🗑 on a take** (on hover): deletes it with every take made after it, in any branch. The confirmation lists
+  them by clip, and says what a branch that took the take over keeps (« « Branch 3 » will keep clips 1 to 2
+  only »). Refused while a generation queued or running needs one of them.
+- **Deleting a branch** no longer deletes the takes another branch takes over: they stay, shown in that branch.
+- **Trash** (« Trash… » button of the project): nothing is erased when something is deleted. A take with what
+  followed it, or a branch with its takes, master plan and assembled videos, waits there: **Restore** puts it back
+  whole (and the clips other branches took over); **Erase** or **Empty the trash** deletes the files for good.
+- **Ctrl+Z / Ctrl+Y** only where the plan is edited (plan screen, launch panel): no more change to the plan by
+  mistake from the takes screen.
+- **« + next clip »** with no clip planned (neither the selection nor the master plan): a copy of the clip before
+  (prompt, length, references, lines), continuing it (↪).
+- **The launch panel lies over the screen**: the takes and the assembled videos no longer move; the take it starts
+  from is brought beside it, and the view goes back when it closes.
+- Fixed: scrolled to the bottom (last branch at the top of the view), the frame of the overview went out of it.
+- Development: new `encore/trash.py` and `ui/plan_trash.js`; new tests `a3_api_test`, `a3_ui_test`.
+
+## 0.43
+
+**Branches** (chantier A, lot 2). Projects of earlier versions are not converted.
+
+- **The project holds what the video is; branches hold variations.** Mode (music video or free), video (none,
+  continue one, edit one) and its file, song and context are set in **Project settings**, the same for every
+  branch, and fixed by the first take of the project. A branch keeps its picture size, the segment of the video
+  (in its master plan), its reference files, LoRA and upscale.
+- **New branch window**: empty, **from a plan file**, or **duplicate a branch** — without clips, or **taking over
+  the clips 1 to k of the selection** (by reference, nothing is copied: they show dimmed, « ⇡ Branch 1 », and
+  generation goes on from clip k+1). The window says which references stay fixed (used by a clip taken over).
+- **Branch settings window** (one « settings… » button instead of references…, LoRA…, upscale…): what the takes
+  fix is greyed from the start, with a tooltip saying why and how (duplicate the branch); no more refusal after
+  the change. The same in the plan settings (segment) and the project settings.
+- **New scenes (✂) follow the selection again**, as before the refonte: a new-scene take hangs on the take selected
+  before it when it starts there at the same moment of the song (free mode: always). Plan of the selection, ▶▶ and
+  assemblies follow.
+- **« + next clip » after every take without continuation**, even past the end of the plan: the panel is
+  pre-filled with the next clip of the selection's plan, else of the master plan, else a new clip taking over the
+  one before.
+- **↻ new take…** also on a generation still queued or running.
+- **Import a plan…** only on the master plan screen of a branch, greyed once the branch has takes (make a new
+  branch from the file). While the project has no take, an imported or saved plan sets its mode, video and context.
+- Fixed: the launch panel showed the pictures of the selected branch instead of its own.
+- Development: new `ui/plan_branch.js`; `plans.cut_fits`, `plans.fits_map`, `projects.new_branch`,
+  `projects.set_essence`; new tests `a2_api_test`, `a2_ui_test`, `unit/cuts_test.py`.
+
+## 0.42
+
+**Each twig has its own plan** (chantier A, lot 1). Projects of earlier versions are not converted: start new
+projects.
+
+- **A take never goes stale any more.** Each branch has a **master plan**; each take records the plan of what
+  follows it. The plan of a twig (a take and the takes it continues) is the frozen part of each of its takes, then
+  the plan that follows its last take. Changing the master plan or the plan of one twig changes nothing for the
+  others. Invalidated takes (yellow stripes), ⟲ redo and the assembly of invalidated takes are gone.
+- **The takes screen is the main screen.** The Plan tab is replaced by a plan screen opened from it: **master
+  plan…** (branch header) or **Plan of the selection…** (new selection bar above the graph), back with
+  **← Takes**. In the plan of a selection, the clips already generated show 🔒 and are read only; clips can be
+  added or changed after them.
+- **Launch panel**: **↻ new take…** and **+ next clip…** open a panel over the takes: which twig's plan to start
+  from (when several go through the take; hover highlights it), seed (a new take keeps the seed of the take it
+  redoes, 🎲 for a random one, warning when the take would be identical; the next clip gets a random seed),
+  LoRA and upscale of the take, and the clip in the plan editor. It replaces the « tuned take » dialog (▾).
+- **The selection is a twig**: clicking a take selects it and the takes it continues. ▶▶ completes the selected
+  twig to the end of its plan; ▶ assemble 1–k assembles the twig of the take.
+- **Frozen once a branch has a take**: its size, its song, the files of its references already used, and the
+  plan settings that the takes depend on (mode, start or edited video, context). The start video can only be
+  changed while no branch has a take. Assembly options stay free.
+- **Import a plan…** goes into a branch: it replaces the master plan of a branch without takes, otherwise it makes
+  a new branch. The seeds of the file are ignored. A new project starts with « Branch 1 »; a new branch copies the
+  master plan of the last one.
+- **Removed**: checkpoints (and the automatic checkpoint limit of the home page), the per-clip LoRA (⚙ of a clip
+  column). Deleting a branch deletes its takes,
+  plans and videos for good.
+- Development: new `encore/plans.py` and `ui/plan_launch.js`; `encore/checkpoints.py` removed; new tests
+  `a1_api_test`, `a1_ui_test`; `v24_test` and `v24_ui_test` removed. Plugin unchanged (3.11).
+
+## 0.41
+
+No change in behaviour: code reorganisation for maintenance.
+
+- `encore/engine.py` (2,400 lines) loses its stateless parts, moved to their own files: `encore/workflows.py`
+  (ComfyUI workflows, latent upscale, missing nodes), `encore/exports.py` (assembled videos: names, info files,
+  list) and `encore/diagnostic.py` (preview diagnostic). The moved code is unchanged.
+- New [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (in French): which file does what, the sections of the engine
+  and its shared state, where to make a change, and which tests to run for each file.
+- The test pictures (`tests/fixtures/*.png`) are back in the delivered archive: they were missing from 0.40's.
+
 ## 0.40
 
 - **Video editing rolled back: it works as in 0.38 again** (plugin 3.11). The 0.39 sharpness fix broke the

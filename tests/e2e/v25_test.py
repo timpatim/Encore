@@ -1,6 +1,6 @@
 """v0.25: the fixes of the audit (lot A)."""
 import asyncio, glob, json, os, shutil, subprocess, sys, time, urllib.request, urllib.error
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from common import ENCORE, CHROME, fixture, restart_mock  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from common import ENCORE, CHROME, fixture, restart_mock, plan_screen, takes_screen, launch_go  # noqa: E402
 sys.path.insert(0, ENCORE)
 S = "http://127.0.0.1:8237"; M = "http://127.0.0.1:8771"
 OK = []
@@ -49,7 +49,7 @@ try:
     upload(P + "/import-plan?filename=rue.json", open(fixture("rue_test_v1.plan.json"), "rb").read())
     for f in (fixture("fillette.png"), fixture("rue.png")):
         upload(f"{P}/resources?kind=images&filename={os.path.basename(f)}", open(f, "rb").read())
-    call(P + "/branches", {}); print("branch", call(P + "/branches/b1", {"refs": {"fillette": {"image": "refs/images/fillette.png"}, "rue": {"image": "refs/images/rue.png"}}}, "PUT"))
+    print("branch", call(P + "/branches/b1", {"refs": {"fillette": {"image": "refs/images/fillette.png"}, "rue": {"image": "refs/images/rue.png"}}}, "PUT"))
 
     # ---- 1. ComfyUI unreachable at dispatch (English messages): the job waits, it does not fail
     call("/api/queue/pause", {})
@@ -65,7 +65,7 @@ try:
     check("after ComfyUI is back: take made", t1["id"].startswith("s"), t1["id"])
 
     # ---- 8. ComfyUI restarted while a job waits in it: requeued and made
-    job = call(P + "/generate", {"clip": 2, "branch": "b1", "parent": t1["id"].split("_")[1], "random": True})
+    job = call(P + "/generate", {"clip": 2, "branch": "b1", "after": t1["id"]})
     time.sleep(2.5)
     j = next(x for x in jobs() if x["id"] == job["id"])
     check("job sent to ComfyUI", j.get("dispatched"), j)
@@ -100,23 +100,21 @@ try:
         time.sleep(2); run_mock()
     time.sleep(3)
 
-    # ---- 3. invalidated takes assembled after a reference was renamed
-    plan = json.load(open(f"{root}/projets/rue/plan.json"))
-    text = json.dumps(plan).replace("fillette", "girl")
-    plan = json.loads(text); plan["clips"][0]["frames"] = 192
-    call(P + "/plan", plan, "PUT")
-    chk = call(P + "/assemble-check", {"clip": 2, "take": t2["id"]})
-    check("check after a renamed reference: no error", not chk.get("error"), chk.get("error"))
-    job = call(P + "/assemble", {"clip": 2, "take": t2["id"], "allow_invalid": True})
+    # ---- 3. (0.42: no invalidated takes any more) the master plan changed: the twig is assembled as it was made
+    plan = call(P + "/plan?branch=b1")["plan"]
+    plan = json.loads(json.dumps(plan).replace("fillette", "girl")); plan["clips"][0]["frames"] = 192
+    call(P + "/plan", {"branch": "b1", "plan": plan}, "PUT")
+    job = call(P + "/assemble", {"clip": 2, "take": t2["id"]})
     time.sleep(2); run_mock(); time.sleep(4)
     a = [x for x in jobs() if x["kind"] == "assemble"]
-    check("assembly with a renamed reference done", a and a[-1]["status"] == "done", [(x["status"], x.get("error")) for x in a])
+    check("assembly after the master plan changed: done", a and a[-1]["status"] == "done", [(x["status"], x.get("error")) for x in a])
     ex = a[-1].get("export") if a else None
     if ex:
         info = json.load(open(f"{root}/projets/rue/exports/{ex}.infos.json"))
         md = open(f"{root}/projets/rue/exports/{ex}.infos.md", encoding="utf-8").read()
         check("infos json: 'branch' key, clips is a number", "branch" in info and isinstance(info["video"]["clips"], int), (list(info), info["video"]["clips"]))
-        check("infos md in English with '.' decimals", "## Invalidated takes" in md and ",7 s" not in md and ",0 s" not in md)
+        check("infos md in English with '.' decimals", "## Clips" in md and ",7 s" not in md and ",0 s" not in md)
+        check("infos: the plan of the twig as made (not the master plan)", "fillette" in json.dumps(info["plan"]) and info["plan"]["clips"][0]["frames"] != 192)
 finally:
     srv.terminate()
 print(f"\n{sum(OK)}/{len(OK)} passed")

@@ -4,6 +4,126 @@ Versions d'Encore (appelé H3 Studio jusqu'à la 0.16). Chaque version est livr�
 `Encore_vX.Y.zip`. Encore a besoin du plugin ComfyUI
 [ComfyUI-H3-ClipPlan](https://github.com/timpatim/ComfyUI-H3-ClipPlan) 3.11 ou plus récent.
 
+## 0.45.1
+
+- README : nouvelles captures (écran des prises, panneau de lancement, plan de la sélection, fenêtre de plan,
+  file) ; le script des captures remarche (la chanson est celle du projet depuis la 0.43). Aucun changement de
+  l'application.
+
+## 0.45
+
+- **« Utiliser ce plan… »** sur le plan d'une sélection : son plan (les clips générés tels qu'ils ont servi, puis la
+  suite) devient **le plan maître de sa branche** (l'ancien part à la corbeille, d'où il revient d'un clic) ou le plan
+  maître d'**une nouvelle branche** avec les réglages de cette branche (aucun clip repris, tout à générer ; la branche
+  courante ne change pas). Pour essayer dans d'autres branches des prompts qui marchent.
+- **Une génération encore en file ou en cours se choisit** d'un clic, comme une prise : la sélection passe par la
+  prise qu'elle fera ; « Plan de la sélection… », « Utiliser ce plan… » et « ▶ assembler » (planifié après elle)
+  marchent sans attendre. Une fois faite, la prise reste choisie.
+- Développement : `projects.use_twig_plan`, `trash.replace_master` ; la brindille d'une sélection peut passer par
+  une prise pas encore faite (`plans.PENDING`). Tests dans `a3_api_test`, `a3_ui_test`.
+
+## 0.44.1
+
+- Corrigé : les **Réglages du projet** (modèle de diffusion, échantillonnage, pile de LoRA, aperçus…) ne
+  s'enregistraient plus depuis la 0.42 (« internal error … save_settings »), et « Reprendre les réglages par
+  défaut » échouait de la même façon. Un test change maintenant le modèle d'un projet et vérifie que la génération
+  suivante l'utilise.
+
+## 0.44
+
+**Supprimer et la corbeille** (chantier A, lot 3).
+
+- **🗑 sur une prise** (au survol) : la supprime avec toutes les prises faites après elle, dans toutes les
+  branches. La confirmation les liste par clip, et dit ce que garde une branche qui reprenait la prise (« « Branche
+  3 » ne gardera que les clips 1 à 2 »). Refusé tant qu'une génération en file ou en cours a besoin de l'une d'elles.
+- **Supprimer une branche** ne supprime plus les prises qu'une autre branche reprend : elles restent, montrées dans
+  cette branche.
+- **Corbeille** (bouton « Corbeille… » du projet) : rien n'est effacé quand on supprime. Une prise avec sa suite, ou
+  une branche avec ses prises, son plan maître et ses vidéos assemblées, y attend : **Restaurer** la remet en entier
+  (et les clips que d'autres branches reprenaient) ; **Effacer** ou **Vider la corbeille** supprime les fichiers
+  pour de bon.
+- **Ctrl+Z / Ctrl+Y** seulement là où l'on modifie le plan (écran de plan, panneau de lancement) : plus de
+  modification du plan par mégarde depuis l'écran des prises.
+- **« + clip suivant »** sans clip prévu (ni dans la sélection ni dans le plan maître) : une copie du clip précédent
+  (prompt, durée, références, répliques), qui le continue (↪).
+- **Le panneau de lancement se pose par-dessus l'écran** : les prises et les vidéos assemblées ne bougent plus ; la
+  prise de départ est amenée à côté de lui, et la vue revient à sa fermeture.
+- Corrigé : scrollée tout en bas (dernière branche en haut de la vue), le cadre de la vue d'ensemble en sortait.
+- Développement : nouveaux `encore/trash.py` et `ui/plan_trash.js` ; nouveaux tests `a3_api_test`, `a3_ui_test`.
+
+## 0.43
+
+**Branches** (chantier A, lot 2). Les projets des versions précédentes ne sont pas convertis.
+
+- **Le projet porte ce qu'est la vidéo ; les branches portent les variations.** Le mode (clip musical ou libre),
+  la vidéo (aucune, continuer, éditer) et son fichier, la chanson et le contexte se règlent dans **Réglages du
+  projet**, les mêmes pour toutes les branches, et se figent avec la première prise du projet. Une branche garde sa
+  taille d'image, le segment de la vidéo (dans son plan maître), ses fichiers de références, ses LoRA et son upscale.
+- **Fenêtre « Nouvelle branche »** : vide, **à partir d'un fichier de plan**, ou **dupliquer une branche** — sans
+  clips, ou **en reprenant les clips 1 à k de la sélection** (par référence, rien n'est copié : ils apparaissent
+  estompés, « ⇡ Branche 1 », et on génère à partir du clip k+1). La fenêtre dit quelles références restent figées
+  (utilisées par un clip repris).
+- **Fenêtre « Réglages de la branche »** (un bouton « réglages… » au lieu de références…, LoRA…, upscale…) : ce que
+  les prises figent est grisé dès l'ouverture, avec une infobulle qui dit pourquoi et comment faire (dupliquer la
+  branche) ; plus de refus après coup. Pareil dans les réglages du plan (segment) et du projet.
+- **Les nouvelles scènes (✂) suivent de nouveau la sélection**, comme avant la refonte : une prise ✂ se rattache à
+  la prise sélectionnée avant elle si elle y commence au même moment de la chanson (en mode libre : toujours). Plan
+  de la sélection, ▶▶ et assemblages suivent.
+- **« + clip suivant » après toute prise sans suite**, même au-delà de la fin du plan : le panneau est pré-rempli
+  avec le clip suivant du plan de la sélection, sinon du plan maître, sinon un nouveau clip qui reprend le précédent.
+- **↻ nouvelle prise…** aussi sur une génération encore en file ou en cours.
+- **Importer un plan…** seulement sur l'écran du plan maître d'une branche, grisé dès qu'elle a des prises (créer une
+  branche à partir du fichier). Tant que le projet n'a aucune prise, un plan importé ou enregistré fixe son mode, sa
+  vidéo et son contexte.
+- Corrigé : le panneau de lancement montrait les images de la branche sélectionnée au lieu des siennes.
+- Développement : nouveau `ui/plan_branch.js` ; `plans.cut_fits`, `plans.fits_map`, `projects.new_branch`,
+  `projects.set_essence` ; nouveaux tests `a2_api_test`, `a2_ui_test`, `unit/cuts_test.py`.
+
+## 0.42
+
+**Chaque brindille a son propre plan** (chantier A, lot 1). Les projets des versions précédentes ne sont pas
+convertis : partir de nouveaux projets.
+
+- **Une prise ne se périme plus.** Chaque branche a un **plan maître** ; chaque prise enregistre le plan de ce qui
+  la suit. Le plan d'une brindille (une prise et celles qu'elle continue), c'est la partie figée de chacune de ses
+  prises, puis le plan qui suit sa dernière prise. Modifier le plan maître ou le plan d'une brindille ne change
+  rien pour les autres. Les prises invalidées (rayures jaunes), ⟲ refaire et l'assemblage de prises invalidées
+  disparaissent.
+- **L'écran des prises devient l'écran principal.** L'onglet Plan est remplacé par un écran de plan ouvert depuis
+  lui : **plan maître…** (en-tête de branche) ou **Plan de la sélection…** (nouvelle barre de sélection au-dessus
+  du graphe), retour par **← Prises**. Dans le plan d'une sélection, les clips déjà générés portent 🔒 et sont en
+  lecture seule ; on peut ajouter ou modifier des clips après eux.
+- **Panneau de lancement** : **↻ nouvelle prise…** et **+ clip suivant…** ouvrent un panneau par-dessus les
+  prises : de quelle brindille partir (quand plusieurs passent par la prise ; le survol la surligne), graine (une
+  nouvelle prise garde la graine de la prise qu'elle refait, 🎲 pour une graine au hasard, avertissement si la
+  prise serait identique ; le clip suivant reçoit une graine au hasard), LoRA et upscale de la prise, et le clip
+  dans l'éditeur de plan. Il remplace la fenêtre « prise réglée » (▾).
+- **La sélection est une brindille** : cliquer une prise la sélectionne avec celles qu'elle continue. ▶▶ complète
+  la brindille sélectionnée jusqu'à la fin de son plan ; ▶ assembler 1–k assemble la brindille de la prise.
+- **Figé dès qu'une branche a une prise** : sa taille, sa chanson, les fichiers de ses références déjà utilisées,
+  et les réglages du plan dont dépendent les prises (mode, vidéo de départ ou éditée, contexte). La vidéo de
+  départ ne se change que tant qu'aucune branche n'a de prise. Les options d'assemblage restent libres.
+- **Importer un plan…** va dans une branche : il remplace le plan maître d'une branche sans prise, sinon il crée
+  une nouvelle branche. Les graines du fichier sont ignorées. Un nouveau projet part avec « Branche 1 » ; une
+  nouvelle branche copie le plan maître de la dernière.
+- **Retirés** : les points de sauvegarde (et la limite de points automatiques de la page d'accueil), les LoRA par
+  clip (⚙ d'une colonne de clip). Supprimer une branche supprime définitivement ses prises, ses plans et ses vidéos.
+- Développement : nouveaux `encore/plans.py` et `ui/plan_launch.js` ; `encore/checkpoints.py` supprimé ;
+  nouveaux tests `a1_api_test`, `a1_ui_test` ; `v24_test` et `v24_ui_test` supprimés. Plugin inchangé (3.11).
+
+## 0.41
+
+Aucun changement de comportement : réorganisation du code pour la maintenance.
+
+- `encore/engine.py` (2 400 lignes) perd ses parties sans état, déplacées dans leurs propres fichiers :
+  `encore/workflows.py` (workflows ComfyUI, upscale latent, nœuds manquants), `encore/exports.py` (vidéos
+  assemblées : noms, fiches d'information, liste) et `encore/diagnostic.py` (diagnostic des aperçus). Le code
+  déplacé est inchangé.
+- Nouveau [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) : quel fichier fait quoi, les sections du moteur et son
+  état partagé, où intervenir pour une évolution, et quels tests lancer pour chaque fichier.
+- Les images des tests (`tests/fixtures/*.png`) sont de retour dans l'archive livrée : elles manquaient dans
+  celle de la 0.40.
+
 ## 0.40
 
 - **Retour arrière sur l'édition de vidéo : elle refonctionne comme en 0.38** (plugin 3.11). La correction de

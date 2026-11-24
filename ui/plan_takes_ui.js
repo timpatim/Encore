@@ -10,7 +10,8 @@
         studio: null, seenDone: new Set(),          // studio: Encore's API, given by useStudio()
     };
     const ed = () => window.H3Editor;
-    const plan = () => ed().state.plan;
+    // the plan of the selected twig (Encore), else the plan in the editor
+    const plan = () => (T.studio && T.studio.twig && T.studio.twig() && T.studio.twig().plan) || ed().state.plan;
     const $ = (id) => document.getElementById(id);
     function h(tag, attrs = {}, ...kids) {
         const node = document.createElement(tag);
@@ -34,18 +35,60 @@
 
 
     async function recompute() {
-        T.fingerprints = null;
-        T.resolved = null;
-        if (plan() && H3.framesLegal(plan())) {
-            T.fingerprints = await H3.takeFingerprints(plan());
-            T.resolved = resolveWith(T.pick);
-        }
+        T.fingerprints = plan() ? {} : null;     // (no fingerprints any more: kept as "the takes can be shown")
+        T.resolved = plan() ? resolveWith(T.pick) : null;
         renderTakes();
     }
 
-    // Encore's rules (nothing deleted: takes are "invalid", see plan_core.js)
+    // the take before a take in time: the one it continues, or the one it was timed after (new scene)
+    function predOf(r) { return (r && ((r.studio && r.studio.predecessor) || r.parent)) || null; }
+    // a take can come right after prevId: made after it, or a new scene (✂) that starts there at the same moment
+    // (the server lists them: T.fits)
+    // the clips a duplicated branch takes over from another one (by reference): [take ids of clips 1..k]
+    function baseOf(branch) { return (((branchesList().find((b) => b.id === branch) || {}).base) || {}).takes || []; }
+    function inBranch(r, branch) { return !!r && (branchOfRecord(r) === branch || baseOf(branch).includes(r.id)); }
+    function linkOk(r, prevId) { return !!r && (predOf(r) === prevId || ((T.fits || {})[r.id] || []).includes(prevId)); }
+    // the take before a take in the twig shown: a new scene hangs on the take selected before it when it fits there
+    function effPred(r, index) {
+        const sel = T.resolved && T.resolved[index - 1] && T.resolved[index - 1].chosen;
+        return sel && sel !== predOf(r) && linkOk(r, sel) ? sel : predOf(r);
+    }
+    // chantier A: a take never becomes invalid. The selection is a twig (a chain of predecessors from clip 1) in
+    // one branch; a take is "ok" when it follows the take chosen for the clip before, "other" otherwise.
+    function twigResolve(sel, branch) {
+        const bySaved = (a, b) => (a.saved_at || 0) - (b.saved_at || 0);
+        let active = branch || null;
+        if (!active && sel && sel[1]) active = branchOfRecord(recordOf(1, sel[1]));
+        if (!active) {
+            const c1 = [...(T.takes[1] || [])].sort(bySaved).pop();
+            const any = Object.values(T.takes || {}).flat()[0];
+            active = c1 ? branchOfRecord(c1) : any ? branchOfRecord(any) : defBranch();
+        }
+        const out = { branch: active };
+        const last = Math.max(0, (plan()?.clips || []).length, ...Object.keys(T.takes || {}).map(Number));
+        let prev = null, broken = false;
+        for (let i = 1; i <= last; i++) {
+            const states = {};
+            for (const r of [...(T.takes[i] || [])].sort(bySaved)) {
+                if (!inBranch(r, active)) states[r.id] = ["other", _t("takes.other_branch")];
+                else if (i > 1 && !linkOk(r, prev)) states[r.id] = ["other", _t("takes.built_on_another_take_of_the")];
+                else states[r.id] = ["ok", ""];
+            }
+            // a generation still waiting can be in the selection too (its take id is known at launch)
+            for (const j of T.jobs) {
+                if (j.kind !== "clip" || Number(j.clip) !== i || !j.record || !["queued", "running"].includes(j.status)) continue;
+                states[j.take_id] = inBranch(j.record, active) && (i === 1 || linkOk(j.record, prev)) ? ["ok", ""] : ["other", ""];
+            }
+            const want = sel && sel[i];
+            const chosen = !broken && want && states[want] && states[want][0] === "ok" ? want : null;
+            if (!chosen) broken = true;
+            out[i] = { chosen, takes: states };
+            prev = chosen;
+        }
+        return out;
+    }
     function resolveWith(pick) {
-        const resolve = (sel, branch) => H3.studioResolveTakes(plan(), T.takes, { ...sel, branch: branch || null }, T.fingerprints, T.studio.current());
+        const resolve = (sel, branch) => twigResolve(sel, branch);
         const res = resolve(pick, T.pickBranch);
         if (!res.branch || !isFolded(res.branch)) return res;
         // a folded branch never holds the selection: it goes to an unfolded branch, chosen like the resolver
@@ -70,23 +113,32 @@
     }
 
     // ------------------------------------------------------------------ choosing
-    function recordOf(index, id) { return (T.takes[index] || []).find((r) => r.id === id); }
+    function recordOf(index, id) {
+        return (T.takes[index] || []).find((r) => r.id === id)
+            || ((T.jobs.find((j) => j.kind === "clip" && Number(j.clip) === Number(index) && j.take_id === id) || {}).record);
+    }
     function recordAny(id) { for (const list of Object.values(T.takes)) for (const r of list) if (r.id === id) return r; return null; }
     const hasPreview = (id) => !!T.previewInfo[id];
-    function choose(index, id, quiet) {
+    function choose(index, id, quiet, inBand) {
         const state = T.resolved?.[index]?.takes?.[id];
         if (!state) return;
-        if (unusable(state[0])) { if (!quiet) toast(`${state[0] === "invalid" ? _t("takes.invalidated_take") : _t("takes.out_of_date_take")} : ${state[1]}`); return; }
         let pick = chosenMap();
-        const b = branchOfRecord(recordOf(index, id));
+        const b = inBand || branchOfRecord(recordOf(index, id));
         if (b !== T.resolved?.branch) pick = {};
         T.pickBranch = b;
         pick[index] = id;
+        // the twig through this take: its predecessors, and after it the takes chosen that still follow it
         let i = index, record = recordOf(index, id);
-        while (i > 1 && plan().clips[i - 1].continue && record && record.parent) {
-            pick[i - 1] = record.parent;
-            record = recordOf(i - 1, record.parent);
+        while (i > 1 && record && predOf(record)) {
+            // a new scene that fits after the take already chosen before it keeps that one (and what is before it)
+            if (pick[i - 1] && pick[i - 1] !== predOf(record) && linkOk(record, pick[i - 1])) break;
+            pick[i - 1] = predOf(record);
+            record = recordOf(i - 1, pick[i - 1]);
             i--;
+        }
+        for (let k = index + 1; pick[k]; k++) {
+            const r = recordOf(k, pick[k]);
+            if (!linkOk(r, pick[k - 1])) { for (let m = k; pick[m]; m++) delete pick[m]; break; }
         }
         T.pick = pick;
         T.resolved = resolveWith(T.pick);
@@ -156,6 +208,8 @@
         try {
             if (!T.settings || T.settingsProject !== plan().project) loadSettings();
             const listing = await T.server.takes(T.planFile);
+            if (listing.twig && T.studio.setTwig) T.studio.setTwig(listing.twig);
+            T.fits = listing.fits || {};
             try { T.exports = (await T.studio.exports()).exports || []; } catch (_) { T.exports = T.exports || []; }
             const takes = {}, previews = {}, selection = {};
             for (const clip of listing.clips) {
@@ -190,19 +244,32 @@
     function tokenOf(id) { return String(id).split("_").pop(); }
     function jobsOf(clip) { return T.jobs.filter((j) => j.kind === "clip" && j.clip === clip); }
 
-    async function generate(clipIndex, { parentToken = null, random = false, seed: forcedSeed = null, branch = null, upscale = null, loras = null, upscaleSettings = null } = {}) {
+    // a generation without the launch panel: {after, planFrom, entry, seed, branch, loras, upscaleSettings, editInstruction}
+    async function generate(clipIndex, opts = {}) {
         try {
-            const clip = plan().clips[clipIndex - 1];
-            await T.studio.savePlan();
-            const job = await T.studio.generate(clipIndex, clip.continue ? parentToken : null, random, forcedSeed, branch, upscale, loras, upscaleSettings);
+            const job = await T.studio.generate({ clip: clipIndex, after: opts.after || null, plan_from: opts.planFrom || null,
+                entry: opts.entry || null, seed: opts.seed ?? null, branch: opts.branch || null, loras: opts.loras ?? null,
+                upscale_settings: opts.upscaleSettings || null, edit_instruction: opts.editInstruction ?? null });
             if (!T.jobs.some((j) => j.id === job.id)) T.jobs.push(job);
             studioPollSoon(300);
             renderTakes();
+            return job;
         } catch (e) {
             alert(_t("takes.cannot_start_the_generation", { v0: e.message }));
+            return null;
         }
     }
-
+    // the generation settings a take was made with (LoRA and upscale), to make another one alike
+    function takeSettings(record) {
+        const st = (record && record.studio) || {};
+        return { loras: st.extra_loras || [], upscaleSettings: st.upscale ? { ...(st.upscale.settings || {}), enabled: true } : { enabled: false } };
+    }
+    // the launch panel (plan_launch.js): « new take » of a take (fork), or the clip after a take (or clip 1)
+    function openLaunch(opts) {
+        if (window.H3Launch) window.H3Launch.open({ ...opts, takesState: T });
+    }
+    function launchFork(index, record) { openLaunch({ mode: "fork", index, record, after: effPred(record, index), branch: branchOfRecord(record) }); }
+    function launchNext(index, after, branch) { openLaunch({ mode: "next", index, after, branch }); }
 
     async function assemble(leafClip, leafId) {
         try {
@@ -422,20 +489,15 @@
     function showPlanWindow(index, info, title, head) {
         const p = plan();
         const free = H3.mode(p) === "free";
-        const then = info.snapshot, now = info.current;
+        // chantier A: the portion of plan of the take, as it was made (there is no « plan now » to compare with)
+        const then = info.snapshot, now = info.snapshot;
         const same = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
         const cmpRow = (label, a, b, fmt = (v) => v ?? "—") => {
             const diff = then && !same(a, b);
             return h("div", { class: `tk-plan-row${diff ? " changed" : ""}` }, h("label", {}, label),
                 h("div", {}, then ? fmt(a) : "—", diff ? h("div", { class: "tk-plan-now" }, _t("takes.plan_now"), fmt(b)) : null));
         };
-        const source = !then ? _t("takes.plan_source_unknown")
-            : info.source === "record" ? _t("takes.plan_source_record")
-            : info.source === "current" ? _t("takes.plan_source_current")
-            : info.source === "previous" ? _t("takes.plan_source_previous")
-            : info.source === "job" ? _t("takes.plan_source_job")
-            : info.source.startsWith("checkpoint:") ? _t("takes.plan_source_checkpoint", { name: info.source.slice(11) })
-            : _t("takes.plan_source_export", { name: info.source.slice(7) });
+        const source = !then ? _t("takes.plan_source_unknown") : info.job ? _t("takes.plan_source_job") : _t("takes.plan_source_record");
         const fullSame = then && now && same(then.prompt, now.prompt) && same(then.frames, now.frames) && same(!!then.continue, !!now.continue)
             && same(then.refs || [], now.refs || []) && same(linesText(then, free), linesText(now, free));
         // references: the files the take was made with, against those of its branch now
@@ -469,8 +531,7 @@
         const shift = !free && info.raw_start != null && info.now_raw_start != null && info.raw_start !== info.now_raw_start;
         const body = h("div", { class: "tk-plan" },
             h("div", { class: "hint", style: "margin-bottom:8px" }, head),
-            h("div", { class: `tk-plan-banner${then && !fullSame ? " changed" : ""}` }, source,
-                then ? " " + (fullSame ? _t("takes.plan_identical") : _t("takes.plan_differs")) : ""),
+            h("div", { class: "tk-plan-banner" }, source),
             cmpRow(_t("takes.plan_name"), then && then.name, now && now.name),
             cmpRow(_t("takes.plan_length"), then && then.frames, now && now.frames, framesText),
             cmpRow(_t("takes.plan_link"), then && !!then.continue, now && !!now.continue, (v) => continueText({ continue: v }, index)),
@@ -539,7 +600,6 @@
             h("span", {}, h("i", { class: "lg chosen" }), _t("takes.chosen_take")),
             h("span", {}, h("i", { class: "lg" }), _t("takes.usable")),
             h("span", {}, h("i", { class: "lg other" }), _t("takes.built_on_another_take_of_the")),
-            h("span", {}, h("i", { class: "lg invalid" }), _t("takes.invalidated_redo")),
             h("span", {}, _t("takes.click_choose_used_to_assemble_before") + _t("takes.hover_play_double_click_larger_preview") + _t("takes.new_take_of_the_clip_box"))));
 
         if (!branchesList().length) {
@@ -550,6 +610,7 @@
             return;
         }
         box.append(viewBar());
+        box.append(selectionBar(p));
         const graph = buildBands(p);
         const viewport = h("div", { class: "tk-viewport" });
         const canvas = h("div", { class: "tk-canvas", style: `width:${graph.width}px;height:${graph.height}px` });
@@ -559,7 +620,7 @@
         svg.setAttribute("height", graph.height);
         svg.classList.add("tk-svg");
         canvas.append(svg);
-        const n = p.clips.length;
+        const n = columnCount(p);
         // frozen panes. The clip names live in their own layer, kept on top by the browser itself (position: sticky):
         // vertical scrolling is done by the browser, a script would follow it one frame late. The branch column moves
         // with the horizontal scroll, which only the Studio's own code does (drag, minimap): stickPanes follows it at once.
@@ -579,13 +640,12 @@
                 h("div", { class: "hint" }, `${startVideoName() || _t("takes.start_video_no_file")} · ${clipLength(sv.frames)}`)));
         }
         for (let index = 1; index <= n; index++) {
-            const clip = p.clips[index - 1];
-            const res = T.resolved[index];
+            const clip = p.clips[index - 1] || { name: "", continue: true };
+            const res = T.resolved[index] || {};
             const count = (T.takes[index] || []).length;
             top.append(h("div", { class: "tk-col-head", style: `left:${colX(index)}px;width:${COLW}px` },
-                h("div", { class: "tk-col-name" }, planButton(index), h("b", {}, `${index} `), (clip.continue ? "↪ " : "") + (clip.name || "")),
-                h("div", { class: "hint" }, _t("takes.take_s", { count }) + (res.chosen ? "" : _t("takes.none_usable"))),
-                clipDefaultsButton(index)));
+                h("div", { class: "tk-col-name" }, p.clips[index - 1] ? planButton(index) : null, h("b", {}, `${index} `), (clip.continue ? "↪ " : "") + (clip.name || "")),
+                h("div", { class: "hint" }, _t("takes.take_s", { count }))));
             if (index > 1 && !clip.continue) {
                 canvas.append(h("div", { class: "tk-cut", style: `left:${colX(index) - gapX() / 2}px;height:${graph.height - 10}px` }));
                 top.append(h("span", { class: "tk-cut-mark", style: `left:${colX(index) - gapX() / 2 - 7}px` }, "✂"));
@@ -659,13 +719,8 @@
             .sort((a, b) => (a.saved_at || 0) - (b.saved_at || 0));
         return list.length ? list[list.length - 1].id : null;
     }
-    async function newBranch() {
-        try {
-            const res = await T.studio.createBranch();
-            if (!res.copied_from) await T.studio.openBranch(res.branch.id, { first: true });
-            recompute();
-        } catch (e) { alert(e.message); }
-    }
+    // « + nouvelle branche »: empty, from a plan file or a duplicate (plan_branch.js)
+    function newBranch() { window.H3Branch.create(); }
     // hovering a small picture shows it large in a bubble above the page (same size whatever the zoom)
     let zoomBubble = null;
     function hideZoom() { if (zoomBubble) { zoomBubble.remove(); zoomBubble = null; } }
@@ -754,30 +809,60 @@
             h("div", { class: "tk-band-title" }, foldToggle(br, false), h("i", { style: `background:${br.color}` }),
                 h("b", { title: _t("takes.double_click_rename"), ondblclick: () => T.studio.renameBranch(br.id) }, br.name),
                 active ? h("span", { class: "hint" }, _t("takes.selection")) : null),
+            br.base && br.base.takes ? h("div", { class: "hint tk-band-base" }, _t("takes.takes_over", { k: br.base.takes.length,
+                name: (branchesList().find((b) => b.id === br.base.from) || { name: br.base.from }).name })) : null,
             h("div", { class: "tk-band-refs" }, thumbs.length ? thumbs : h("span", { class: "hint" }, _t("takes.no_picture"))),
             h("div", { class: "hint" }, _t("takes.mp_ref", { width: br.width, height: br.height, v2: ((br.width * br.height) / (1024 * 1024)).toFixed(2).replace(/0$/, "").replace(".", H3I18n.decimal()), v3: br.ref_image_size || "max" })),
             voices.length ? h("div", { class: "hint" }, _t("takes.voice_2") + voices.join(", ")) : null,
             !free ? h("div", { class: "hint" }, "♪ " + (br.song ? br.song.split("/").pop() : _t("takes.no_song"))) : null,
             missing.length ? h("div", { class: "tk-band-warn" }, _t("takes.to_choose") + missing.join(", ")) : null,
             h("div", { class: "tk-inline", style: "margin-top:6px" },
-                h("button", { class: "small", onclick: () => T.studio.openBranch(br.id) }, _t("takes.references_2")),
-                h("button", { class: `small ${br.upscale && br.upscale.enabled ? "tk-up-on" : ""}`, title: _t("takes.latent_upscale_first_pass_at_a"),
-                    onclick: () => T.studio.openUpscale(br.id) }, br.upscale && br.upscale.enabled ? "⇧ upscale…" : "upscale…"),
-                h("button", { class: `small ${(br.loras || []).length ? "tk-lora-on" : ""}`,
-                    title: (br.loras || []).length ? _t("takes.lora_added_to_the_takes_of") + T.studio.fmtLoras(br.loras) : _t("takes.lora_added_to_the_takes_of_2"),
-                    onclick: () => T.studio.openBranchLoras(br.id) }, (br.loras || []).length ? _t("takes.lora_3", { length: br.loras.length }) : _t("takes.lora_2")),
+                h("button", { class: "small tk-brsettings", onclick: () => window.H3Branch.settings(br.id),
+                    title: [br.upscale && br.upscale.enabled ? "⇧ " + _t("takes.latent_upscale_first_pass_at_a") : "",
+                        (br.loras || []).length ? _t("takes.lora_added_to_the_takes_of") + T.studio.fmtLoras(br.loras) : ""].filter(Boolean).join("\n") || null },
+                    _t("takes.branch_settings"), br.upscale && br.upscale.enabled ? h("span", { class: "tk-up-on" }, " ⇧") : null,
+                    (br.loras || []).length ? h("span", { class: "tk-lora-on" }, ` L${br.loras.length > 1 ? "×" + br.loras.length : ""}`) : null),
+                h("button", { class: "small tk-master", title: _t("takes.master_plan_title"), onclick: () => T.studio.openPlanScreen({ branch: br.id, leaf: null }) }, _t("takes.master_plan_button")),
                 h("button", { class: "small", onclick: () => T.studio.renameBranch(br.id) }, _t("takes.rename")),
                 fillButton(br),
                 h("button", { class: "small danger", title: _t("takes.delete_the_branch_what_is_in"),
                     disabled: T.jobs.some((j) => (j.status === "queued" || j.status === "running") && (j.branch || defBranch()) === br.id) || null,
                     onclick: () => T.studio.deleteBranch(br.id) }, _t("takes.delete"))));
     }
-    // ▶▶ : fills every hole of the branch (what is missing, invalid, or built on a clip that is redone), in plan order.
+    // the selected twig: its plan (generated clips, then what comes after), ▶▶ and the assembly
+    function selectionBar(p) {
+        const chosen = chosenMap();
+        const last = Math.max(0, ...Object.keys(chosen).map(Number));
+        const branch = T.resolved?.branch || defBranch();
+        const br = branchesList().find((b) => b.id === branch) || {};
+        const leaf = last ? chosen[last] : null;
+        const chain = Array.from({ length: last }, (_v, k) => `${k + 1}`).join(" → ");
+        const total = (p.clips || []).length;
+        let end = 0;
+        if (last && H3.framesLegal(p)) { const rows = H3.timeline(p); end = rows[last - 1] ? rows[last - 1].end - H3.finalStart(p) : 0; }
+        return h("div", { class: "tk-selbar" },
+            h("span", { class: "hint" }, _t("takes.selection_label")),
+            h("b", { style: `border-left:4px solid ${br.color || "#888"};padding-left:6px` }, `${br.name || "?"} : ${leaf ? chain : _t("takes.selection_empty")}`),
+            h("span", { class: "hint" }, leaf ? _t("takes.selection_info", { length: clipLength(end) || "0", next: Math.max(0, total - last) }) : _t("takes.selection_master_info", { count: total })),
+            h("button", { class: "small primary tk-twigplan", onclick: () => T.studio.openPlanScreen({ branch, leaf }) },
+                leaf ? _t("takes.plan_of_selection") : _t("takes.master_plan_of", { name: br.name || "?" })),
+            leaf ? h("button", { class: "small", onclick: async () => {
+                const job = T.jobs.find((j) => j.kind === "clip" && j.take_id === leaf && ["queued", "running"].includes(j.status));
+                if (!job) return assemble(last, leaf);
+                try {          // the take is not made yet: the assembly starts after its generation
+                    const made = await T.studio.assembleAfter(job.id);
+                    if (!T.jobs.some((j) => j.id === made.id)) T.jobs.push(made);
+                    toast(_t("takes.assembly_of_clips_1_to_planned", { index: last })); studioPollSoon(300);
+                } catch (err) { alert(err.message); }
+            } }, _t("takes.assemble_1", { index: last })) : null);
+    }
+    // ▶▶ : generates the clips of the selected twig's plan that have no take yet (the master plan when the selection is
+    // in another branch), each one after the one before.
     // Its label comes from a dry run on the server, asked again when takes, jobs or the selection change.
     function fillKey() {
         const all = Object.values(T.takes || {}).flat();
         return JSON.stringify([all.length, Math.max(0, ...all.map((r) => r.saved_at || 0)), T.jobs.filter((j) => j.status === "queued" || j.status === "running").map((j) => j.id),
-            T.pick, T.pickBranch, T.studio.planStamp ? T.studio.planStamp() : null]);
+            T.pick, T.pickBranch, (plan()?.clips || []).length, JSON.stringify(plan()?.clips || []).length]);
     }
     function fillInfo(brId) {
         T.fill = T.fill || {};
@@ -785,11 +870,17 @@
         if (!cur || cur.key !== key) {
             if (!cur || !cur.loading || cur.key !== key) {
                 T.fill[brId] = { key, loading: true, data: cur && cur.data, error: cur && cur.error, busy: cur && cur.busy };
-                T.studio.fillBranch(brId, true).then((data) => { T.fill[brId] = { key, data }; recompute(); })
+                T.studio.fillBranch(brId, true, true, fillLeaf(brId)).then((data) => { T.fill[brId] = { key, data }; recompute(); })
                     .catch((e) => { T.fill[brId] = { key, error: e.message, busy: e.code === "busy" }; recompute(); });
             }
         }
         return T.fill[brId];
+    }
+    function fillLeaf(brId) {
+        if (!T.resolved || T.resolved.branch !== brId) return null;
+        const chosen = chosenMap();
+        const last = Math.max(0, ...Object.keys(chosen).map(Number));
+        return last ? chosen[last] : null;
     }
     function clipRange(items) {
         const list = items.map((i) => i.clip);
@@ -816,36 +907,25 @@
     }
     async function confirmFill(br) {
         let data;
-        try { await T.studio.savePlan(); data = await T.studio.fillBranch(br.id, true); } catch (e) { alert(e.message); return; }
+        const leaf = fillLeaf(br.id);
+        try { data = await T.studio.fillBranch(br.id, true, true, leaf); } catch (e) { alert(e.message); return; }
         if (!data.items.length) { alert(_t("takes.nothing_to_generate_each_clip_has")); return; }
         const fmt = (s) => (s < 3600 ? `${Math.round(s / 60)} min` : `${Math.floor(s / 3600)} h ${String(Math.round(s % 3600 / 60)).padStart(2, "0")}`);
-        const lines = data.items.map((it) => `• clip ${it.clip} ${it.name} — ${it.reason}${it.after ? _t("takes.following_take", { v0: tokenOf(it.after) }) : it.new_scene && it.clip > 1 ? _t("takes.new_scene") : ""}`);
+        const lines = data.items.map((it) => `• clip ${it.clip} ${it.name}${it.new_scene && it.clip > 1 ? _t("takes.new_scene") : ""}`);
         const head = _t("takes.branch_clip_s_to_generate_in", { name: br.name, length: data.items.length })
-            + (data.from_selection ? _t("takes.starting_point_the_selection_of_this") : _t("takes.starting_point_the_latest_usable_takes"))
+            + (leaf ? _t("takes.starting_point_the_selection_of_this") : _t("takes.starting_point_the_master_plan"))
             + (data.eta ? _t("takes.estimated_time_from_previous_generations", { v0: fmt(data.eta) }) : "");
         const answer = await H3Dialog.confirm(`${head}\n\n${lines.join("\n")}`,
             { ok: _t("takes.start"), danger: false, check: { label: _t("takes.assemble_the_branch_at_the_end") + (plan().clips || []).length + ")", checked: true } });
         if (!answer) return;
         try {
-            const res = await T.studio.fillBranch(br.id, false, answer.checked);
+            const res = await T.studio.fillBranch(br.id, false, answer.checked, leaf);
             toast(_t("takes.generation_s_added_to_the_queue", { length: (res.launched || []).length }) + (res.assembly ? _t("takes.then_assembly") : ""));
             studioPollSoon(300);
         } catch (e) { alert(e.message); }
     }
-    // column header: the clip's own LoRA and upscale (all branches)
-    function clipDefaultsButton(index) {
-        const cd = T.studio.clipDefault(index);
-        const parts = [];
-        if (cd.loras.length) parts.push(cd.loras.length > 1 ? _t("takes.l", { length: cd.loras.length }) : "L");
-        if (cd.no_branch_loras) parts.push(_t("takes.no_branch_l"));
-        const title = _t("takes.lora_of_this_clip")
-            + (cd.loras.length ? _t("takes.clip_lora") + T.studio.fmtLoras(cd.loras) : "")
-            + (cd.no_branch_loras ? _t("takes.without_the_branch_lora") : "");
-        return h("button", { class: `small tk-clipdef ${parts.length ? "set" : ""}`, title, onclick: (e) => { e.stopPropagation(); T.studio.openClipDefaults(index); } },
-            parts.length ? parts.join(" · ") : "⚙");
-    }
     function buildBands(p) {
-        const n = p.clips.length, def = defBranch();
+        const n = columnCount(p), def = defBranch();
         const nodes = [], edges = [], placeholders = [], bands = [], byKey = {}, slots = [];
         const VG = gapY(), BAND_GAP = 44;
         let y = TOP;
@@ -860,6 +940,15 @@
             const items = [], keyOfToken = {};
             const startKey = startCol() ? "v:" + br.id : null;
             if (startKey) items.push({ key: startKey, kind: "startvideo", index: 0, order: -1, branch: br.id });
+            // a duplicated branch: the clips it takes over come first, shown dimmed (⇡ the branch they come from)
+            const base = (br.base && br.base.takes) || [];
+            base.forEach((id, k) => {
+                const record = recordOf(k + 1, id);
+                if (!record) return;
+                const key = `t:${id}@${br.id}`;
+                items.push({ key, kind: "take", index: k + 1, record, order: -1, reusedIn: br.id, reusedPrev: k ? `t:${base[k - 1]}@${br.id}` : null });
+                keyOfToken[`${k + 1}:${tokenOf(id)}`] = key;
+            });
             for (let index = 1; index <= n; index++) {
                 const list = (T.takes[index] || []).filter((r) => branchOfRecord(r) === br.id).sort((a, b) => (a.saved_at || 0) - (b.saved_at || 0));
                 for (const record of list) {
@@ -874,18 +963,19 @@
                 }
             }
             for (const it of items) {
-                const clip = p.clips[it.index - 1];
+                const clip = p.clips[it.index - 1] || {};
                 it.parent = null;
                 if (it.index === 1 && startKey && clip.continue) { it.parent = startKey; edges.push({ from: startKey, to: it.key, cls: "start" }); }
                 if (it.index <= 1) continue;
-                if (clip.continue) {
-                    const token = it.kind === "take" ? (it.record.parent ? tokenOf(it.record.parent) : null) : it.job.parentToken;
-                    const key = token ? keyOfToken[`${it.index - 1}:${token}`] : null;
-                    if (key) { it.parent = key; edges.push({ from: key, to: it.key, cls: linkClass(it, key) }); }
-                } else if (T.viewMode === "tree") {
-                    const pref = bandPreferred(br.id, it.index - 1);
-                    if (pref && keyOfToken[`${it.index - 1}:${tokenOf(pref)}`]) { it.parent = "t:" + pref; edges.push({ from: it.parent, to: it.key, cls: "cut" }); }
+                if (it.reusedIn) {
+                    if (it.reusedPrev) { it.parent = it.reusedPrev; edges.push({ from: it.reusedPrev, to: it.key, cls: "reused" }); }
+                    continue;
                 }
+                // every take hangs on the take before it: the one it continues (↪) or the one it was timed after (✂)
+                const pred = it.kind === "take" ? effPred(it.record, it.index) : it.job.predecessor;
+                const key = pred ? keyOfToken[`${it.index - 1}:${tokenOf(pred)}`] : null;
+                const cut = it.kind === "take" ? !it.record.parent : !it.job.parentToken;
+                if (key) { it.parent = key; edges.push({ from: key, to: it.key, cls: cut ? "cut" : linkClass(it, key) }); }
             }
             const local = {};
             for (const it of items) local[it.key] = it;
@@ -893,11 +983,9 @@
             // an empty box to the right of each end of the branch: the next clip, to generate after this take
             const hasChild = new Set(items.filter((it) => it.parent).map((it) => it.parent));
             for (const it of [...items]) {
-                if (it.kind === "startvideo" || it.index >= n || !p.clips[it.index].continue || hasChild.has(it.key)) continue;
-                if (it.kind === "take") {
-                    const st = T.resolved?.[it.index]?.takes?.[it.record.id];
-                    if (st && st[0] === "invalid") continue;
-                } else if (["error", "cancelled", "done"].includes(it.job.status)) continue;
+                if (it.kind === "startvideo" || hasChild.has(it.key)) continue;
+                if (it.reusedIn && it.index < base.length) continue;
+                if (it.kind === "ghost" && ["error", "cancelled", "done"].includes(it.job.status)) continue;
                 const slot = { key: "s:" + it.key, kind: "slot", index: it.index + 1, parent: it.key, order: Infinity, branch: br.id,
                     token: it.kind === "take" ? tokenOf(it.record.id) : it.job.token, after: it };
                 items.push(slot);
@@ -944,10 +1032,8 @@
                     colBottom[it.index] = it.y + CARD_H;
                 }
             }
-            // "générer": clip 1 and the first clip of each scene, when the branch has none yet
-            for (let index = 1; index <= n; index++) {
-                const clip = p.clips[index - 1];
-                if (index > 1 && clip.continue) continue;
+            // "générer": clip 1, when the branch has none yet (every other clip comes after a take)
+            for (let index = 1; index <= Math.max(1, Math.min(1, n)); index++) {
                 if (items.some((it) => it.index === index)) continue;
                 const yy = colBottom[index] !== undefined ? colBottom[index] + VG : y;
                 placeholders.push({ index, branch: br.id, x: colX(index), y: yy });
@@ -958,7 +1044,7 @@
             for (const it of items) { if (it.kind === "slot") slots.push(it); else nodes.push(it); byKey[it.key] = it; }
             y = bottom + BAND_GAP;
         }
-        const width = colX(n) + COLW + LEFT;   // assembled videos are in the side pane
+        const width = colX(n + 1) + COLW + LEFT;   // the « + clip suivant » column; assembled videos are in the side pane
         return { nodes, edges, byKey, placeholders, bands, slots, newBranchY: y - BAND_GAP / 2, width, height: y + 40 };
     }
 
@@ -976,9 +1062,11 @@
     function takeCard(node, p) {
         const record = node.record, index = node.index;
         const clip = p.clips[index - 1];
-        const res = T.resolved[index];
-        const [state, why] = res.takes[record.id] || ["invalid", "?"];
-        const chosen = res.chosen === record.id;
+        const res = T.resolved[index] || { takes: {} };
+        const [state, why] = res.takes[record.id] || ["other", ""];
+        const reused = node.reusedIn || null;
+        const band = reused || branchOfRecord(record);
+        const chosen = res.chosen === record.id && T.resolved.branch === band;
         const video = thumbVideo("t:" + record.id, () => {
             const v = h("video", { muted: true, loop: true, playsinline: true, preload: "auto" });
             v.muted = true;
@@ -986,101 +1074,48 @@
         });
         if (!video.dataset.loading && hasPreview(record.id)) { video.dataset.loading = "1"; attachThumb(video, record.id); }
         const branch = branchOfRecord(record);
-        const actions = state === "invalid" ? regenerateButton(index, clip, record)
-            : !unusable(state) ? h("div", { class: "tk-actions" },
-            index === 1 ? null : splitButton("↻", _t("takes.new_take_of_this_clip_random") + (clip.continue ? _t("takes.from_the_same_take_of_the") : ""),
-                index, { parentToken: clip.continue ? (record.parent ? tokenOf(record.parent) : null) : null, random: true }, branch, _t("takes.new_take_of_clip", { index }), "tk-retake", sameAs(record).loras ? sameAs(record) : null)) : null;
+        const lastReused = reused && index === baseOf(reused).length;
+        const actions = h("div", { class: "tk-actions" },
+            reused ? null : h("button", { class: "small tk-retake", title: _t("takes.new_take_panel_title", { index }),
+                onclick: (e) => { e.stopPropagation(); launchFork(index, record); } }, _t("takes.new_take_short")),
+            !reused || lastReused ? h("button", { class: "small tk-next", title: _t("takes.next_clip_panel_title", { index: index + 1 }),
+                onclick: (e) => { e.stopPropagation(); launchNext(index + 1, record.id, band); } }, _t("takes.next_clip_short")) : null);
+        const from = reused ? (branchesList().find((b) => b.id === branch) || { name: branch }).name : null;
         return h("div", {
-            class: `tk-card ${chosen ? "chosen" : state}`, "data-take": record.id,
+            class: `tk-card ${chosen ? "chosen" : state}${reused ? " tk-reused" : ""}${T.highlight && T.highlight.has && T.highlight.has(record.id) ? " tk-hl" : ""}`, "data-take": record.id,
+            "data-band": band,
             style: `left:${node.x}px;top:${node.y}px;width:${COLW}px;height:${CARD_H}px`,
             title: _t("takes.seed", { id: record.id, seed: record.seed, v2: when(record.saved_at), v3: why ? "\n" + why : "" }),
             onclick: () => {
                 if (T.dragged) return;
                 clearTimeout(T.clickTimer);
-                T.clickTimer = setTimeout(() => choose(index, record.id), 230);
+                T.clickTimer = setTimeout(() => choose(index, record.id, false, band), 230);
             },
             ondblclick: (e) => { e.preventDefault(); clearTimeout(T.clickTimer); openViewer(index, record.id); },
             onmouseenter: () => { if (!video.src) return; video.muted = !T.soundOnHover; video.currentTime = 0; video.play().catch(() => { video.muted = true; video.play().catch(() => {}); }); },
             onmouseleave: () => { video.pause(); video.currentTime = Math.min(0.5, (video.duration || 1) / 3); },
         },
             branch ? h("i", { class: "tk-branch-mark", style: `background:${branchColor(branch)}` }) : null,
+            reused ? h("span", { class: "tk-reused-tag", title: _t("takes.taken_over_from", { name: from }) }, "⇡ " + from) : null,
             record.studio ? badges(record.studio.upscale, record.studio.upscale ? _t("takes.latent_upscale_summary", { summary: record.studio.upscale.summary }) : "", record.studio.extra_loras) : null,
             h("div", { class: "tk-thumb" }, hasPreview(record.id) ? video : h("span", { class: "hint" }, _t("takes.no_preview")),
-                h("span", { class: "tk-dur", title: _t("takes.clip_length") }, clipLength(record.frames || clip.frames)),
-                // invalidated: « refaire » is at the top right, the assembly goes at the bottom left of the picture
-                state === "invalid" ? leafButton(index, record, branch, true) : null),
-            h("div", { class: "tk-meta" }, h("span", { class: "tk-seedbox" }, chosen ? "✓ " : "", seedField(record, (seed) => {
-                if (state === "invalid") { const parent = regenerateParent(index, clip, branch); if (!parent.ok) { alert(_t("takes.regenerate_clip_first_2", { v0: index - 1 })); return; } generate(index, { parentToken: parent.token, seed, branch }); }
-                else generate(index, { parentToken: clip.continue ? (record.parent ? tokenOf(record.parent) : null) : null, seed, branch });
+                h("span", { class: "tk-dur", title: _t("takes.clip_length") }, clipLength(record.frames || (clip || {}).frames))),
+            h("div", { class: "tk-meta" }, h("span", { class: "tk-seedbox" }, chosen ? "✓ " : "", reused ? h("span", { class: "hint" }, String(record.seed ?? "")) : seedField(record, (seed) => {
+                // the same take again with another seed: same portion of plan, same settings
+                generate(index, { after: effPred(record, index), planFrom: record.id, seed, branch, ...takeSettings(record) });
             })), h("span", { class: "hint" }, when(record.saved_at))),
-            unusable(state) ? h("div", { class: "tk-why" }, why) : null,
             actions,
+            reused ? null : h("button", { class: "small danger tk-del", title: _t("trash.delete_take_title"),
+                onclick: (e) => { e.stopPropagation(); window.H3Trash.deleteTake(index, record.id); } }, "🗑"),
             planButton(index, record),
-            state !== "invalid" ? leafButton(index, record, branch, false) : null);
+            leafButton(index, record, branch));
     }
 
-    // what assembling this leaf would take: clips 1 to index along its chain (earlier scenes: the current selection)
-    function leafChain(index, record, branch) {
-        const p = plan();
-        const chain = {};
-        let i = index, rec = record;
-        while (rec) {
-            chain[i] = rec.id;
-            if (!(p.clips[i - 1] && p.clips[i - 1].continue) || i === 1) break;
-            const parent = rec.parent;
-            i -= 1;
-            rec = (T.takes[i] || []).find((r) => r.id === parent) || null;
-            if (!rec) return { ok: false, why: _t("takes.the_take_of_clip_it_continues", { i }) };
-        }
-        const sel = { branch };
-        if (T.pickBranch == null || T.pickBranch === branch) Object.assign(sel, T.pick || {});
-        Object.assign(sel, chain);
-        const res = H3.studioResolveTakes(p, T.takes, sel, T.fingerprints, T.studio.current());
-        for (let k = 1; k <= index; k++) {
-            const pick = res[k] && res[k].chosen;
-            if (!pick || (chain[k] && pick !== chain[k])) return { ok: false, why: _t("takes.clip_has_no_usable_take_in", { k }) };
-        }
-        return { ok: true };
+    // on every take, shown when the mouse is over the card: assembles the twig ending with it (clips 1 to this one)
+    function leafButton(index, record, branch) {
+        return h("button", { class: "small tk-asm-btn", title: _t("takes.assemble_clips_1_to_along_this", { index }),
+            onclick: (e) => { e.stopPropagation(); assemble(index, record.id); } }, _t("takes.assemble_1", { index }));
     }
-    // on every take, shown when the mouse is over the card: assembles clips 1 to this one along its chain
-    // on an invalidated take (or a chain with one): an assembly of what was really made, after a confirmation
-    function leafButton(index, record, branch, invalid) {
-        if (!T.fingerprints) return null;
-        const btn = h("button", { class: `small tk-asm-btn${invalid ? " invalid" : ""}`,
-            onmouseenter: () => {                // checked when needed (a whole resolution per take would be slow)
-                const c = invalid ? { ok: false } : leafChain(index, record, branch);
-                btn.classList.toggle("invalid", !c.ok);
-                btn.title = c.ok ? _t("takes.assemble_clips_1_to_along_this", { index })
-                    : (c.why ? _t("takes.cannot_assemble", { why: c.why }) + "\n" : "") + _t("takes.assemble_invalid_title", { index });
-            },
-            onclick: (e) => {
-                e.stopPropagation();
-                const c = invalid ? { ok: false } : leafChain(index, record, branch);
-                if (c.ok) assemble(index, record.id); else assembleInvalid(index, record.id);
-            } }, (invalid ? "⚠ " : "") + _t("takes.assemble_1", { index }));
-        return btn;
-    }
-    async function assembleInvalid(index, takeId) {
-        let check;
-        try { await T.studio.savePlan(); check = await T.studio.assembleCheck(index, takeId); }
-        catch (e) { alert(_t("takes.cannot_start_the_assembly", { v0: e.message })); return; }
-        if (check.error) { alert(_t("takes.cannot_start_the_assembly", { v0: check.error })); return; }
-        const lines = (check.invalid || []).map((i) => _t("takes.assemble_invalid_line", { clip: i.clip, take: i.take, reason: i.reason || "?" }));
-        const warn = (check.warnings || []).map((w) => "⚠ " + w);
-        const text = [_t("takes.assemble_invalid_head", { index }), "",
-            lines.length ? _t("takes.assemble_invalid_list") : _t("takes.assemble_invalid_none"), ...lines,
-            ...(warn.length ? ["", ...warn] : []), "", _t("takes.assemble_invalid_note")].join("\n");
-        if (!await H3Dialog.confirm(text, { ok: _t("takes.assemble_invalid_ok"), danger: lines.length > 0 })) return;
-        try {
-            const job = await T.studio.assemble(index, takeId, true);
-            if (!T.jobs.some((j) => j.id === job.id)) T.jobs.push(job);
-            studioPollSoon(300);
-            renderTakes();
-        } catch (e) { alert(_t("takes.cannot_start_the_assembly", { v0: e.message })); }
-    }
-
-    // seed of a take: selectable and copyable; a new value + Enter (or ↵) makes a new take with that seed
-    const MAX_SEED = 2 ** 48;
     function parseSeed(text) {
         const t = String(text).trim();
         if (!/^\d+$/.test(t)) return null;
@@ -1110,77 +1145,35 @@
         return box;
     }
 
-    // "régénérer": a new take of this clip only, with the seed of the invalidated one
-    function regenerateParent(index, clip, branch) {
-        if (!clip.continue || index === 1) return { ok: true, token: null };
-        const chosen = bandPreferred(branch, index - 1);
-        if (chosen) return { ok: true, token: tokenOf(chosen) };
-        const waiting = jobsOf(index - 1).filter((j) => (j.status === "queued" || j.status === "running") && (j.branch || defBranch()) === branch);
-        if (waiting.length) return { ok: true, token: waiting[waiting.length - 1].token };
-        return { ok: false };
-    }
-    // a launch button with its ▾: click = branch + clip settings; ▾ = the "prise réglée" dialog (LoRA, upscale, seed)
-    function tuned(index, opts, branch, title, preset) {
-        T.studio.takeDialog({ clip: index, branch: branch || defBranch(), title, preset }).then((res) => {
-            if (!res) return;
-            generate(index, { ...opts, branch, loras: res.loras, upscale: res.upscale, upscaleSettings: res.upscale_settings, seed: res.seed ?? opts.seed ?? null, random: res.seed == null ? !!opts.random : false });
-        });
-    }
-    function effTitle(index, branch) {
-        return "\n" + T.studio.effectiveTake(branch || defBranch(), index).text + _t("takes.tune_this_take_differently");
-    }
-    // preset: {loras, upscale} of the take the button belongs to (the ▾ dialog opens with them)
-    function splitButton(label, title, index, opts, branch, dialogTitle, cls = "", preset = null) {
-        const go = (e) => { e.stopPropagation(); generate(index, { ...opts, branch }); };
-        return h("span", { class: "tk-split" },
-            h("button", { class: `small ${cls}`, title: title + effTitle(index, branch), onclick: go }, label),
-            h("button", { class: "small tk-split-arrow", title: _t("takes.tuned_take_lora_upscale_seed"), onclick: (e) => { e.stopPropagation(); tuned(index, opts, branch, dialogTitle, preset); } }, "▾"));
-    }
     function badges(upscale, upTitle, loras) {
         if (!upscale && !(loras && loras.length)) return null;
         return h("span", { class: "tk-badges" },
             upscale ? h("span", { class: "tk-up-badge", title: upTitle }, "⇧") : null,
             loras && loras.length ? h("span", { class: "tk-lora-badge", title: _t("takes.extra_lora") + T.studio.fmtLoras(loras) }, loras.length > 1 ? _t("takes.l", { length: loras.length }) : "L") : null);
     }
-    // a take made with v0.16 or later knows its own LoRA and upscale: « ⟲ redo » does the same again (and since 0.27,
-    // the upscale settings it had for itself only)
-    function sameAs(record) {
-        const st = record && record.studio;
-        if (!st || !("extra_loras" in st)) return {};
-        const own = st.upscale && st.upscale.source === "take" ? st.upscale.settings : null;
-        return { loras: st.extra_loras || [], upscale: st.upscale ? "on" : "off", ...(own ? { upscaleSettings: own, upscale_settings: own } : {}) };
-    }
-    // the next clip after a take (or a take still waiting): a click generates it, ▾ sets its LoRA / upscale / seed
+    // the next clip after a take (or a take still waiting): opens the launch panel
     function slotCard(slot) {
         const index = slot.index;
-        const opts = { parentToken: slot.token };
-        const launch = () => { if (!T.dragged) generate(index, { ...opts, branch: slot.branch }); };
+        const after = slot.after.kind === "take" ? slot.after.record.id : slot.after.job.take_id;
+        const launch = () => { if (!T.dragged) launchNext(index, after, slot.branch); };
         const src = sourceThumb(index, slot.branch);
         return h("div", { class: `tk-card tk-placeholder tk-slot${src ? " has-src" : ""}`, style: `left:${slot.x}px;top:${slot.y}px;width:${COLW}px;height:${CARD_H}px`,
-            title: _t("takes.generate_clip_following_this_take", { index }) + effTitle(index, slot.branch), onclick: launch,
+            title: _t("takes.generate_clip_following_this_take", { index }), onclick: launch,
             onmouseenter: () => srcHover(src, true), onmouseleave: () => srcHover(src, false) },
             src, h("div", { class: "tk-plus" }, "+"), h("div", { class: "hint" }, _t("takes.clip_following", { index })),
-            h("button", { class: "small tk-split-arrow tk-ph-arrow", title: _t("takes.tuned_take_lora_upscale_seed"),
-                onclick: (e) => { e.stopPropagation(); tuned(index, opts, slot.branch, _t("takes.clip_following_this_take", { index })); } }, _t("takes.tuned")),
-            planButton(index, null, { branch: slot.branch }));
-    }
-    function regenerateButton(index, clip, record) {
-        const branch = branchOfRecord(record);
-        const parent = regenerateParent(index, clip, branch);
-        return h("div", { class: "tk-actions show" },
-            h("button", { class: "small warn", disabled: !parent.ok || null,
-                title: parent.ok ? _t("takes.new_take_of_clip_with_the", { index, v1: clip.continue && index > 1 ? _t("takes.following_the_chosen_take_of_clip", { v0: index - 1 }) : "" })
-                    : _t("takes.regenerate_clip_first", { v0: index - 1 }),
-                onclick: (e) => { e.stopPropagation(); generate(index, { parentToken: parent.token, seed: record.seed, branch, ...sameAs(record) }); } },
-                parent.ok ? _t("takes.redo") : _t("takes.clip_first", { n: index - 1 })));
+            h("div", { class: "hint tk-slot-name" }, (plan().clips[index - 1] || {}).name || ""),
+            plan().clips[index - 1] ? planButton(index, null, { branch: slot.branch }) : null);
     }
 
     function ghostCard(node, p) {
         const job = node.job, index = node.index;
         const pct = job.progress ? Math.round(100 * job.progress.value / Math.max(1, job.progress.max)) : 0;
         const live = job.status === "queued" || job.status === "running";
-        return h("div", { class: `tk-card tk-ghost ${job.status}`, "data-job": job.id, style: `left:${node.x}px;top:${node.y}px;width:${COLW}px;height:${CARD_H}px`, title: job.error || (job.preview ? _t("takes.double_click_larger_preview") : ""),
-            ondblclick: (e) => { e.preventDefault(); if (job.preview) openLive(job); },
+        const picked = live && job.take_id && T.resolved && T.resolved[index] && T.resolved[index].chosen === job.take_id && T.resolved.branch === (job.branch || defBranch());
+        return h("div", { class: `tk-card tk-ghost ${job.status}${picked ? " chosen" : ""}`, "data-job": job.id, "data-take": job.take_id || null, style: `left:${node.x}px;top:${node.y}px;width:${COLW}px;height:${CARD_H}px`, title: job.error || (job.preview ? _t("takes.double_click_larger_preview") : ""),
+            // a click chooses it like a take: the selection goes through the take it will make
+            onclick: () => { if (T.dragged || !live || !job.record) return; clearTimeout(T.clickTimer); T.clickTimer = setTimeout(() => choose(index, job.take_id, false, job.branch || defBranch()), 230); },
+            ondblclick: (e) => { e.preventDefault(); clearTimeout(T.clickTimer); if (job.preview) openLive(job); },
             onmouseenter: (e) => { const v = e.currentTarget.querySelector("video.tk-live"); if (v && T.soundOnHover) v.muted = false; },
             onmouseleave: (e) => { const v = e.currentTarget.querySelector("video.tk-live"); if (v) v.muted = true; } },
             h("div", { class: "tk-thumb" }, job.preview && live
@@ -1189,6 +1182,8 @@
             h("div", { class: "tk-ghost-label" }, ghostLabel(job)),
             job.status === "running" ? h("div", { class: "tk-progress" }, h("i", { style: `width:${pct}%` })) : null,
             h("div", { class: "tk-actions show" },
+                live && job.kind === "clip" && job.record ? h("button", { class: "small tk-retake", title: _t("takes.new_take_panel_title", { index }),
+                    onclick: (e) => { e.stopPropagation(); launchFork(index, job.record); } }, _t("takes.new_take_short")) : null,
                 live ? h("button", { class: "small danger", title: _t("takes.cancel_this_generation"), onclick: (e) => { e.stopPropagation(); cancelJob(job); } }, _t("takes.cancel")) : null,
                 job.status === "error" ? h("button", { class: "small", onclick: () => { T.jobs = T.jobs.filter((j) => j !== job); T.studio.removeJob(job.id).catch(() => {}); renderTakes(); } }, _t("takes.remove")) : null,
                 null),
@@ -1213,7 +1208,20 @@
     const whenMs = (t) => new Date(t * 1000).toLocaleString("fr-FR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
     const startVideoName = () => { const f = window.H3Editor && H3Editor.media && H3Editor.media.startVideoFile ? H3Editor.media.startVideoFile() : null; return f ? f.split("/").pop() : null; };
     // the start video segment (the same in every branch): plays on hover, a click opens its settings
+    // the clips shown: those of the plan, of the takes and of the generations waiting (a clip can be generated
+    // after the end of the plan: « + clip suivant »)
+    function columnCount(p) {
+        return Math.max((p.clips || []).length, ...Object.keys(T.takes || {}).map(Number).filter((k) => (T.takes[k] || []).length),
+            ...T.jobs.filter((j) => j.kind === "clip" && j.clip).map((j) => Number(j.clip)));
+    }
+    // the plan header with the segment of a branch's video (each branch has its own segment, in its master plan)
+    function withSegment(p, branch) {
+        const seg = T.studio.segment ? T.studio.segment(branch) : null;
+        if (!seg) return p;
+        return p.start_video ? { ...p, start_video: seg } : p.edit_video ? { ...p, edit_video: { ...p.edit_video, ...seg } } : p;
+    }
     function startVideoCard(node, p) {
+        p = withSegment(p, node.branch);
         const sv = H3.startVideo(p);
         const media = window.H3Editor && H3Editor.media;
         const file = media && media.startVideoFile ? media.startVideoFile() : null;
@@ -1228,7 +1236,8 @@
         const rest = () => { if (video && video.readyState) video.currentTime = Math.min(0.5, (video.duration || 1) / 3); };
         return h("div", { class: "tk-card tk-startvid", "data-start": node.branch, "data-svthumb": key || "", style: `left:${node.x}px;top:${node.y}px;width:${COLW}px;height:${CARD_H}px`,
             title: _t("takes.start_video_card_title"),
-            onclick: () => { if (window.H3Editor && H3Editor.openStartVideo) H3Editor.openStartVideo(); },
+            // the start video settings belong to the plan: the plan screen opens first (what changes there is saved)
+            onclick: async () => { if (T.studio.openPlanScreen) await T.studio.openPlanScreen({ branch: node.branch, leaf: null }); if (window.H3Editor && H3Editor.openStartVideo) H3Editor.openStartVideo(); },
             onmouseenter: () => { if (!video || video.dataset.state !== "ready") return; video.muted = !T.soundOnHover; video.currentTime = 0; video.play().catch(() => { video.muted = true; video.play().catch(() => {}); }); },
             onmouseleave: () => { if (!video) return; video.pause(); rest(); } },
             h("div", { class: "tk-thumb" }, video || h("span", { class: "tk-ghost-icon" }, "▶"),
@@ -1238,7 +1247,7 @@
     }
     // edited video: the slice of the source a clip edits, behind its « + » card (plays on hover)
     function sourceThumb(index, branch) {
-        const p = plan();
+        const p = withSegment(plan(), branch);
         if (!p.edit_video) return null;
         const media = window.H3Editor && H3Editor.media;
         const file = media && media.startVideoFile ? media.startVideoFile() : null;
@@ -1312,7 +1321,6 @@
                     h("span", { class: "hint" }, _t("takes.clips_1_to", { v0: ex.branch_name || "", clips: ex.clips, v2: ex.size ? ex.size.join(" × ") : "", v3: whenMs(ex.created) })),
                     h("span", { style: "flex:1" }),
                     ex.infos ? h("button", { title: _t("takes.how_the_video_was_made_clips"), onclick: () => window.open(T.studio.infosUrl(ex.infos), "_blank") }, "infos") : null,
-                    ex.checkpoint ? h("button", { onclick: async () => { if (await T.studio.restoreCheckpoint(ex.checkpoint, _t("takes.the_state_of", { name: ex.name }))) close(); } }, _t("takes.restore_the_state_of_this_video")) : null,
                     h("button", { onclick: close }, _t("takes.close"))),
                 video));
         document.body.append(overlay);
@@ -1321,22 +1329,11 @@
 
     function placeholderCard(ph, p) {
         const index = ph.index;
-        const seed = seedField(null, () => {});
-        const launch = () => {
-            const typed = seed.querySelector("input").value.trim();
-            const v = typed === "" ? null : parseSeed(typed);
-            if (typed !== "" && v === null) { alert(_t("takes.invalid_seed_an_integer_from_0", { MAX_SEED })); return; }
-            generate(index, { branch: ph.branch, seed: v });
-        };
-        seed.querySelector("input").addEventListener("keydown", (e) => { if (e.key === "Enter") launch(); });
         const src = sourceThumb(index, ph.branch);
-        return h("div", { class: `tk-card tk-placeholder${src ? " has-src" : ""}`, style: `left:${ph.x}px;top:${ph.y}px;width:${COLW}px;height:${CARD_H}px`,
-            title: (index === 1 ? _t("takes.generate_clip_1_of_this_branch") : _t("takes.generate_clip_new_scene_in_this", { index })) + effTitle(index, ph.branch)
-                + (src ? "\n" + _t("takes.edit_source_hint") : ""),
-            onclick: () => { if (!T.dragged) launch(); }, onmouseenter: () => srcHover(src, true), onmouseleave: () => srcHover(src, false) },
-            src, h("div", { class: "tk-plus" }, "+"), h("div", { class: "hint" }, _t("takes.generate")), h("div", { class: "tk-ph-seed" }, seed),
-            h("button", { class: "small tk-split-arrow tk-ph-arrow", title: _t("takes.tuned_take_lora_upscale_seed"),
-                onclick: (e) => { e.stopPropagation(); tuned(index, {}, ph.branch, _t("takes.clip_new_take", { index })); } }, _t("takes.tuned")),
+        return h("div", { class: `tk-card tk-placeholder${src ? " has-src" : ""}`, "data-branch": ph.branch, style: `left:${ph.x}px;top:${ph.y}px;width:${COLW}px;height:${CARD_H}px`,
+            title: _t("takes.generate_clip_1_of_this_branch") + (src ? "\n" + _t("takes.edit_source_hint") : ""),
+            onclick: () => { if (!T.dragged) launchNext(1, null, ph.branch); }, onmouseenter: () => srcHover(src, true), onmouseleave: () => srcHover(src, false) },
+            src, h("div", { class: "tk-plus" }, "+"), h("div", { class: "hint" }, _t("takes.generate")),
             planButton(index, null, { branch: ph.branch }));
     }
 
@@ -1383,7 +1380,7 @@
         c.style.transform = `scale(${z})`;
         const topLayer = parts.vp.querySelector(".tk-topcanvas");
         if (topLayer) topLayer.style.transform = `scale(${z})`;
-        sizer.style.width = `${Math.ceil(w * z)}px`;
+        sizer.style.width = `${Math.ceil(w * z) + (T.extraRight || 0)}px`;     // extraRight: room beside the launch panel
         // room below the graph so that the last branch can be scrolled up to the top of the view (and no further)
         const bands = (T.graph && T.graph.bands) || [];
         const lastTop = bands.length ? Math.max(0, bands[bands.length - 1].y - 24) : 0;
@@ -1575,7 +1572,11 @@
         const g = T.graph;
         if (!parts) return [g.width, g.height];
         const z = T.zoom.z;
-        return [Math.max(g.width, parts.vp.clientWidth / z), Math.max(g.height, parts.vp.clientHeight / z)];
+        // the room below the graph where the last branch can be scrolled up to the top of the view is shown too:
+        // the frame of the view always stays inside the map
+        const bands = g.bands || [];
+        const lastTop = bands.length ? Math.max(0, bands[bands.length - 1].y - 24) : 0;
+        return [Math.max(g.width, parts.vp.clientWidth / z), Math.max(g.height, parts.vp.clientHeight / z, lastTop + parts.vp.clientHeight / z)];
     }
     function mapFrame() {
         const frame = document.querySelector("#takesView .tk-map-frame");
@@ -1584,7 +1585,9 @@
         const { vp } = parts, z = T.zoom.z, s = T.mapScale;
         const x = vp.scrollLeft / z, y = vp.scrollTop / z;
         const fw = vp.clientWidth / z, fh = vp.clientHeight / z;
-        Object.assign(frame.style, { left: `${x * s}px`, top: `${y * s}px`, width: `${fw * s}px`, height: `${fh * s}px` });
+        // never outside the map (MAP_W × MAP_H)
+        const L = Math.max(0, Math.min(x * s, MAP_W)), Tp = Math.max(0, Math.min(y * s, MAP_H));
+        Object.assign(frame.style, { left: `${L}px`, top: `${Tp}px`, width: `${Math.max(0, Math.min(fw * s, MAP_W - L))}px`, height: `${Math.max(0, Math.min(fh * s, MAP_H - Tp))}px` });
     }
     // keep the minimap inside the visible part, clear of the scrollbar
     function placeMinimap() {
@@ -1708,90 +1711,41 @@
     }
 
     // wanted: {refs: {name: {image?: digest|null, voice?: digest|null}}, size?: [w, h]}
-    function conflicting(wanted) {
-        const hit = [];
-        const free = H3.mode(plan()) === "free";
-        for (const [i, list] of Object.entries(T.takes)) {
-            for (const r of list) {
-                let bad = false;
-                if (wanted.branch && branchOfRecord(r) !== wanted.branch) continue;
-                if (wanted.size && (r.width !== wanted.size[0] || r.height !== wanted.size[1])) bad = true;
-                if (wanted.refSize && ((r.studio && r.studio.ref_image_size) || T.studio.legacyRefSize()) !== wanted.refSize) bad = true;
-                if ("song" in wanted && r.studio && "song" in r.studio && (r.studio.song ?? null) !== (wanted.song ?? null)) bad = true;
-                for (const [name, want] of Object.entries(wanted.refs || {})) {
-                    const had = ((r.studio && r.studio.refs) || {})[name];
-                    if (!had) continue;                       // this take does not use this reference
-                    if ("image" in want && (had.image ?? null) !== (want.image ?? null)) bad = true;
-                    if (free && "voice" in want && (had.voice ?? null) !== (want.voice ?? null)) bad = true;
-                    if ("video" in want && (had.video ?? null) !== (want.video ?? null)) bad = true;
-                }
-                if (bad) hit.push({ clip: +i, id: r.id });
-            }
-        }
-        // add every take built on them (continuations, at any depth)
-        const ids = new Set(hit.map((x) => x.id));
-        for (let i = 2; i <= plan().clips.length; i++) {
-            for (const r of T.takes[i] || []) if (!ids.has(r.id) && r.parent && ids.has(r.parent)) { ids.add(r.id); hit.push({ clip: i, id: r.id }); }
-        }
-        return hit;
+    // chantier A: once a branch has takes, its size, song, video and reference files are fixed (a new reference can
+    // still be added); another branch is made to change them. Returns true when the change can be applied.
+    const branchHasTakes = (branch) => Object.values(T.takes || {}).some((l) => l.some((r) => !branch || branchOfRecord(r) === branch))
+        || (!!branch && !!((branchesList().find((b) => b.id === branch) || {}).base));
+    function frozen(branch, what) {
+        alert(_t("takes.branch_frozen", { what }));
+        return false;
     }
-    async function resetConflicts(list, why, branch) {
-        // only the jobs of this branch matter: the others use their own references, song and size
-        if (T.jobs.some((j) => (j.status === "queued" || j.status === "running") && (branch == null || (j.branch || defBranch()) === branch))) {
-            alert(_t("takes.generations_of_this_branch_are_running"));
-            return false;
-        }
-        const alive = list.filter((x) => (T.resolved?.[x.clip]?.takes?.[x.id] || [""])[0] !== "invalid");
-        if (!alive.length) return true;
-        const clips = [...new Set(alive.map((x) => x.clip))].sort((a, b) => a - b);
-        return await H3Dialog.confirm(_t("takes.take_s_clip_will_be_invalidated", { why, length: alive.length, v2: clips.length > 1 ? "s" : "", v3: clips.join(", ") }) +
-            _t("takes.putting_the_old_value_back_makes"));
-    }
-    // another start video for the project (sha of the new file, or null): confirm the takes it invalidates
-    async function confirmStartVideo(sha) {
-        const ref = (plan().start_video || plan().edit_video || {}).ref;
-        if (!ref) return true;
+    async function confirmStartVideo(_sha) {
         await studioEnsureTakes();
-        return resetConflicts(conflicting({ branch: null, refs: { [ref]: { video: sha } } }), _t("takes.the_start_video"), null);
+        return branchHasTakes(null) ? frozen(null, _t("takes.the_start_video")) : true;
     }
     async function takeCount(index) {
         await studioEnsureTakes();
         return (T.takes[index] || []).length;
     }
-    // returns true when the change can be applied
     async function changeReference(branch, name, kind, path) {
-        const free = H3.mode(plan()) === "free";
-        if (kind === "voice" && !free) return true;
         await studioEnsureTakes();
-        const mine = (r) => !branch || branchOfRecord(r) === branch;
-        if (!Object.values(T.takes).some((l) => l.some((r) => mine(r) && ((r.studio && r.studio.refs) || {})[name]))) return true;
-        let value = null;
-        if (path) {
-            const d = await T.studio.digests(kind === "image" ? [path] : [], kind === "voice" ? [path] : []);
-            value = d[kind === "image" ? "images" : "voices"][path];
-        }
-        const list = conflicting({ branch, refs: { [name]: { [kind]: value } } });
-        const what = kind === "image" ? _t("takes.the_picture") : _t("takes.the_voice");
-        return resetConflicts(list, _t("takes.changing_of_makes_the_takes_that", { v0: what, name }), branch);
+        if (!branchHasTakes(branch)) return true;
+        const br = branchesList().find((b) => b.id === branch) || {};
+        const had = ((br.refs || {})[name] || {})[kind] || null;
+        if (!had || had === path) return true;           // a reference added (or a kind it did not have)
+        return frozen(branch, kind === "image" ? _t("takes.the_picture_of_name", { name }) : _t("takes.the_voice_of", { name }));
     }
-    async function changeSong(branch, path) {
+    async function changeSong(branch, _path) {
         await studioEnsureTakes();
-        const sha = path ? await T.studio.songSha(path) : null;
-        const list = conflicting({ branch, song: sha });
-        return resetConflicts(list, _t("takes.changing_the_branch_song_makes_the"), branch);
+        return branchHasTakes(branch) ? frozen(branch, _t("takes.the_song")) : true;
     }
-    async function changeSize(branch, w, hh) {
+    async function changeSize(branch, _w, _hh) {
         await studioEnsureTakes();
-        const list = conflicting({ branch, size: [w, hh] });
-        return resetConflicts(list, _t("takes.the_existing_takes_were_made_at", { w, hh }), branch);
+        return branchHasTakes(branch) ? frozen(branch, _t("takes.the_picture_size")) : true;
     }
-    async function changeRefSize(branch, value) {
-        await studioEnsureTakes();
-        const list = conflicting({ branch, refSize: value });
-        return resetConflicts(list, _t("takes.the_existing_takes_were_made_with", { value }), branch);
+    async function changeRefSize(_branch, _value) {
+        return true;          // a generation setting: each take keeps the one it was made with
     }
-
-
     function statusText(nTakes) {
         let text = _t("takes.project_take_s", { project: plan().project, nTakes });
         if (T.jobs.some((j) => j.status === "queued" || j.status === "running")) text += T.socketOpen ? _t("takes.live_tracking") : _t("takes.tracking_by_polling_comfyui");
@@ -1829,7 +1783,11 @@
     function studioSaveSelection() {
         clearTimeout(selTimer);
         const pick = { ...chosenMap(), branch: T.pickBranch || T.resolved?.branch || null };
-        selTimer = setTimeout(() => T.studio.saveSelection(pick).then(() => { T.fileSelection = { ...pick }; })
+        selTimer = setTimeout(() => T.studio.saveSelection(pick).then((listing) => {
+            T.fileSelection = { ...pick };
+            if (listing && listing.fits) T.fits = listing.fits;
+            if (listing && listing.twig && T.studio.setTwig) { T.studio.setTwig(listing.twig); renderTakes(); }
+        })
             .catch((e) => toast(_t("takes.selection_not_saved", { message: e.message }))), 250);
     }
     let pollTimer = null, polling = false;
@@ -1884,6 +1842,42 @@
         if (T.shownProject !== plan().project || T.shownClips !== plan().clips.length) { T.resolved = null; T.shownProject = plan().project; T.shownClips = plan().clips.length; }
         if (T.server && plan() && H3.framesLegal(plan())) serverScan(); else recompute();
     }
-    window.H3Takes = { render: renderTakes, recompute, rescan, onShow, state: T, generate,
-        useStudio, resetProject, zoomable, activeBranch: () => (T.resolved && T.resolved.branch) || null, hideZoom, changeReference, confirmStartVideo, takeCount, changeSize, changeRefSize, changeSong, branchOfRecord, openExport, refresh: () => studioPoll() };
+    // the launch panel: highlight takes; a new take of a take known by its id (from the plan screen)
+    function highlight(ids) { setHighlight(ids && ids.length ? new Set(ids) : null); }
+    // the launch panel lies over the right of the screen: the take it starts from is brought into the part left
+    // visible (the view goes back where it was when the panel closes)
+    let viewBefore = null;
+    function revealBeside(takeId, panelWidth) {
+        const parts = viewParts();
+        const card = takeId ? document.querySelector(`#takesView .tk-card[data-take="${CSS.escape(takeId)}"]:not(.tk-reused), #takesView .tk-card[data-take="${CSS.escape(takeId)}"]`) : null;
+        if (!parts || !card) return;
+        const r = card.getBoundingClientRect(), vr = parts.vp.getBoundingClientRect();
+        const limit = Math.min(vr.right, window.innerWidth - panelWidth) - 24;
+        viewBefore = { sx: parts.vp.scrollLeft, sy: parts.vp.scrollTop };
+        if (r.right > limit) {
+            const want = parts.vp.scrollLeft + r.right - limit, max = parts.vp.scrollWidth - parts.vp.clientWidth;
+            // a graph narrower than the view cannot scroll that far: room is added on its right while the panel is open
+            if (want > max) { T.extraRight = Math.ceil(want - max); parts.sizer.style.width = `${parts.sizer.offsetWidth + T.extraRight}px`; }
+            parts.vp.scrollLeft = want;
+            T.zoom.sx = parts.vp.scrollLeft;
+            stickPanes();
+        }
+        if (r.left < vr.left + 8) parts.vp.scrollLeft -= vr.left + 8 - r.left;
+    }
+    function restoreView() {
+        const parts = viewParts();
+        if (parts && viewBefore) {
+            T.zoom.sx = viewBefore.sx; T.zoom.sy = viewBefore.sy;
+            T.extraRight = 0;
+            applyView(null, true);           // the sizer back to the graph's width, the scroll back where it was
+        }
+        viewBefore = null;
+    }
+    function launchForkById(index, takeId) {
+        const record = recordOf(index, takeId);
+        if (record) launchFork(index, record);
+    }
+    window.H3Takes = { render: renderTakes, recompute, rescan, onShow, state: T, generate, highlight, launchForkById, predOf, effPred, takeSettings, revealBeside, restoreView,
+        recordOf, branchesList: () => branchesList(), clipLength,
+        useStudio, resetProject, zoomable, branchHasTakes: (b) => branchHasTakes(b), activeBranch: () => (T.resolved && T.resolved.branch) || null, hideZoom, changeReference, confirmStartVideo, takeCount, changeSize, changeRefSize, changeSong, branchOfRecord, openExport, refresh: () => studioPoll() };
 })();

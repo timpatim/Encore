@@ -2,7 +2,7 @@
 says « preparing… » meanwhile), the same <video> kept when the tab is drawn again (a new take does not reload it),
 a thumbnail playing without the mouse on it stopped at the next redraw, the copies deleted with the video."""
 import asyncio, json, os, shutil, subprocess, sys, time, urllib.request, urllib.error
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from common import ENCORE, CHROME, fixture  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from common import ENCORE, CHROME, fixture, plan_screen, takes_screen, launch_go  # noqa: E402
 from playwright.async_api import async_playwright
 S = "http://127.0.0.1:8245"; M = "http://127.0.0.1:8771"
 OK = []
@@ -35,7 +35,6 @@ try:
     plan = call(S, P)["plan"]
     plan["refs"]["intro"] = "start video"; plan["start_video"] = {"ref": "intro", "start": 0.5, "end": 6.0}; plan["clips"][0]["continue"] = True
     call(S, P + "/plan", plan, "PUT")
-    call(S, P + "/branches", {})
     call(S, P + "/branches/b1", {"refs": {"fillette": {"image": "refs/images/fillette.png"}, "rue": {"image": "refs/images/rue.png"}}}, "PUT")
     call(S, P + "/start-video", {"file": "refs/videos/intro.mp4"}, "PUT")
     check("thumbnail of a bad segment: refused", "error" in call(S, f"{P}/resources/thumb?path=refs/videos/intro.mp4&start=50&end=10"))
@@ -46,7 +45,7 @@ try:
             page = await b.new_page(viewport={"width": 1500, "height": 900}); errs = []
             page.on("pageerror", lambda e: errs.append(str(e)))
             await page.goto(S + "/"); await page.evaluate("localStorage.setItem('h3studio.project','rue')"); await page.reload(); await page.wait_for_timeout(1500)
-            await page.click("#viewTabs >> text=Takes")
+            await takes_screen(page)
             card = page.locator(".tk-card.tk-startvid")
             await card.wait_for()
             waiting = await card.locator(".tk-sv-wait").count()
@@ -56,7 +55,8 @@ try:
                 if state.startswith("ready"): break
                 await page.wait_for_timeout(200)
             check("the card plays a small copy of the segment", state.startswith("ready") and "previews/thumbs/refs/videos/intro.mp4_" in state, state)
-            check("« preparing… » shown meanwhile, gone once ready", waiting == 1 and await card.locator(".tk-sv-wait").count() == 0, waiting)
+            # (0.42: the page opens on the Takes screen, the copy may be ready before the first look)
+            check("« preparing… » gone once ready", waiting in (0, 1) and await card.locator(".tk-sv-wait").count() == 0, waiting)
             dur = await card.evaluate("(c) => c.querySelector('video').duration")
             check("the copy holds the segment only (5.5 s asked, on the grid)", 4.5 < dur < 5.8, dur)
             await card.evaluate("(c) => { c.querySelector('video').__kept = 1; }")
@@ -86,6 +86,9 @@ try:
     check("one copy made, kept for next time", len([f for f in os.listdir(thumbs) if f.endswith(".mp4") and ".part" not in f]) == 1, os.listdir(thumbs))
     again = call(S, f"{P}/resources/thumb?path=refs/videos/intro.mp4&start=" + os.listdir(thumbs)[0].split("_")[-2] + "&end=" + os.listdir(thumbs)[0].split("_")[-1][:-4])
     check("asked again: ready at once", again.get("state") == "done", again)
+    # 0.42: the start video of a branch with takes is fixed; the branch goes first
+    check("the start video cannot change while takes use it", "error" in call(S, P + "/start-video", {"file": None}, "PUT"))
+    call(S, P + "/branches/b1?confirm=1", method="DELETE")
     call(S, P + "/start-video", {"file": None}, "PUT")
     out = call(S, f"{P}/resources?path=refs/videos/intro.mp4&confirm=1", method="DELETE")
     check("deleting the video deletes its segment copies", out.get("deleted") and not [f for f in os.listdir(thumbs) if f.startswith("intro.mp4_")], (out, os.listdir(thumbs)))

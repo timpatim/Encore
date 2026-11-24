@@ -1,7 +1,7 @@
 """v0.35: the side pane of the Takes tab with more assembled videos than its height: the thumbnails keep their size
 (they were squeezed into thin strips) and the list scrolls, with the wheel too."""
 import asyncio, json, os, shutil, subprocess, sys, time, urllib.request, urllib.error
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from common import ENCORE, CHROME, fixture  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from common import ENCORE, CHROME, fixture, plan_screen, takes_screen, launch_go  # noqa: E402
 from playwright.async_api import async_playwright
 S = "http://127.0.0.1:8244"; M = "http://127.0.0.1:8771"
 OK = []
@@ -24,7 +24,6 @@ P = "/api/projects/rue"
 try:
     call(S, "/api/projects", {"name": "rue", "mode": "free"})
     call(S, P + "/import-plan?filename=rue.json", raw=open(fixture("rue_test_v1.plan.json"), "rb").read(), method="POST")
-    call(S, P + "/branches", {})
     branch = call(S, P)["branches"][0]
     exports = f"{root}/projets/rue/exports"; os.makedirs(exports, exist_ok=True)
     COUNT = 14
@@ -40,7 +39,7 @@ try:
             page = await b.new_page(viewport={"width": 1500, "height": 800}); errs = []
             page.on("pageerror", lambda e: errs.append(str(e)))
             await page.goto(S + "/"); await page.evaluate("localStorage.setItem('h3studio.project','rue')"); await page.reload(); await page.wait_for_timeout(1500)
-            await page.click("#viewTabs >> text=Takes"); await page.wait_for_timeout(1500)
+            await takes_screen(page); await page.wait_for_timeout(1500)
             items = page.locator(".tk-pane-list .tk-pane-item")
             check("side pane: every assembled video listed", await items.count() == COUNT, await items.count())
             heights = await page.evaluate("[...document.querySelectorAll('.tk-pane-list .tk-pane-item')].map((e) => Math.round(e.getBoundingClientRect().height))")

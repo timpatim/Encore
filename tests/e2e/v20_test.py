@@ -1,5 +1,5 @@
 import asyncio, json, os, shutil, subprocess, sys, time, urllib.request
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from common import ENCORE, CHROME, fixture, restart_mock  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from common import ENCORE, CHROME, fixture, restart_mock, plan_screen, takes_screen  # noqa: E402
 from playwright.async_api import async_playwright
 S = "http://127.0.0.1:8228"; M = "http://127.0.0.1:8771"
 def call(base, path, body=None, method=None, raw=None):
@@ -33,8 +33,8 @@ call(S, "/api/projects", {"name": "robot", "mode": "music_video"})
 call(S, P + "/import-plan?filename=robot.json", raw=json.dumps(plan).encode(), method="POST")
 for kind, f in (("images", fixture("v20_robot.png")), ("images", fixture("v20_beach.png")), ("songs", fixture("v20_song.wav"))):
     call(S, f"{P}/resources?kind={kind}&filename={os.path.basename(f)}", raw=open(f, "rb").read(), method="POST")
-call(S, P + "/branches", {})
-call(S, P + "/branches/b1", {"refs": {"robot": {"image": "refs/images/v20_robot.png"}, "beach": {"image": "refs/images/v20_beach.png"}}, "song": "refs/songs/v20_song.wav"}, "PUT")
+call(S, P + "/branches/b1", {"refs": {"robot": {"image": "refs/images/v20_robot.png"}, "beach": {"image": "refs/images/v20_beach.png"}}}, "PUT")
+call(S, P + "/essence", {"song": "refs/songs/v20_song.wav"}, "PUT")      # 0.43: the song is the project's
 before = call(S, P)["plan"]["clips"][1]["prompt"]
 
 async def main():
@@ -44,6 +44,7 @@ async def main():
         page.on("pageerror", lambda e: errs.append(str(e)))
         page.on("console", lambda m: errs.append("console: " + m.text) if m.type == "error" else None); page.on("response", lambda r: errs.append("404 " + r.url) if r.status == 404 else None)
         await page.goto(S + "/"); await page.evaluate("localStorage.setItem('h3studio.project','robot')"); await page.reload(); await page.wait_for_timeout(1500)
+        await plan_screen(page)
         # clip 2
         await page.locator(".clipitem").nth(1).click(); await page.wait_for_timeout(500)
         await page.screenshot(path="v20_plan.png", full_page=False)

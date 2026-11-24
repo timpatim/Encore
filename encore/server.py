@@ -21,8 +21,8 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import mdpage, engine as engine_mod, comfy_setup, downloads
-from . import checkpoints, folders, previews, projects, resources, takeplan, takes
+from . import mdpage, engine as engine_mod, comfy_setup, downloads, exports
+from . import folders, plan_core, plans, previews, projects, resources, takeplan, takes, trash
 from .projects import StudioError
 
 STUDIO_ROOT = Path(__file__).resolve().parent.parent
@@ -135,8 +135,6 @@ class Studio:
             config["comfy_url"] = url
             if getattr(self, "watch", None):
                 self.watch.check_now()
-        if "checkpoint_limit" in changes:
-            config["checkpoint_limit"] = max(0, int(changes["checkpoint_limit"]))
         if "purge_comfy_copy" in changes:
             config["purge_comfy_copy"] = bool(changes["purge_comfy_copy"])
         if "configured" in changes:
@@ -299,6 +297,34 @@ def make_handler(studio: Studio):
                 return json.loads(raw.decode("utf-8")) if raw else {}
             except ValueError as exc:
                 raise StudioError(_t("server.invalid_json_request")) from exc
+
+        def twig_plan(self, name, branch, leaf):
+            """The plan of a twig (or the master plan of a branch), with its validation and its timeline."""
+            path = projects.project_dir(studio.root, name)
+            if not branch:
+                meta = projects.read_meta(path)
+                known = plans.records_by_id(path)
+                if leaf and leaf in known:
+                    branch = takes.take_branch(known[leaf][1], None)
+                branch = branch or (meta["branches"][0]["id"] if meta["branches"] else None)
+            twig = plans.plan_of(path, branch, leaf, pending=studio.engine._pending_takes(name), project_name=name)
+            errors, warnings = plan_core.validate(json.loads(json.dumps(twig["plan"])))
+            return dict(twig, branch=branch, leaf=leaf, takes={str(k): v for k, v in twig["takes"].items()},
+                        validation={"errors": errors, "warnings": warnings})
+
+        def takes_listing(self, name):
+            """The takes, with the clip names of the selected twig's plan for the column headers."""
+            path = projects.project_dir(studio.root, name)
+            names, selected = {}, None
+            try:
+                selected = projects.selected_plan(path)
+                names = {i: c.get("name") for i, c in enumerate((selected["plan"] or {}).get("clips") or [], start=1)}
+            except (StudioError, OSError, ValueError):
+                pass
+            out = takes.listing(path, names)
+            out["twig"] = selected
+            out["fits"] = plans.fits_map(path)
+            return out
 
         # ---------------------------------------------------------- routing
         def _refused(self, method):
@@ -466,58 +492,64 @@ def make_handler(studio: Studio):
                 rest = api[2:]
                 if not rest and method == "GET":
                     return self.send_json(projects.read_project(root, name))
+                if rest == ["plan"] and method == "GET":
+                    # the plan of a twig (leaf = its last take) or the master plan of a branch (no leaf)
+                    return self.send_json(self.twig_plan(name, query.get("branch"), query.get("leaf") or None))
                 if rest == ["plan"] and method == "PUT":
-                    return self.send_json(projects.save_plan(root, name, self.json_body()))
+                    body = self.json_body() or {}
+                    branch = body.get("branch") or query.get("branch")
+                    leaf = body.get("leaf", query.get("leaf")) or None
+                    plan = body.get("plan") if isinstance(body.get("plan"), dict) else body
+                    if not branch:          # no target: the plan of the selection (what GET /projects/<name> gives)
+                        selected = projects.selected_plan(projects.project_dir(root, name))
+                        branch, leaf = selected["branch"], selected["leaf"]
+                    if not branch:
+                        raise StudioError(_t("server.plan_branch_missing"))
+                    out = projects.save_plan(root, name, plan, branch, leaf)
+                    return self.send_json(dict(out, **self.twig_plan(name, branch, leaf)))
                 if rest == ["settings"] and method == "PUT":
                     return self.send_json(projects.save_settings(root, name, self.json_body()))
                 if rest == ["import-plan"] and method == "POST":
                     data = self.body()
                     filename = query.get("filename", "plan.json")
-                    checkpoints.create(root, name, kind="auto", reason=_t("server.before_importing", filename=filename),
-                                       limit=studio.config.get("checkpoint_limit", 0))
-                    return self.send_json(projects.import_plan(root, name, data, filename))
-                if rest == ["checkpoints"]:
-                    if method == "GET":
-                        return self.send_json(checkpoints.list_checkpoints(root, name))
-                    if method == "POST":
-                        body = self.json_body() or {}
-                        checkpoints.create(root, name, body.get("name", ""))
-                        return self.send_json(checkpoints.list_checkpoints(root, name))
-                if len(rest) == 2 and rest[0] == "checkpoints" and method == "PUT":
-                    checkpoints.rename(root, name, rest[1], (self.json_body() or {}).get("name"))
-                    return self.send_json(checkpoints.list_checkpoints(root, name))
-                if len(rest) == 3 and rest[0] == "checkpoints" and rest[2] == "restore" and method == "POST":
-                    if studio.engine.active(name):
-                        raise StudioError(_t("server.generations_are_running_or_waiting_restore"))
-                    result = checkpoints.restore(root, name, rest[1], limit=studio.config.get("checkpoint_limit", 0))
-                    result["project"] = projects.read_project(root, name)
-                    return self.send_json(result)
+                    out = projects.import_plan(root, name, data, filename, query.get("branch") or None)
+                    out["project"] = projects.read_project(root, name)
+                    return self.send_json(out)
                 if rest == ["takes"] and method == "GET":
                     path = projects.project_dir(root, name)
-                    return self.send_json(takes.listing(path, projects.read_plan(root, name)))
+                    return self.send_json(self.takes_listing(name))
                 if len(rest) == 3 and rest[0] == "jobs" and rest[2] == "plan" and method == "GET":
                     return self.send_json(studio.engine.job_plan(name, rest[1]))
                 if len(rest) == 4 and rest[0] == "takes" and rest[3] == "plan" and method == "GET" and rest[1].isdigit():
                     return self.send_json(takeplan.take_plan(root, name, int(rest[1]), rest[2]))
                 if rest == ["selection"] and method == "PUT":
                     path = projects.project_dir(root, name)
-                    plan = projects.read_plan(root, name)
-                    takes.save_selection(path, plan, (self.json_body() or {}).get("selection") or {})
-                    return self.send_json(takes.listing(path, plan))
+                    takes.save_selection(path, None, (self.json_body() or {}).get("selection") or {}, fits=plans.fits_map(path),
+                                         pending=studio.engine._pending_takes(name))
+                    return self.send_json(self.takes_listing(name))
                 if rest == ["generate"] and method == "POST":
                     body = self.json_body() or {}
-                    return self.send_json(studio.engine.generate(name, body.get("clip"), body.get("parent"), body.get("random"),
-                                                                 body.get("seed"), body.get("branch"), body.get("upscale"),
-                                                                 body.get("loras"), body.get("upscale_settings")))
+                    return self.send_json(studio.engine.generate(
+                        name, body.get("clip"), after=body.get("after"), plan_from=body.get("plan_from"), entry=body.get("entry"),
+                        seed=body.get("seed"), branch=body.get("branch"), loras=body.get("loras"),
+                        upscale_settings=body.get("upscale_settings"), edit_instruction=body.get("edit_instruction")))
                 if len(rest) == 3 and rest[0] == "branches" and rest[2] == "fill" and method == "POST":
                     body = self.json_body() or {}
-                    return self.send_json(studio.engine.fill_branch(name, rest[1], dry_run=bool(body.get("dry_run", True)),
-                                                                    assemble=bool(body.get("assemble", True))))
-                if rest == ["clip-defaults"] and method == "PUT":
-                    body = self.json_body() or {}
-                    return self.send_json(projects.set_clip_default(root, name, body.get("clip"), body.get("value") or {}))
+                    return self.send_json(studio.engine.fill_twig(name, rest[1], leaf=body.get("leaf") or None,
+                                                                  dry_run=bool(body.get("dry_run", True)),
+                                                                  assemble=bool(body.get("assemble", True))))
                 if rest == ["branches"] and method == "POST":
-                    return self.send_json(projects.create_branch(root, name))
+                    # « + nouvelle branche »: empty, from a plan file (?how=file&filename=…, the file as body), or a
+                    # duplicate of a branch, with or without the clips of a twig ({how: copy|clips, source, leaf, upto})
+                    if query.get("how") == "file":
+                        out = projects.new_branch(root, name, "file", data=self.body(), filename=query.get("filename", "plan.json"),
+                                                  label=query.get("name"))
+                    else:
+                        body = self.json_body() or {}
+                        out = projects.new_branch(root, name, body.get("how") or "empty", source=body.get("source"),
+                                                  leaf=body.get("leaf"), upto=body.get("upto"), label=body.get("name"))
+                    out["project"] = projects.read_project(root, name)
+                    return self.send_json(out)
                 if len(rest) == 2 and rest[0] == "branches" and method == "PUT":
                     body = self.json_body() or {}
                     if any(k in body for k in ("refs", "song", "width", "height", "ref_image_size")):
@@ -535,7 +567,7 @@ def make_handler(studio: Studio):
                     projects.find_branch(meta["branches"], rest[1])
                     if studio.engine.active_in_branch(name, rest[1], meta["branches"][0]["id"]):
                         raise StudioError(_t("server.generations_or_an_assembly_of_this"))
-                    return self.send_json(checkpoints.delete_branch(root, name, rest[1], query.get("confirm") == "1"))
+                    return self.send_json(projects.delete_branch(root, name, rest[1], query.get("confirm") == "1"))
                 if rest == ["infos"] and method == "GET":
                     rel = query.get("file", "")
                     if not rel.startswith("exports/") or not rel.endswith(".infos.md"):
@@ -563,15 +595,9 @@ def make_handler(studio: Studio):
                         return self.send_json(studio.engine.assemble(name, None, None, job_id=body["job"]))
                     if not body.get("clip") or not body.get("take"):
                         raise StudioError(_t("server.assembly_give_the_last_take_of"))
-                    return self.send_json(studio.engine.assemble(name, body["clip"], body["take"],
-                                                                 allow_invalid=bool(body.get("allow_invalid"))))
-                if rest == ["assemble-check"] and method == "POST":
-                    body = self.json_body() or {}
-                    if not body.get("clip") or not body.get("take"):
-                        raise StudioError(_t("server.assembly_give_the_last_take_of"))
-                    return self.send_json(studio.engine.assemble_check(name, body["clip"], body["take"]))
+                    return self.send_json(studio.engine.assemble(name, body["clip"], body["take"]))
                 if rest == ["exports"] and method == "GET":
-                    return self.send_json({"exports": engine_mod.list_exports(projects.project_dir(root, name))})
+                    return self.send_json({"exports": exports.list_exports(projects.project_dir(root, name))})
                 if rest == ["jobs"] and method == "GET":
                     projects.project_dir(root, name)
                     return self.send_json(studio.engine.list_jobs(name))
@@ -591,6 +617,32 @@ def make_handler(studio: Studio):
                     return self.send_json(studio.engine.cancel(name, (self.json_body() or {}).get("ids") or []))
                 if rest == ["remove-job"] and method == "POST":
                     return self.send_json(studio.engine.remove(name, (self.json_body() or {}).get("id")))
+                # chantier A, A3: deleting a take (with the takes made after it) and the trash
+                if rest == ["takes", "delete"] and method == "POST":
+                    body = self.json_body() or {}
+                    busy = set()
+                    for j in studio.engine.active(name):
+                        busy.update(x for x in (j.get("take_id"), (j.get("studio") or {}).get("predecessor")) if x)
+                    out = trash.delete_take(root, name, str(body.get("take") or ""), bool(body.get("confirm")), busy)
+                    if out.get("deleted"):
+                        out["project"] = projects.read_project(root, name)
+                    return self.send_json(out)
+                if rest == ["use-plan"] and method == "POST":
+                    body = self.json_body() or {}
+                    return self.send_json(projects.use_twig_plan(root, name, body.get("branch"), body.get("leaf"), body.get("target") or "master",
+                                                                 body.get("name"), pending=studio.engine._pending_takes(name)))
+                if rest == ["trash"] and method == "GET":
+                    return self.send_json(trash.listing(root, name))
+                if rest == ["trash"] and method == "DELETE":
+                    return self.send_json(trash.erase(root, name))
+                if len(rest) == 3 and rest[0] == "trash" and rest[2] == "restore" and method == "POST":
+                    return self.send_json(trash.restore(root, name, rest[1]))
+                if len(rest) == 2 and rest[0] == "trash" and method == "DELETE":
+                    return self.send_json(trash.erase(root, name, rest[1]))
+                if rest == ["essence"] and method == "PUT":
+                    if studio.engine.active(name):
+                        raise StudioError(_t("server.generations_of_this_branch_are_waiting"))
+                    return self.send_json(projects.set_essence(root, name, self.json_body() or {}))
                 if rest == ["start-video"] and method == "PUT":
                     return self.send_json(projects.set_start_video_file(root, name, (self.json_body() or {}).get("file")))
                 if rest == ["resources", "preview"]:

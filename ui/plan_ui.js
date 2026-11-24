@@ -7,6 +7,7 @@
 
     const S = {
         plan: null, sel: 0, fileName: "", handle: null, dirty: false,
+        locked: 0, lockedTakes: {},          // Encore: clips 1..locked are generated takes, shown read-only
         undo: [], redo: [], lastSnap: "", snapTimer: null,
         tab: "sections", focusSection: 3, messages: [],
     };
@@ -98,13 +99,16 @@
         $("btnRedo").disabled = !S.redo.length;
     }
 
-    function setPlan(plan, fileName, handle) {
+    // opts (Encore): {locked: clips 1..n generated, read-only; takes: {index: take id}; sel: clip to show}
+    function setPlan(plan, fileName, handle, opts = {}) {
         if (!plan || typeof plan !== "object" || Array.isArray(plan)) throw new Error(_t("plan.the_file_does_not_hold_a"));
         if (!Array.isArray(plan.clips)) plan.clips = [];
         if (!plan.clips.length) plan.clips.push(newClip(1, plan));
         if (!plan.refs || typeof plan.refs !== "object" || Array.isArray(plan.refs)) plan.refs = {};
         S.plan = plan;
-        S.sel = 0;
+        S.locked = Math.max(0, Math.min(Number(opts.locked) || 0, plan.clips.length));
+        S.lockedTakes = opts.takes || {};
+        S.sel = Math.max(0, Math.min(opts.sel ?? (S.locked < plan.clips.length ? S.locked : 0), plan.clips.length - 1));
         S.fileName = fileName || "plan.json";
         S.handle = handle || null;
         S.dirty = false;
@@ -112,7 +116,7 @@
         S.lastSnap = snapshot();
         renderAll();
         updateUndoButtons();
-        if (plan.version !== 3) toast(_t("plan.plan_version_it_will_be_saved", { version: plan.version }));
+        if (plan.version !== 3 && !document.body.classList.contains("studio")) toast(_t("plan.plan_version_it_will_be_saved", { version: plan.version }));
         if (!$("takesView").hidden) window.H3Takes?.onShow();
     }
 
@@ -393,13 +397,16 @@
         const ctx = p.context_frames ?? 39;
         if (!ctxValues.includes(ctx)) ctxValues.push(ctx);
 
+        const studio = !!(window.H3Editor && H3Editor.media && H3Editor.media.studio);
         const proj = h("section", { class: "box" }, h("h2", {}, _t("plan.project")),
+            studio ? h("div", { class: "hint", style: "margin-bottom:6px" }, _t("plan.essence_in_project_settings"), " ",
+                h("button", { class: "small", onclick: () => { const ov = side.closest(".tk-modal"); if (ov) ov.remove(); S.settingsBox = null; H3Editor.media.openProjectSettings(); } }, _t("plan.open_project_settings"))) : null,
             h("div", { class: "grid2" },
-                field(_t("plan.project_name"), h("input", { value: p.project ?? "", oninput: (e) => { p.project = e.target.value; changed(false); } })),
-                field(_t("plan.mode"), h("select", { onchange: (e) => switchMode(e.target.value) },
+                studio ? null : field(_t("plan.project_name"), h("input", { value: p.project ?? "", oninput: (e) => { p.project = e.target.value; changed(false); } })),
+                studio ? null : field(_t("plan.mode"), h("select", { onchange: (e) => switchMode(e.target.value) },
                     h("option", { value: "free", selected: free }, _t("plan.free_generated_sound")),
                     h("option", { value: "music_video", selected: !free }, _t("plan.music_video")))),
-                field(_t("plan.context"), h("select", { onchange: (e) => { p.context_frames = +e.target.value; changed(true); } },
+                studio ? null : field(_t("plan.context"), h("select", { onchange: (e) => { p.context_frames = +e.target.value; changed(true); } },
                     ctxValues.map((v) => h("option", { value: v, selected: v === ctx }, `${v} images (${sec(v, 3)})${v === 39 ? _t("plan.recommended") : ""}`)))),
                 field(_t("plan.crossfade_at_seams"), h("input", { type: "number", min: 0, max: ctx, value: p.crossfade_frames ?? 0, title: _t("plan.0_hard_cuts"),
                     onchange: (e) => { p.crossfade_frames = Math.max(0, Math.round(+e.target.value || 0)); changed(true); } })),
@@ -410,9 +417,9 @@
                 window.H3Studio ? null : field(_t("plan.reference_size"), h("select", { onchange: (e) => { setKey(p, "ref_image_size", e.target.value === "match" ? undefined : e.target.value); changed(true); } },
                     h("option", { value: "match", selected: p.ref_image_size !== "max" }, _t("plan.match_default")),
                     h("option", { value: "max", selected: p.ref_image_size === "max" }, "max"))),
-                free ? null : field(_t("plan.song"), h("input", { value: p.song?.file ?? "", placeholder: _t("plan.file_for_the_record"),
+                free || studio ? null : field(_t("plan.song"), h("input", { value: p.song?.file ?? "", placeholder: _t("plan.file_for_the_record"),
                     oninput: (e) => { p.song = p.song || {}; setKey(p.song, "file", e.target.value); changed(false); } })),
-                free ? null : field(_t("plan.song_length_s"), h("input", { type: "number", step: "0.01", min: 0, value: p.song?.duration_seconds ?? "",
+                free || studio ? null : field(_t("plan.song_length_s"), h("input", { type: "number", step: "0.01", min: 0, value: p.song?.duration_seconds ?? "",
                     onchange: (e) => { p.song = p.song || {}; setKey(p.song, "duration_seconds", numOrUndef(e.target.value)); changed(true); } })),
             ),
             h("div", { style: "margin-top:8px" }, h("label", {}, _t("plan.notes")),
@@ -477,7 +484,9 @@
             h("option", { value: "none", selected: kind === "none" || null }, _t("plan.video_none")),
             h("option", { value: "continue", selected: kind === "continue" || null }, _t("plan.video_continue")),
             h("option", { value: "edit", selected: kind === "edit" || null, disabled: (!free && kind !== "edit") || null }, _t("plan.video_edit")));
-        const parts = [h("div", { class: "tk-inline" }, kindSel),
+        const studio = !!(media && media.studio);
+        const frozenWhy = studio && media.segmentFrozen ? media.segmentFrozen() : null;
+        const parts = [h("div", { class: "tk-inline" }, studio ? h("b", { class: "sv-kind-label" }, _t(kind === "edit" ? "plan.video_edit" : kind === "continue" ? "plan.video_continue" : "plan.video_none")) : kindSel),
             h("div", { class: "hint" }, kind === "edit" ? _t("plan.edit_video_hint") : kind === "continue" ? _t("plan.start_video_hint")
                 : _t("plan.video_none_hint") + (free ? "" : " " + _t("plan.edit_video_needs_free")))];
         if (!sv) { box.append(...parts); return box; }
@@ -488,7 +497,7 @@
             try { await media.setStartVideoFile(rel); } catch (err) { H3Dialog.alert(err.message); }
             redraw();
         };
-        if (media && media.videos) {
+        if (media && media.videos && !studio) {
             parts.push(h("div", { class: "tk-inline sv-file" },
                 h("select", { onchange: (e) => choose(e.target.value || null) },
                     h("option", { value: "" }, _t("plan.start_video_choose")),
@@ -501,8 +510,10 @@
                 parts.push(warn);
                 if (media.clip1Takes) media.clip1Takes().then((count) => { if (count) warn.textContent = _t("plan.start_video_takes_warning", { count }); }).catch(() => {});
             }
-        } else {
+        } else if (!studio) {
             parts.push(h("div", { class: "hint" }, _t("plan.start_video_no_file_editor")));
+        } else if (!current) {
+            parts.push(h("div", { class: "hint" }, _t("plan.video_file_in_project_settings")));
         }
         const url = media && media.video ? media.video() : null;
         const playable = url && media.playableVideo ? media.playableVideo(media.startVideoFile(), "sv-player") : null;   // a copy if the browser cannot play it
@@ -555,8 +566,10 @@
                     checkSize();
                 } }, _t("plan.edit_video_fit_size")) : null);
         }
-        parts.push(h("div", { class: "tk-inline sv-range" }, h("span", {}, _t("plan.start_video_from")), startIn, fromPlayer("start", startIn),
-            h("span", {}, _t("plan.start_video_to")), endIn, fromPlayer("end", endIn), playSegment), info);
+        const fromStart = fromPlayer("start", startIn), fromEnd = fromPlayer("end", endIn);
+        if (frozenWhy) for (const el of [startIn, endIn, fromStart, fromEnd]) { el.disabled = true; el.title = frozenWhy; }
+        parts.push(h("div", { class: "tk-inline sv-range" }, h("span", {}, _t("plan.start_video_from")), startIn, fromStart,
+            h("span", {}, _t("plan.start_video_to")), endIn, fromEnd, playSegment, frozenWhy ? h("span", { class: "tk-lock", title: frozenWhy }, "🔒") : null), info);
 
         if (editing) {
             parts.push(sizeWarn);
@@ -724,14 +737,15 @@
         const list = $("list");
         const scroll = list.scrollTop;
         list.innerHTML = "";
+        const lockedSel = S.sel < S.locked;        // a generated clip: nothing moves before the end of the twig
         list.append(h("div", { class: "listbar" },
             h("span", { class: "tk-split" },
                 h("button", { onclick: () => addClip(S.sel + 1), title: _t("plan.new_clip_after_the_selected_clip") }, "+ clip"),
                 h("button", { class: "tk-split-arrow", title: _t("plan.other_ways_to_add_a_clip"), onclick: (e) => { e.stopPropagation(); addMenu(e.currentTarget); } }, "▾")),
-            h("button", { onclick: duplicateClip, disabled: S.sel < 0 || null, title: _t("plan.duplicate_the_selected_clip") }, _t("plan.duplicate")),
-            h("button", { onclick: () => moveClip(-1), disabled: S.sel <= 0, title: _t("plan.move_up") }, "↑"),
-            h("button", { onclick: () => moveClip(1), disabled: S.sel < 0 || S.sel >= clips().length - 1, title: _t("plan.move_down") }, "↓"),
-            h("button", { class: "danger", onclick: deleteClip, disabled: S.sel < 0 || clips().length < 2, title: _t("plan.delete_the_selected_clip") }, "✕")));
+            h("button", { onclick: duplicateClip, disabled: S.sel < 0 || S.sel + 1 < S.locked || null, title: _t("plan.duplicate_the_selected_clip") }, _t("plan.duplicate")),
+            h("button", { onclick: () => moveClip(-1), disabled: S.sel <= S.locked || null, title: _t("plan.move_up") }, "↑"),
+            h("button", { onclick: () => moveClip(1), disabled: lockedSel || S.sel < 0 || S.sel >= clips().length - 1 || null, title: _t("plan.move_down") }, "↓"),
+            h("button", { class: "danger", onclick: deleteClip, disabled: lockedSel || S.sel < 0 || clips().length < 2 || null, title: _t("plan.delete_the_selected_clip") }, "✕")));
         const rows = H3.framesLegal(S.plan) ? H3.timeline(S.plan) : null;
         const edited = rows ? H3.editClipCount(S.plan) : 0;
         const ev = S.plan.edit_video;
@@ -748,8 +762,10 @@
             const r = rows ? rows[i] : null;
             const isEdit = i < edited;
             const own = isEdit && ev && ev.instruction && !String(c.prompt || "").includes(H3.EDIT_MARK);
-            list.append(h("div", { class: `clipitem${i === S.sel ? " sel" : ""}`, onclick: () => select(i) },
-                h("span", { class: "num" }, i + 1),
+            const lock = i < S.locked;
+            list.append(h("div", { class: `clipitem${i === S.sel ? " sel" : ""}${lock ? " locked" : ""}`, onclick: () => select(i),
+                title: lock ? _t("plan.locked_clip_title", { take: S.lockedTakes[i + 1] || "?" }) : null },
+                h("span", { class: "num" }, (lock ? "🔒" : "") + (i + 1)),
                 h("span", { class: "nm", title: c.name + (isEdit ? "\n" + _t("plan.edits_the_video_hint") : "") }, (isEdit ? "🎞 " : "") + (c.continue ? "↪ " : i ? "✂ " : "") + (c.name || "")),
                 h("span", { class: `dot ${st.e ? "e" : st.w ? "w" : ""}` }),
                 h("span", { class: "meta" }, (r ? `${sec(r.visible, 1)} → ${sec(r.end, 1)} · ${_t("plan.n_fr", { n: c.frames })}` : _t("plan.n_frames", { n: c.frames }))
@@ -769,6 +785,7 @@
         renderEditor();
     }
     function addClip(at, empty = false) {
+        at = Math.max(at, S.locked);               // never among the generated clips of a twig
         const prev = empty ? null : clips()[at - 1];
         clips().splice(at, 0, newClip(at + 1, S.plan, prev));
         // edited video: a clip added after the segment continues the video, it cannot reuse <Video 1>
@@ -803,14 +820,14 @@
     }
     function moveClip(d) {
         const j = S.sel + d;
-        if (j < 0 || j >= clips().length) return;
+        if (j < 0 || j >= clips().length || j < S.locked || S.sel < S.locked) return;
         const list = clips();
         [list[S.sel], list[j]] = [list[j], list[S.sel]];
         S.sel = j;
         changed(true);
     }
     async function deleteClip() {
-        if (clips().length < 2) return;
+        if (clips().length < 2 || S.sel < S.locked) return;
         if (!await H3Dialog.confirm(_t("plan.delete_clip", { v0: S.sel + 1, name: curClip().name }))) return;
         clips().splice(S.sel, 1);
         S.sel = Math.min(S.sel, clips().length - 1);
@@ -854,8 +871,9 @@
             h("div", {}, h("label", {}, _t("plan.link")), h("label", { class: "toggle", style: "color:var(--text)" },
                 h("input", { type: "checkbox", checked: !!c.continue, disabled: n === 1 && !c.continue && !S.plan.start_video, onchange: (e) => toggleContinue(c, e.target.checked) }),
                 _t("plan.continues_the_previous_clip"))),
-            h("div", {}, h("label", {}, _t("plan.seed_empty_auto")), h("input", { type: "number", min: 0, value: c.seed ?? "", placeholder: "auto",
-                onchange: (e) => { setKey(c, "seed", numOrUndef(e.target.value)); changed(true); } }))));
+            document.body.classList.contains("studio") ? null      // Encore: a seed belongs to a take, never to the plan
+                : h("div", {}, h("label", {}, _t("plan.seed_empty_auto")), h("input", { type: "number", min: 0, value: c.seed ?? "", placeholder: "auto",
+                    onchange: (e) => { setKey(c, "seed", numOrUndef(e.target.value)); changed(true); } }))));
         ed.append(h("div", { class: "timing", id: "timing" }));
         ed.append(h("div", { class: "msgs", id: "clipMsgs" }));
 
@@ -875,6 +893,19 @@
         renderRate();
         renderPreview();
         autosizeAll();
+        if (S.sel < S.locked) lockEditor(ed, n);
+    }
+    // a generated clip of a twig: shown as it was made, read-only, with « new take of this clip »
+    function lockEditor(ed, n) {
+        for (const el of ed.querySelectorAll("input, textarea, select, button")) {
+            if (el.closest("#songCard") && el.tagName === "BUTTON") continue;     // listening to the song stays possible
+            if (el.tagName === "TEXTAREA" || el.tagName === "INPUT") el.readOnly = true;
+            el.disabled = true;
+        }
+        const take = S.lockedTakes[n];
+        ed.prepend(h("div", { class: "locked-banner" },
+            h("span", {}, _t("plan.locked_clip_banner", { take: take || "?" })),
+            window.H3Editor.onLockedRetake ? h("button", { class: "small", onclick: () => window.H3Editor.onLockedRetake(n, take) }, _t("plan.locked_clip_retake")) : null));
     }
 
     // ---------------------------------------------------------------- the passage of the song a clip covers
@@ -1349,8 +1380,10 @@
             const mod = e.ctrlKey || e.metaKey;
             if (mod && e.key.toLowerCase() === "s") { e.preventDefault(); save(false); return; }
             const typing = ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName);
-            if (mod && !typing && e.key.toLowerCase() === "z") { e.preventDefault(); e.shiftKey ? redo() : undo(); }
-            if (mod && !typing && e.key.toLowerCase() === "y") { e.preventDefault(); redo(); }
+            // in Encore, only where the plan is edited: the plan screen or the launch panel (not the takes screen)
+            const editing = !window.H3Studio || document.body.classList.contains("planscreen") || document.body.classList.contains("launching");
+            if (editing && mod && !typing && e.key.toLowerCase() === "z") { e.preventDefault(); e.shiftKey ? redo() : undo(); }
+            if (editing && mod && !typing && e.key.toLowerCase() === "y") { e.preventDefault(); redo(); }
             if (!typing && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
                 e.preventDefault();
                 select(Math.max(0, Math.min(clips().length - 1, S.sel + (e.key === "ArrowUp" ? -1 : 1))));
@@ -1383,18 +1416,18 @@
         openSettings();
         setTimeout(() => { const el = document.querySelector(".start-video"); if (el) el.scrollIntoView({ block: "start" }); }, 50);
     }
-    window.H3Editor = { state: S, setPlan, render: renderAll, toast, openStartVideo };
-    // Plan / Prises tabs
-    for (const b of document.querySelectorAll("#viewTabs button")) {
-        b.onclick = () => {
-            const takes = b.dataset.view === "takes";
-            for (const x of document.querySelectorAll("#viewTabs button")) x.classList.toggle("on", x === b);
-            $("planView").hidden = takes;
-            $("planView").style.display = takes ? "none" : "";
-            $("timeline").style.display = takes ? "none" : "";
-            $("takesView").hidden = !takes;
-            if (takes) window.H3Takes?.onShow(); else renderAll();
-        };
+    // the Takes view or the plan view (tabs of the stand-alone editor; in Encore, the Takes screen and the plan screen)
+    function showView(takes) {
+        for (const x of document.querySelectorAll("#viewTabs button")) x.classList.toggle("on", (x.dataset.view === "takes") === takes);
+        $("planView").hidden = takes;
+        $("planView").style.display = takes ? "none" : "";
+        $("timeline").style.display = takes ? "none" : "";
+        $("takesView").hidden = !takes;
+        document.body.classList.toggle("planscreen", !takes);
+        if (takes) window.H3Takes?.onShow(); else renderAll();
     }
+    window.H3Editor = { state: S, setPlan, render: renderAll, toast, openStartVideo, showView, select, onLockedRetake: null,
+        newClip: (index, plan, after) => newClip(index, plan, after) };
+    for (const b of document.querySelectorAll("#viewTabs button")) b.onclick = () => showView(b.dataset.view === "takes");
     init();
 })();

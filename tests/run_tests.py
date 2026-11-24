@@ -24,10 +24,11 @@ UNIT = [
     ["node", "unit/sha_test.js"],
     ["node", "unit/roundtrip_test.js", "fixtures/rue_test_v1.plan.json", "fixtures/robot_beach.plan.json", "fixtures/robot_workshop.plan.json"],
     [sys.executable, "unit/parity_test.py"],
+    [sys.executable, "unit/cuts_test.py"],
 ]
 # order matters: v21*, v22 and v23 reuse the projects made by v20 and v20b; *_ui_test reuse the one of the test before
 E2E = ["v20_test", "v20b_test", "v21_test", "v21b_test", "v22_test", "v23_test", "leaf_test", "infos_test", "upscale_test",
-       "queue_ui_test", "v24_test", "v24_ui_test", "v25_test", "v25_ui_test", "v28_test", "v29_test", "v30_test", "v31_test", "v34_test", "v35_test", "v36_test", "v37_test", "v38_test", "v40_test"]
+       "queue_ui_test", "a1_api_test", "a1_ui_test", "a2_api_test", "a2_ui_test", "a3_api_test", "a3_ui_test", "v25_test", "v25_ui_test", "v28_test", "v29_test", "v30_test", "v31_test", "v34_test", "v35_test", "v36_test", "v37_test", "v38_test", "v40_test"]
 BAD = re.compile(r"^FAIL|Traceback \(most recent call last\)|ERRORS: \[[^\]]|^errors \[[^\]]|^\s*\d+/\d+ passed", re.M)
 
 

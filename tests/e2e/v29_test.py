@@ -1,7 +1,7 @@
 """v0.29: folded branches — same width, no « selection » label, a folded branch never holds the selection
 (it moves to an unfolded branch), at least one branch stays unfolded."""
 import asyncio, json, os, shutil, subprocess, sys, time, urllib.request, urllib.error
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from common import ENCORE, CHROME, fixture  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from common import ENCORE, CHROME, fixture, plan_screen, takes_screen, launch_go  # noqa: E402
 from playwright.async_api import async_playwright
 S = "http://127.0.0.1:8239"; M = "http://127.0.0.1:8771"
 OK = []
@@ -30,7 +30,7 @@ for f in (fixture("fillette.png"), fixture("rue.png")):
 refs = {"fillette": {"image": "refs/images/fillette.png"}, "rue": {"image": "refs/images/rue.png"}}
 ids = []
 for k in range(3):
-    br = call(S, P + "/branches", {})
+    br = call(S, P + "/branches", {}) if k else {"id": "b1"}       # 0.42: a project starts with its branch 1
     bid = (br.get("branch") or br).get("id") if isinstance(br, dict) else None
     bid = bid or [b["id"] for b in call(S, P)["branches"]][-1]
     ids.append(bid)
@@ -46,7 +46,7 @@ try:
             page = await b.new_page(viewport={"width": 1600, "height": 950}); errs = []
             page.on("pageerror", lambda e: errs.append(str(e)))
             await page.goto(S + "/"); await page.evaluate("localStorage.setItem('h3studio.project','rue')"); await page.reload(); await page.wait_for_timeout(1500)
-            await page.click("#viewTabs >> text=Takes"); await page.wait_for_timeout(1500)
+            await takes_screen(page); await page.wait_for_timeout(1500)
             # select the take of the middle branch, then fold that branch
             card = page.locator(f".tk-card[data-take='{takes[ids[1]]}']"); await card.click(); await page.wait_for_timeout(800)
             check("selection in the middle branch", await page.evaluate("H3Takes.activeBranch()") == ids[1])
@@ -76,7 +76,7 @@ try:
             # all folded in the browser's memory (e.g. from an older visit): one is unfolded again
             await page.evaluate(f"localStorage.setItem('encore.folded.rue', JSON.stringify({json.dumps(ids)}))")
             await page.reload(); await page.wait_for_timeout(1500)
-            await page.click("#viewTabs >> text=Takes"); await page.wait_for_timeout(1500)
+            await takes_screen(page); await page.wait_for_timeout(1500)
             check("never every branch folded", await page.locator(".tk-band-head:not(.folded)").count() == 1)
             act = await page.evaluate("H3Takes.activeBranch()")
             folded_ids = json.loads(await page.evaluate("localStorage.getItem('encore.folded.rue')"))
