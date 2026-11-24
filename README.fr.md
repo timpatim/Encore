@@ -77,7 +77,7 @@ animations de remplacement, pas de vrais rendus H3.)*
 - Un **[ComfyUI](https://github.com/comfyanonymous/ComfyUI)** qui fonctionne, avec la prise en
   charge de MiniMax H3, sur ce PC ou joignable sur le réseau, et **git** (pour les packs de nœuds).
 - Les packs de nœuds ci-dessous ; l'écran d'installation d'Encore peut les installer pour vous :
-  [ComfyUI-H3-ClipPlan](https://github.com/timpatim/ComfyUI-H3-ClipPlan) **3.6 ou plus récent**,
+  [ComfyUI-H3-ClipPlan](https://github.com/timpatim/ComfyUI-H3-ClipPlan) **3.11 ou plus récent**,
   ComfyUI-H3-Motion-Context-MultiRef, ComfyUI-VideoHelperSuite ; optionnels : ComfyUI-KJNodes
   (aperçu animé), les nœuds d'upscale latent LBH (upscale).
 - Les modèles H3 (modèle de diffusion, encodeur de texte, VAE, LoRA turbo) : l'écran
@@ -239,6 +239,7 @@ redémarrage), Encore relit les listes de nœuds et de modèles.
   refs\images\      images importées
   refs\voices\      voix importées
   refs\songs\       chansons importées
+  refs\videos\      vidéos importées (vidéo de départ ou éditée)
   takes\clip_NNN\  prises : latent (.pt), signature (.json), aperçu (.mp4)
   selection.json    prise choisie pour chaque clip
   jobs.json         générations en attente (présent seulement pendant qu'il y en a)
@@ -251,7 +252,17 @@ redémarrage), Encore relit les listes de nœuds et de modèles.
 - **☰ Projets** : liste, création (nom = nom du dossier ; mode libre ou clip musical).
 - **Importer un plan…** : copie un fichier de plan dans le projet. Le nom du projet dans le
   plan devient celui du dossier.
-- **Ressources…** : importe des images, voix et chansons (copiées dans `refs\`). Un fichier
+- **Ressources…** : importe des images, voix, chansons et vidéos (copiées dans `refs\`). Un gros fichier
+  affiche une fenêtre de progression (annuler ne laisse rien derrière) ; il est écrit au fil de l'eau. Quand le
+  dossier de ComfyUI est connu (écran de bienvenue), les fichiers sont ensuite copiés directement dans
+  son dossier `input`, sans limite de taille ; sinon ils passent par la route d'envoi de ComfyUI, qui
+  refuse les fichiers de plus de 100 Mo sauf si ComfyUI est lancé avec `--max-upload-size` (la file
+  affiche « envoi de … à ComfyUI »). Une vidéo que le navigateur ne sait pas lire (AVI, ProRes,
+  HEVC…) reçoit une copie légère en H.264 pour les lecteurs seulement, faite par ffmpeg (celui du
+  Python de ComfyUI, ou du PATH) avec sa progression ; ComfyUI reçoit toujours l'original. 🗑 supprime un
+  fichier : refusé tant qu'une branche ou la vidéo de départ l'utilise (le message dit où), après un
+  avertissement qui liste les points de sauvegarde et les prises qui en ont encore besoin, tout de
+  suite sinon ; sa copie dans ComfyUI part aussi quand le dossier de ComfyUI est connu. Un fichier
   identique n'est pas copié deux fois. Rien n'est supprimé (les points de sauvegarde en ont
   besoin). Images acceptées : PNG, JPEG, WebP, BMP ; le contenu est vérifié, et les JPEG
   en `.jfif`, `.jfi`, `.jpe`, `.pjpeg` ou `.pjp` sont enregistrés en `.jpg` (octets identiques).
@@ -370,6 +381,71 @@ Au moins une branche reste toujours dépliée (la flèche de la dernière est gr
 n'a jamais la sélection : replier la branche de la sélection la fait passer à une branche dépliée
 (celle de la dernière prise valide du clip 1). Les bandeaux repliés ont tous la même largeur, ▶▶ aligné
 à droite.
+
+## Partir d'une vidéo existante
+
+Un plan peut partir d'un segment d'une vidéo que vous avez déjà : le clip 1 la continue (même plan :
+ses 1,6 dernières secondes sont reprises, image et, en mode libre, son) ou coupe après elle. Tout se
+règle au même endroit, **⚙ Réglages du plan > Vidéo** :
+
+1. Choisir « Continuer une vidéo (vidéo de départ) ».
+2. Choisir la vidéo dans la liste (les vidéos importées du projet) ou en **Importer…** une d'ici.
+   Une seule vidéo pour le projet : toutes les branches l'utilisent.
+3. Choisir le segment dans le lecteur : « Segment de … à … », ou « ⇤ ici » / « ici ⇥ » à la position
+   du lecteur ; « ▶ lire le segment » le lit. Le segment est aimanté sur la grille des images : sa
+   fin est gardée, son début avance de moins de 0,7 s (la ligne en dessous dit ce qui est utilisé).
+4. « le clip 1 continue la vidéo » ou « coupe après la vidéo », et si **le segment ouvre la vidéo
+   finale** (sinon il ne sert que de tremplin : la vidéo commence avec le clip 1).
+5. Clip musical, segment dans la vidéo finale : **la chanson commence avec la vidéo** (par défaut ;
+   la vidéo perd son propre son et le clip 1 vient plus loin dans la chanson) ou **la vidéo garde son
+   propre son et la chanson commence avec le clip 1**.
+
+Le segment apparaît sur la frise de l'onglet Plan avant le clip 1 (hachuré quand il n'est pas dans la
+vidéo finale). Quand il ouvre la vidéo finale, l'onglet Prises a une colonne **Vidéo de départ**
+avant le clip 1 : le segment, dans chaque branche, relié aux prises du clip 1 qui le continuent
+(survol : il se lit ; clic : ses réglages). Ce n'est pas une prise : il n'est ni généré ni choisi. La
+vidéo est lue à 24 images/s, agrandie pour couvrir la taille d'image de la branche et rognée au
+centre. Une autre vidéo ou un autre segment invalide les prises du clip 1 et celles qui les
+continuent (Encore demande confirmation quand on change de vidéo ; remettre l'ancienne valeur les rend
+de nouveau valides). Mettre ou non le segment dans la vidéo finale ne change rien en mode libre (en
+clip musical, cela déplace la chanson sous les clips).
+
+## Éditer une vidéo existante
+
+Un plan en mode libre peut éditer un segment d'une vidéo que vous avez : changer son style, remplacer
+un personnage par une image de référence, etc. La frise du plan est le segment ; chaque clip édite son
+propre morceau, donné à H3 comme `<Video 1>` avec son son (les voix du clip viennent après, Encore les
+numérote). Dans **⚙ Réglages du plan > Vidéo** :
+
+1. Choisir « Éditer une vidéo », puis la vidéo (ou en **Importer…** une) et le segment, comme pour une
+   vidéo de départ. Les branches doivent avoir les proportions de la vidéo, sinon son image est
+   recadrée : Encore le signale et **leur donne les proportions de la vidéo** à la demande (à peu près
+   le même nombre de pixels).
+2. Le son de la vidéo finale : **le son d'origine du segment** (par défaut) ou **le son fait par H3**
+   (pour changer une voix ou une réplique).
+3. **✂ Découper sur les plans** : Encore trouve les changements de plan du segment (ffmpeg) et crée
+   les clips : une nouvelle scène à chaque changement de plan, un plan plus long qu'un clip coupé en
+   parts égales qui s'enchaînent (« clips d'au plus 10,1 s » par défaut). Les coupures tombent sur la
+   grille où un clip peut finir ; on les déplace ensuite comme n'importe quel clip. Encore demande
+   avant de remplacer les clips du plan.
+4. Chaque clip reçoit un prompt qui garde le cadrage, les mouvements et le rythme de `<Video 1>`, avec
+   `{edit}` là où va l'édition. On écrit l'édition une fois dans **✎ Consigne commune**, la première
+   entrée de la liste des clips (aussi accessible depuis les réglages) : glisser une référence depuis la
+   droite ou taper `@` pour citer une image (« the man is replaced by {picture:homme} ») ; elle est
+   ajoutée à chaque clip qui utilise `{edit}`. Un clip peut la compléter (`{edit}; the man also wears a
+   red scarf`) ou la remplacer (effacer `{edit}`). L'entrée dit quels clips l'utilisent et montre ce que
+   H3 reçoit.
+
+**Continuer après le segment.** Les clips qui finissent avant la fin du segment éditent la vidéo (🎞 dans
+la liste et sur la frise, qui montre la fin du segment) ; les suivants la continuent comme n'importe quel
+clip : on les ajoute avec « + clip » après le dernier (pas de `<Video 1>` dans leur prompt). « Découper
+sur les plans » ne remplace que les clips édités et garde ceux d'après. Avec le son d'origine, la vidéo
+finale le garde sur la partie éditée seulement.
+
+Un clip qui édite une vidéo dure de 2 à 15 s. Dans l'onglet Prises, la carte vide d'un clip montre,
+derrière le « + », la partie de la vidéo qu'il édite (survol : elle se lit). Une autre vidéo ou un
+autre segment rend toutes les prises périmées. Une vidéo de départ et une vidéo éditée ne se combinent
+pas dans un même plan.
 
 ## File des générations (indicateur à droite de la barre du haut)
 

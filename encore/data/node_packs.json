@@ -17,7 +17,8 @@
         "H3PlanSaveLatent",
         "H3PlanAssemble",
         "H3PlanReference",
-        "H3PlanVoice"
+        "H3PlanVoice",
+        "H3PlanVideo"
       ],
       "why": "plans, takes and assembly: the nodes Encore drives"
     },

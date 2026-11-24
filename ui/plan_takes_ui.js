@@ -340,6 +340,7 @@
     }
     function framesText(frames) { return frames ? `${frames} ${_t("takes.plan_frames")} (${clipLength(frames)})` : "—"; }
     function continueText(entry, index) {
+        if (index === 1 && plan().start_video) return entry && entry.continue ? _t("takes.plan_continues_video", { ref: plan().start_video.ref }) : _t("takes.plan_new_scene");
         return index === 1 ? _t("takes.plan_first_clip") : entry && entry.continue ? _t("takes.plan_continues", { clip: index - 1 }) : _t("takes.plan_new_scene");
     }
     function linesText(entry, free) {
@@ -393,7 +394,10 @@
             planRow(_t("takes.plan_name"), h("b", {}, `${index}. ${clip.name || ""}`)),
             planRow(_t("takes.plan_length"), framesText(clip.frames)),
             planRow(_t("takes.plan_link"), continueText(clip, index)),
-            row.end ? planRow(_t("takes.plan_in_video"), `${clipLength(index > 1 ? row.visible : 0) || "0"} → ${clipLength(row.end)}`) : null,
+            row.end ? planRow(_t("takes.plan_in_video"), (() => {
+                const first = H3.finalStart(p), shown = index > 1 || H3.startVideo(p) ? Math.max(row.visible, first) : 0;
+                return `${clipLength(shown - first) || "0"} → ${clipLength(row.end - first)}`;
+            })()) : null,
             planRow(_t("takes.plan_refs"), refs.length ? h("div", { class: "tk-plan-refs" }, refs) : "—"),
             br ? h("div", { class: "hint", style: "margin:-4px 0 6px 130px" }, _t("takes.plan_refs_of_branch", { name: br.name })) : null,
             planRow(free ? _t("takes.plan_lines") : _t("takes.plan_lyrics"), h("div", { class: "tk-plan-text" }, lines || "—")),
@@ -568,6 +572,12 @@
             canvas.append(bandHeader(band, p));
         }
         canvas.append(h("button", { class: "tk-newbranch tk-stick-x", style: `left:${LEFT}px;top:${graph.newBranchY}px;width:${HEADW}px`, onclick: newBranch }, _t("takes.new_branch")));
+        if (startCol()) {
+            const sv = H3.startVideo(p);
+            top.append(h("div", { class: "tk-col-head tk-col-start", style: `left:${colX(0)}px;width:${COLW}px` },
+                h("div", { class: "tk-col-name" }, h("b", {}, "▶ "), _t("takes.start_video_column")),
+                h("div", { class: "hint" }, `${startVideoName() || _t("takes.start_video_no_file")} · ${clipLength(sv.frames)}`)));
+        }
         for (let index = 1; index <= n; index++) {
             const clip = p.clips[index - 1];
             const res = T.resolved[index];
@@ -581,7 +591,8 @@
                 top.append(h("span", { class: "tk-cut-mark", style: `left:${colX(index) - gapX() / 2 - 7}px` }, "✂"));
             }
         }
-        for (const node of graph.nodes) canvas.append(node.kind === "take" ? takeCard(node, p) : node.kind === "export" ? exportCard(node) : ghostCard(node, p));
+        for (const node of graph.nodes) canvas.append(node.kind === "take" ? takeCard(node, p) : node.kind === "export" ? exportCard(node)
+            : node.kind === "startvideo" ? startVideoCard(node, p) : ghostCard(node, p));
         for (const slot of graph.slots || []) canvas.append(slotCard(slot));
 
         if (T.server) for (const ph of graph.placeholders) canvas.append(placeholderCard(ph, p));
@@ -631,7 +642,9 @@
     const gapX = () => (T.viewMode === "tree" ? 130 : GAP);
     const gapY = () => (T.viewMode === "tree" ? 34 : 12);
     const HEADW = 200;
-    const colX = (i) => LEFT + HEADW + 30 + (i - 1) * (COLW + gapX());
+    // the start video, when it opens the final video, has a column of its own before clip 1 (index 0)
+    const startCol = () => { const sv = H3.startVideo(plan()); return sv && sv.in_assembly ? 1 : 0; };
+    const colX = (i) => LEFT + HEADW + 30 + (i - 1 + startCol()) * (COLW + gapX());
 
     // ---------------------------------------------------------------- branches (Encore)
     const branchesList = () => T.studio.branches();
@@ -734,7 +747,8 @@
         const refs = Object.entries(br.refs || {});
         const thumbs = refs.filter(([, r]) => r && r.image).map(([name, r]) => zoomable(h("img", { class: "tk-band-ref", src: T.studio.viewUrl(r.image) }), name));
         const voices = free ? refs.filter(([, r]) => r && r.voice).map(([name]) => name) : [];
-        const missing = Object.keys(p.refs || {}).filter((name) => !(br.refs || {})[name] || (!br.refs[name].image && !br.refs[name].voice));
+        const svRef = (p.start_video || p.edit_video || {}).ref;
+        const missing = Object.keys(p.refs || {}).filter((name) => name !== svRef && (!(br.refs || {})[name] || (!br.refs[name].image && !br.refs[name].voice)));
         const active = T.resolved?.branch === br.id;
         return h("div", { class: `tk-band-head tk-stick-x${active ? " active" : ""}`, style: `left:${LEFT}px;top:${band.y}px;width:${HEADW}px;min-height:${Math.min(band.h, CARD_H)}px;border-color:${br.color}` },
             h("div", { class: "tk-band-title" }, foldToggle(br, false), h("i", { style: `background:${br.color}` }),
@@ -844,6 +858,8 @@
                 continue;
             }
             const items = [], keyOfToken = {};
+            const startKey = startCol() ? "v:" + br.id : null;
+            if (startKey) items.push({ key: startKey, kind: "startvideo", index: 0, order: -1, branch: br.id });
             for (let index = 1; index <= n; index++) {
                 const list = (T.takes[index] || []).filter((r) => branchOfRecord(r) === br.id).sort((a, b) => (a.saved_at || 0) - (b.saved_at || 0));
                 for (const record of list) {
@@ -860,7 +876,8 @@
             for (const it of items) {
                 const clip = p.clips[it.index - 1];
                 it.parent = null;
-                if (it.index === 1) continue;
+                if (it.index === 1 && startKey && clip.continue) { it.parent = startKey; edges.push({ from: startKey, to: it.key, cls: "start" }); }
+                if (it.index <= 1) continue;
                 if (clip.continue) {
                     const token = it.kind === "take" ? (it.record.parent ? tokenOf(it.record.parent) : null) : it.job.parentToken;
                     const key = token ? keyOfToken[`${it.index - 1}:${token}`] : null;
@@ -876,7 +893,7 @@
             // an empty box to the right of each end of the branch: the next clip, to generate after this take
             const hasChild = new Set(items.filter((it) => it.parent).map((it) => it.parent));
             for (const it of [...items]) {
-                if (it.index >= n || !p.clips[it.index].continue || hasChild.has(it.key)) continue;
+                if (it.kind === "startvideo" || it.index >= n || !p.clips[it.index].continue || hasChild.has(it.key)) continue;
                 if (it.kind === "take") {
                     const st = T.resolved?.[it.index]?.takes?.[it.record.id];
                     if (st && st[0] === "invalid") continue;
@@ -1138,9 +1155,11 @@
         const index = slot.index;
         const opts = { parentToken: slot.token };
         const launch = () => { if (!T.dragged) generate(index, { ...opts, branch: slot.branch }); };
-        return h("div", { class: "tk-card tk-placeholder tk-slot", style: `left:${slot.x}px;top:${slot.y}px;width:${COLW}px;height:${CARD_H}px`,
-            title: _t("takes.generate_clip_following_this_take", { index }) + effTitle(index, slot.branch), onclick: launch },
-            h("div", { class: "tk-plus" }, "+"), h("div", { class: "hint" }, _t("takes.clip_following", { index })),
+        const src = sourceThumb(index, slot.branch);
+        return h("div", { class: `tk-card tk-placeholder tk-slot${src ? " has-src" : ""}`, style: `left:${slot.x}px;top:${slot.y}px;width:${COLW}px;height:${CARD_H}px`,
+            title: _t("takes.generate_clip_following_this_take", { index }) + effTitle(index, slot.branch), onclick: launch,
+            onmouseenter: () => srcHover(src, true), onmouseleave: () => srcHover(src, false) },
+            src, h("div", { class: "tk-plus" }, "+"), h("div", { class: "hint" }, _t("takes.clip_following", { index })),
             h("button", { class: "small tk-split-arrow tk-ph-arrow", title: _t("takes.tuned_take_lora_upscale_seed"),
                 onclick: (e) => { e.stopPropagation(); tuned(index, opts, slot.branch, _t("takes.clip_following_this_take", { index })); } }, _t("takes.tuned")),
             planButton(index, null, { branch: slot.branch }));
@@ -1192,10 +1211,88 @@
 
     // ---------------------------------------------------------------- assembled videos (Encore)
     const whenMs = (t) => new Date(t * 1000).toLocaleString("fr-FR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+    const startVideoName = () => { const f = window.H3Editor && H3Editor.media && H3Editor.media.startVideoFile ? H3Editor.media.startVideoFile() : null; return f ? f.split("/").pop() : null; };
+    // the start video segment (the same in every branch): plays on hover, a click opens its settings
+    function startVideoCard(node, p) {
+        const sv = H3.startVideo(p);
+        const media = window.H3Editor && H3Editor.media;
+        const file = media && media.startVideoFile ? media.startVideoFile() : null;
+        const key = file ? `s:${file}:${sv.start_frame}:${sv.end_frame}` : null;
+        // a small copy of the segment only, made once by the server; the same <video> survives the redraws
+        const video = key ? thumbVideo(key, () => {
+            const v = h("video", { muted: true, loop: true, playsinline: true, preload: "auto" });
+            v.dataset.state = "wait";
+            queueMicrotask(() => attachSegment(v, key, file, sv));      // once it is in T.thumbs
+            return v;
+        }) : null;
+        const rest = () => { if (video && video.readyState) video.currentTime = Math.min(0.5, (video.duration || 1) / 3); };
+        return h("div", { class: "tk-card tk-startvid", "data-start": node.branch, "data-svthumb": key || "", style: `left:${node.x}px;top:${node.y}px;width:${COLW}px;height:${CARD_H}px`,
+            title: _t("takes.start_video_card_title"),
+            onclick: () => { if (window.H3Editor && H3Editor.openStartVideo) H3Editor.openStartVideo(); },
+            onmouseenter: () => { if (!video || video.dataset.state !== "ready") return; video.muted = !T.soundOnHover; video.currentTime = 0; video.play().catch(() => { video.muted = true; video.play().catch(() => {}); }); },
+            onmouseleave: () => { if (!video) return; video.pause(); rest(); } },
+            h("div", { class: "tk-thumb" }, video || h("span", { class: "tk-ghost-icon" }, "▶"),
+                video && video.dataset.state === "wait" ? h("span", { class: "tk-sv-wait" }, _t("takes.start_video_preparing")) : null),
+            h("div", { class: "tk-meta" }, h("span", {}, startVideoName() || _t("takes.start_video_no_file")),
+                h("span", { class: "hint" }, `${clipLength(sv.start_frame) || "0"} → ${clipLength(sv.end_frame)}`)));
+    }
+    // edited video: the slice of the source a clip edits, behind its « + » card (plays on hover)
+    function sourceThumb(index, branch) {
+        const p = plan();
+        if (!p.edit_video) return null;
+        const media = window.H3Editor && H3Editor.media;
+        const file = media && media.startVideoFile ? media.startVideoFile() : null;
+        const slice = H3.editSlice(p, index);
+        if (!file || !slice) return null;
+        const row = H3.timeline(p)[index - 1];
+        const seg = { start_frame: slice[0] + row.context, end_frame: slice[0] + slice[1] };    // what the clip shows (not its lead-in)
+        const key = `src:${branch}:${file}:${seg.start_frame}:${seg.end_frame}`;
+        const video = thumbVideo(key, () => {
+            const v = h("video", { muted: true, loop: true, playsinline: true, preload: "auto", class: "tk-src-thumb" });
+            v.dataset.state = "wait";
+            queueMicrotask(() => attachSegment(v, key, file, seg));
+            return v;
+        });
+        return video;
+    }
+    const srcHover = (video, on) => {
+        if (!video || video.dataset.state !== "ready") return;
+        if (on) { video.muted = !T.soundOnHover; video.currentTime = 0; video.play().catch(() => { video.muted = true; video.play().catch(() => {}); }); }
+        else { video.pause(); video.currentTime = Math.min(0.5, (video.duration || 1) / 3); }
+    };
+    async function attachSegment(video, key, file, sv) {
+        const done = (src) => {
+            video.addEventListener("loadeddata", () => {
+                video.dataset.state = "ready";
+                if (video.paused) video.currentTime = Math.min(0.5, (video.duration || 1) / 3);
+                for (const el of document.querySelectorAll(`[data-svthumb="${CSS.escape(key)}"] .tk-sv-wait`)) el.remove();
+            }, { once: true });
+            video.src = src;
+        };
+        const original = () => {      // no ffmpeg (or it failed): the file itself, from the start of the segment
+            const url = H3Editor.media.video();
+            if (url) done(`${url}#t=${(sv.start_frame / 24).toFixed(3)},${(sv.end_frame / 24).toFixed(3)}`);
+        };
+        let asked = false;
+        for (;;) {
+            if (T.thumbs.get(key) !== video) return;        // another file or segment since
+            let st;
+            try {
+                st = await T.studio.segmentThumb(file, sv.start_frame, sv.end_frame);
+                if (st.state === "none" && !asked) { asked = true; st = await T.studio.segmentThumb(file, sv.start_frame, sv.end_frame, "POST"); }
+            } catch (_) { original(); return; }
+            if (st.state === "done") { done(T.studio.viewUrl(st.path)); return; }
+            if (st.state !== "running") { original(); return; }
+            await new Promise((r) => setTimeout(r, 600));
+        }
+    }
     function exportCard(node) {
         const ex = node.export;
-        const video = h("video", { muted: true, loop: true, playsinline: true, preload: "metadata", src: T.studio.viewUrl(ex.file) });
-        video.addEventListener("loadeddata", () => { if (video.paused) video.currentTime = Math.min(0.5, (video.duration || 1) / 3); }, { once: true });
+        const video = thumbVideo("e:" + ex.file, () => {      // the same <video> survives the redraws
+            const v = h("video", { muted: true, loop: true, playsinline: true, preload: "metadata", src: T.studio.viewUrl(ex.file) });
+            v.addEventListener("loadeddata", () => { if (v.paused) v.currentTime = Math.min(0.5, (v.duration || 1) / 3); }, { once: true });
+            return v;
+        });
         return h("div", { class: "tk-card tk-export", style: `left:${node.x}px;top:${node.y}px;width:${COLW}px;height:${CARD_H}px`,
             title: _t("takes.mp4_clips_1_to_double_click", { name: ex.name, clips: ex.clips }),
             ondblclick: (e) => { e.preventDefault(); openExport(ex); },
@@ -1232,10 +1329,12 @@
             generate(index, { branch: ph.branch, seed: v });
         };
         seed.querySelector("input").addEventListener("keydown", (e) => { if (e.key === "Enter") launch(); });
-        return h("div", { class: "tk-card tk-placeholder", style: `left:${ph.x}px;top:${ph.y}px;width:${COLW}px;height:${CARD_H}px`,
-            title: (index === 1 ? _t("takes.generate_clip_1_of_this_branch") : _t("takes.generate_clip_new_scene_in_this", { index })) + effTitle(index, ph.branch),
-            onclick: () => { if (!T.dragged) launch(); } },
-            h("div", { class: "tk-plus" }, "+"), h("div", { class: "hint" }, _t("takes.generate")), h("div", { class: "tk-ph-seed" }, seed),
+        const src = sourceThumb(index, ph.branch);
+        return h("div", { class: `tk-card tk-placeholder${src ? " has-src" : ""}`, style: `left:${ph.x}px;top:${ph.y}px;width:${COLW}px;height:${CARD_H}px`,
+            title: (index === 1 ? _t("takes.generate_clip_1_of_this_branch") : _t("takes.generate_clip_new_scene_in_this", { index })) + effTitle(index, ph.branch)
+                + (src ? "\n" + _t("takes.edit_source_hint") : ""),
+            onclick: () => { if (!T.dragged) launch(); }, onmouseenter: () => srcHover(src, true), onmouseleave: () => srcHover(src, false) },
+            src, h("div", { class: "tk-plus" }, "+"), h("div", { class: "hint" }, _t("takes.generate")), h("div", { class: "tk-ph-seed" }, seed),
             h("button", { class: "small tk-split-arrow tk-ph-arrow", title: _t("takes.tuned_take_lora_upscale_seed"),
                 onclick: (e) => { e.stopPropagation(); tuned(index, {}, ph.branch, _t("takes.clip_new_take", { index })); } }, _t("takes.tuned")),
             planButton(index, null, { branch: ph.branch }));
@@ -1285,7 +1384,10 @@
         const topLayer = parts.vp.querySelector(".tk-topcanvas");
         if (topLayer) topLayer.style.transform = `scale(${z})`;
         sizer.style.width = `${Math.ceil(w * z)}px`;
-        sizer.style.height = `${Math.ceil(hh * z)}px`;
+        // room below the graph so that the last branch can be scrolled up to the top of the view (and no further)
+        const bands = (T.graph && T.graph.bands) || [];
+        const lastTop = bands.length ? Math.max(0, bands[bands.length - 1].y - 24) : 0;
+        sizer.style.height = `${Math.ceil(Math.max(hh * z, lastTop * z + vp.clientHeight))}px`;
         if (keep !== false) { vp.scrollLeft = T.zoom.sx || 0; vp.scrollTop = T.zoom.sy || 0; }
         T.zoom.sx = vp.scrollLeft; T.zoom.sy = vp.scrollTop;
         stickPanes(c);
@@ -1578,7 +1680,7 @@
                 last ? h("button", { class: "small", title: _t("takes.center_the_view_on_the_last"), onclick: (e) => { e.stopPropagation(); centreOnTake(last); } }, _t("takes.takes")) : null));
     }
     loadViewPrefs();
-    window.addEventListener("resize", () => { if (document.querySelector("#takesView .tk-map-canvas")) drawMinimap(); });
+    window.addEventListener("resize", () => { if (document.querySelector("#takesView .tk-viewport")) applyView(null, true); else if (document.querySelector("#takesView .tk-map-canvas")) drawMinimap(); });
 
     function dependents(job) {
         const out = [];
@@ -1621,6 +1723,7 @@
                     if (!had) continue;                       // this take does not use this reference
                     if ("image" in want && (had.image ?? null) !== (want.image ?? null)) bad = true;
                     if (free && "voice" in want && (had.voice ?? null) !== (want.voice ?? null)) bad = true;
+                    if ("video" in want && (had.video ?? null) !== (want.video ?? null)) bad = true;
                 }
                 if (bad) hit.push({ clip: +i, id: r.id });
             }
@@ -1644,6 +1747,17 @@
         return await H3Dialog.confirm(_t("takes.take_s_clip_will_be_invalidated", { why, length: alive.length, v2: clips.length > 1 ? "s" : "", v3: clips.join(", ") }) +
             _t("takes.putting_the_old_value_back_makes"));
     }
+    // another start video for the project (sha of the new file, or null): confirm the takes it invalidates
+    async function confirmStartVideo(sha) {
+        const ref = (plan().start_video || plan().edit_video || {}).ref;
+        if (!ref) return true;
+        await studioEnsureTakes();
+        return resetConflicts(conflicting({ branch: null, refs: { [ref]: { video: sha } } }), _t("takes.the_start_video"), null);
+    }
+    async function takeCount(index) {
+        await studioEnsureTakes();
+        return (T.takes[index] || []).length;
+    }
     // returns true when the change can be applied
     async function changeReference(branch, name, kind, path) {
         const free = H3.mode(plan()) === "free";
@@ -1651,10 +1765,14 @@
         await studioEnsureTakes();
         const mine = (r) => !branch || branchOfRecord(r) === branch;
         if (!Object.values(T.takes).some((l) => l.some((r) => mine(r) && ((r.studio && r.studio.refs) || {})[name]))) return true;
-        const d = path ? await T.studio.digests(kind === "image" ? [path] : [], kind === "voice" ? [path] : []) : null;
-        const value = path ? d[kind === "image" ? "images" : "voices"][path] : null;
+        let value = null;
+        if (path) {
+            const d = await T.studio.digests(kind === "image" ? [path] : [], kind === "voice" ? [path] : []);
+            value = d[kind === "image" ? "images" : "voices"][path];
+        }
         const list = conflicting({ branch, refs: { [name]: { [kind]: value } } });
-        return resetConflicts(list, _t("takes.changing_of_makes_the_takes_that", { v0: kind === "image" ? _t("takes.the_picture") : _t("takes.the_voice"), name }), branch);
+        const what = kind === "image" ? _t("takes.the_picture") : _t("takes.the_voice");
+        return resetConflicts(list, _t("takes.changing_of_makes_the_takes_that", { v0: what, name }), branch);
     }
     async function changeSong(branch, path) {
         await studioEnsureTakes();
@@ -1767,5 +1885,5 @@
         if (T.server && plan() && H3.framesLegal(plan())) serverScan(); else recompute();
     }
     window.H3Takes = { render: renderTakes, recompute, rescan, onShow, state: T, generate,
-        useStudio, resetProject, zoomable, activeBranch: () => (T.resolved && T.resolved.branch) || null, hideZoom, changeReference, changeSize, changeRefSize, changeSong, branchOfRecord, openExport, refresh: () => studioPoll() };
+        useStudio, resetProject, zoomable, activeBranch: () => (T.resolved && T.resolved.branch) || null, hideZoom, changeReference, confirmStartVideo, takeCount, changeSize, changeRefSize, changeSong, branchOfRecord, openExport, refresh: () => studioPoll() };
 })();

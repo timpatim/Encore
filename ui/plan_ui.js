@@ -38,6 +38,8 @@
     const clips = () => S.plan.clips;
     const isFree = () => H3.mode(S.plan) === "free";
     const curClip = () => clips()[S.sel];
+    const INSTR = -1;       // the « common instruction » entry of an edited video, before clip 1
+    const onInstr = () => S.sel === INSTR && !!S.plan.edit_video;
     function toast(text) {
         const t = $("toast");
         t.textContent = text;
@@ -221,6 +223,7 @@
 
     // ------------------------------------------------------------------ rendering
     function renderAll() {
+        if (S.sel === INSTR && !S.plan.edit_video) S.sel = 0;
         S.messages = H3.validate(S.plan);
         renderHeader();
         renderTimeline();
@@ -270,8 +273,9 @@
         }
         const rows = H3.timeline(S.plan);
         const total = rows[rows.length - 1].end;
+        const sv = H3.startVideo(S.plan), first = H3.finalStart(S.plan), songAt = H3.songOffset(S.plan) / FPS;
         const songDur = !isFree() && S.plan.song && typeof S.plan.song.duration_seconds === "number" ? S.plan.song.duration_seconds : null;
-        const span = Math.max(total / FPS, songDur || 0) + 0.5;
+        const span = Math.max(total / FPS, songDur !== null ? songDur + songAt : 0) + 0.5;
         const width = Math.max(box.clientWidth - 26, 300);
         const pps = Math.max(width / span, 14);
         const x = (frames) => (frames / FPS) * pps;
@@ -281,7 +285,10 @@
         const nScenes = scene + 1;
 
         box.append(h("div", { class: "tl-head" },
-            h("span", {}, _t("plan.length"), h("b", {}, sec(total, 2))),
+            h("span", {}, _t("plan.length"), h("b", {}, sec(total - first, 2))),
+            sv ? h("span", {}, _t("plan.starts_from_video"), h("b", {}, `${sv.ref} ${secv(sv.frames / FPS, 2)}`)) : null,
+            H3.editVideo(S.plan) ? (() => { const ev = H3.editVideo(S.plan); return h("span", { class: "tl-edit", title: _t("plan.edit_video_timeline_title"), onclick: () => openSettings() },
+                _t("plan.edits_video"), h("b", {}, `${ev.ref} ${secv(ev.start_frame / FPS, 2)} → ${secv(ev.end_frame / FPS, 2)}`)); })() : null,
             h("span", {}, h("b", {}, rows.length), " clips"),
             h("span", {}, h("b", {}, nScenes), nScenes > 1 ? _t("plan.scenes_continuous_shots") : _t("plan.scene_continuous_shot")),
             h("span", {}, "mode ", h("b", {}, isFree() ? _t("plan.free") : _t("plan.music_video"))),
@@ -292,6 +299,16 @@
         const step = pps > 60 ? 1 : pps > 25 ? 2 : 5;
         for (let t = 0; t <= span; t += step) ruler.append(h("div", { class: "tick", style: `left:${t * pps}px` }, `${t}s`));
         tl.append(ruler);
+        if (sv) {               // the start video segment, before clip 1 (hatched when it is not in the final video)
+            tl.append(h("div", {
+                class: `block startvid${sv.in_assembly ? "" : " out"}`, style: `left:0;width:${Math.max(x(sv.frames) - 1, 3)}px`,
+                title: _t("plan.start_video_block", { ref: sv.ref, v1: secv(sv.start_frame / FPS, 2), v2: secv(sv.end_frame / FPS, 2) })
+                    + (sv.in_assembly ? "" : "\n" + _t("plan.start_video_not_in_video")),
+                onclick: () => openSettings(),
+            }, h("span", { class: "n" }, "▶"), h("span", {}, sv.ref), " ", h("span", { class: "d" }, secv(sv.frames / FPS))));
+            if (songAt > 0 && songDur !== null) tl.append(h("div", { class: "songend", style: `left:${songAt * pps}px` }, h("span", {}, _t("plan.start_of_the_song"))));
+        }
+        const editedTl = H3.editClipCount(S.plan);
         rows.forEach((r, i) => {
             const st = clipStatus(r.index);
             const left = x(r.visible), w = Math.max(x(r.end) - x(r.visible) - 1, 3);
@@ -300,7 +317,7 @@
                 style: `left:${left}px;width:${w}px;background:${SCENE_COLORS[scenes[i] % SCENE_COLORS.length]}`,
                 title: `#${r.index} ${r.name}\n${r.continue ? _t("plan.continuation") : r.index === 1 ? _t("plan.start") : _t("plan.new_scene_cut")}\nvisible ${sec(r.visible)} → ${sec(r.end)}\n${r.frames} images`,
                 onclick: () => select(i),
-            }, h("span", { class: "n" }, r.index), h("span", {}, r.name), " ", h("span", { class: "d" }, secv((r.end - r.visible) / FPS)));
+            }, h("span", { class: "n" }, r.index), i < editedTl ? h("span", { title: _t("plan.edits_the_video_hint") }, "🎞 ") : null, h("span", {}, r.name), " ", h("span", { class: "d" }, secv((r.end - r.visible) / FPS)));
             tl.append(block);
             if (r.context) {
                 tl.append(h("div", {
@@ -311,7 +328,9 @@
                 if (!r.continue) tl.append(h("div", { class: "seam cut", style: `left:${x(r.visible) - 1}px`, title: _t("plan.cut") }, h("span", {}, "✂")));
             }
         });
-        if (songDur !== null) tl.append(h("div", { class: "songend", style: `left:${songDur * pps}px` }, h("span", {}, _t("plan.end_of_the_song"))));
+        if (songDur !== null) tl.append(h("div", { class: "songend", style: `left:${(songDur + songAt) * pps}px` }, h("span", {}, _t("plan.end_of_the_song"))));
+        const evt = H3.editVideo(S.plan);
+        if (evt) tl.append(h("div", { class: "songend segend", style: `left:${x(evt.frames)}px`, title: _t("plan.segment_end_title") }, h("span", {}, _t("plan.segment_end"))));
         const wrap = h("div", { class: "tl-wrap" }, tl);
         box.append(wrap);
         box.append(h("div", { class: "tl-legend" },
@@ -335,7 +354,8 @@
     function renderPalette() {
         const side = $("side");
         side.innerHTML = "";
-        if (curClip()) H3Sections.palette(side, sectionsCtx());
+        if (onInstr()) instructionPalette(side);
+        else if (curClip()) H3Sections.palette(side, sectionsCtx());
         side.append(h("section", { class: "box sx-pal" }, h("h2", {}, _t("plan.plan_checks")), h("ul", { class: "vlist", id: "vlist" })));
         renderValidation();
     }
@@ -407,6 +427,7 @@
                 h("button", { class: "small", onclick: () => { delete p.width; delete p.height; changed(true); } }, _t("plan.remove_it_size_chosen_in_the"))));
         }
         side.append(proj);
+        side.append(startVideoBox());
 
         const refs = h("section", { class: "box" }, h("h2", {}, _t("plan.references")),
             h("div", { class: "hint", style: "margin-bottom:8px" }, free
@@ -418,11 +439,217 @@
         renderRefRows();
     }
 
+    // « Video » of the plan: none, a start video (clip 1 continues or cuts from a segment of a video file), or an
+    // edited video (every clip edits its slice of the segment; free mode). One file for the project (chosen here, the
+    // same in every branch); the plan names it with a reference of its own, kept out of the reference lists.
+    const startVideoRef = () => ((S.plan.start_video || S.plan.edit_video || {}).ref) || null;
+    function startVideoBox() {
+        const p = S.plan;
+        const free = isFree();
+        const editing = !!p.edit_video && !p.start_video;
+        const sv = p.start_video || p.edit_video;
+        const kind = p.start_video ? "continue" : p.edit_video ? "edit" : "none";
+        const media = window.H3Editor && window.H3Editor.media;
+        const box = h("section", { class: "box start-video" }, h("h2", {}, _t("plan.video_of_the_plan")));
+        const redraw = () => box.replaceWith(startVideoBox());
+        const setKind = (next) => {
+            if (next === kind) return;
+            const old = p.start_video || p.edit_video;
+            let ref = old && old.ref;
+            if (!ref) { ref = "video"; let k = 2; while (ref in (p.refs || {})) ref = `video_${k++}`; }
+            delete p.start_video; delete p.edit_video;
+            p.refs = { ...(p.refs || {}) };
+            if (next === "none") {
+                delete p.refs[ref];
+                if (clips()[0] && clips()[0].continue) setContinue(clips()[0], false, 1);
+            } else if (next === "continue") {
+                p.refs[ref] = _t("plan.start_video_ref_desc");
+                p.start_video = { ref, start: old ? old.start ?? 0 : 0, end: old ? old.end : 4 };
+                if (clips()[0]) setContinue(clips()[0], true, 1);
+            } else {
+                p.refs[ref] = _t("plan.edit_video_ref_desc");
+                p.edit_video = { ref, start: old ? old.start ?? 0 : 0, end: old ? old.end : 10 };
+                if (clips()[0] && clips()[0].continue) setContinue(clips()[0], false, 1);
+            }
+            changed(true);
+        };
+        const kindSel = h("select", { class: "sv-kind", onchange: (e) => setKind(e.target.value) },
+            h("option", { value: "none", selected: kind === "none" || null }, _t("plan.video_none")),
+            h("option", { value: "continue", selected: kind === "continue" || null }, _t("plan.video_continue")),
+            h("option", { value: "edit", selected: kind === "edit" || null, disabled: (!free && kind !== "edit") || null }, _t("plan.video_edit")));
+        const parts = [h("div", { class: "tk-inline" }, kindSel),
+            h("div", { class: "hint" }, kind === "edit" ? _t("plan.edit_video_hint") : kind === "continue" ? _t("plan.start_video_hint")
+                : _t("plan.video_none_hint") + (free ? "" : " " + _t("plan.edit_video_needs_free")))];
+        if (!sv) { box.append(...parts); return box; }
+
+        // the file: one of the imported videos, or a new one imported from here
+        const current = media && media.startVideoFile ? media.startVideoFile() : null;
+        const choose = async (rel) => {
+            try { await media.setStartVideoFile(rel); } catch (err) { H3Dialog.alert(err.message); }
+            redraw();
+        };
+        if (media && media.videos) {
+            parts.push(h("div", { class: "tk-inline sv-file" },
+                h("select", { onchange: (e) => choose(e.target.value || null) },
+                    h("option", { value: "" }, _t("plan.start_video_choose")),
+                    media.videos().map((v) => h("option", { value: v.path, selected: v.path === current || null }, v.name))),
+                h("button", { onclick: async () => {
+                    try { const path = await media.importVideo(); if (path) await choose(path); } catch (err) { if (err.code !== "cancelled") H3Dialog.alert(err.message); redraw(); }
+                } }, _t("plan.start_video_import"))));
+            if (!editing) {
+                const warn = h("div", { class: "hint sv-takes" });
+                parts.push(warn);
+                if (media.clip1Takes) media.clip1Takes().then((count) => { if (count) warn.textContent = _t("plan.start_video_takes_warning", { count }); }).catch(() => {});
+            }
+        } else {
+            parts.push(h("div", { class: "hint" }, _t("plan.start_video_no_file_editor")));
+        }
+        const url = media && media.video ? media.video() : null;
+        const playable = url && media.playableVideo ? media.playableVideo(media.startVideoFile(), "sv-player") : null;   // a copy if the browser cannot play it
+        const player = playable ? playable.video : url ? h("video", { controls: true, preload: "metadata", src: url, class: "sv-player" }) : null;
+        if (player) parts.push(playable ? playable.wrap : player);
+
+        // the segment
+        const segment = () => (editing ? H3.editVideo(p) : H3.startVideo(p));
+        const info = h("div", { class: "hint sv-info" });
+        const num = (key, value) => h("input", { type: "number", step: (1 / FPS).toFixed(5), min: 0, value: value ?? "", style: "width:110px",
+            onchange: (e) => { const v = Math.max(0, Math.round((+e.target.value || 0) * FPS) / FPS); sv[key] = v; e.target.value = v; changed(false); showInfo(); } });
+        const startIn = num("start", sv.start ?? 0), endIn = num("end", sv.end);
+        const fromPlayer = (key, input) => h("button", { class: "small", disabled: !player || null, title: _t("plan.start_video_from_player_hint"),
+            onclick: () => { const v = Math.round(player.currentTime * FPS) / FPS; sv[key] = v; input.value = v; changed(false); showInfo(); } },
+            key === "start" ? _t("plan.start_video_set_start") : _t("plan.start_video_set_end"));
+        let stopAt = null;
+        const playSegment = h("button", { class: "small", disabled: !player || null, onclick: () => {
+            const n = segment();
+            if (!n || !player) return;
+            player.currentTime = n.start_frame / FPS; stopAt = n.end_frame / FPS; player.play();
+        } }, _t("plan.start_video_play"));
+        const sizeWarn = h("div", { class: "hint sv-size", hidden: true });
+        if (player) player.addEventListener("timeupdate", () => { if (stopAt !== null && player.currentTime >= stopAt) { player.pause(); stopAt = null; } });
+        if (player) player.addEventListener("loadedmetadata", () => { showInfo(); if (editing) checkSize(); });
+        function showInfo() {
+            const n = segment();
+            if (!n) { info.textContent = _t("plan.start_video_invalid"); return; }
+            const moved = !editing && Math.abs(n.start_frame / FPS - (sv.start ?? 0)) > 1e-6;
+            const dur = player && Number.isFinite(player.duration) && player.videoWidth ? player.duration : null;
+            info.textContent = _t(editing ? "plan.edit_video_used" : "plan.start_video_used",
+                { v0: secv(n.start_frame / FPS, 3), v1: secv(n.end_frame / FPS, 3), v2: secv(n.frames / FPS, 2), frames: n.frames })
+                + (moved ? " " + _t("plan.start_video_moved") : "")
+                + (dur !== null && n.end_frame / FPS > dur + 0.01 ? " " + _t("plan.start_video_after_end", { v0: secv(dur, 2) }) : "");
+            if (editing && H3.framesLegal(p)) {
+                const edited = H3.editClipCount(p), total = clips().length;
+                info.textContent += " " + (edited < total ? _t("plan.edit_video_clips_split", { v0: edited ? `1–${edited}` : "—", v1: `${edited + 1}–${total}` })
+                    : _t("plan.edit_video_clips_all", { count: total }));
+            }
+        }
+        // the branches should have the proportions of the edited video, or its picture is cropped
+        function checkSize() {
+            const vw = player.videoWidth, vh = player.videoHeight;
+            if (!vw || !vh || !media.branchSizes) return;
+            const off = media.branchSizes().filter((b) => b.width && b.height && Math.abs(b.width / b.height - vw / vh) / (vw / vh) > 0.03);
+            if (!off.length) { sizeWarn.hidden = true; return; }
+            sizeWarn.hidden = false;
+            sizeWarn.replaceChildren(h("span", {}, _t("plan.edit_video_size_warning", { v0: off.map((b) => `${b.name} (${b.width} × ${b.height})`).join(", "), v1: `${vw} × ${vh}` })),
+                " ", media.fitBranchSizes ? h("button", { class: "small", onclick: async () => {
+                    try { await media.fitBranchSizes(vw, vh, off.map((b) => b.id)); } catch (err) { H3Dialog.alert(err.message); }
+                    checkSize();
+                } }, _t("plan.edit_video_fit_size")) : null);
+        }
+        parts.push(h("div", { class: "tk-inline sv-range" }, h("span", {}, _t("plan.start_video_from")), startIn, fromPlayer("start", startIn),
+            h("span", {}, _t("plan.start_video_to")), endIn, fromPlayer("end", endIn), playSegment), info);
+
+        if (editing) {
+            parts.push(sizeWarn);
+            const sound = sv.sound || "original";
+            parts.push(h("label", { class: "tk-inline" }, h("input", { type: "radio", name: "evsound", checked: sound === "original",
+                onchange: () => { delete sv.sound; changed(true); } }), _t("plan.edit_video_sound_original")),
+            h("label", { class: "tk-inline" }, h("input", { type: "radio", name: "evsound", checked: sound === "h3",
+                onchange: () => { sv.sound = "h3"; changed(true); } }), _t("plan.edit_video_sound_h3")));
+            parts.push(h("div", { class: "tk-inline sv-instr" }, h("span", {}, _t("plan.common_instruction") + " : "),
+                h("i", { class: "hint", style: "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:520px" }, sv.instruction || _t("plan.common_instruction_empty")),
+                h("button", { class: "small", onclick: () => {
+                    const overlay = box.closest(".tk-modal");
+                    if (overlay) { overlay.remove(); S.settingsBox = null; }
+                    S.sel = INSTR - 1; select(INSTR);
+                } }, _t("plan.common_instruction_edit"))));
+            // cut the segment into clips: a new scene at each change of shot, long shots in equal parts that continue
+            const maxSel = h("select", { class: "ev-max" }, [141, 175, 209, 243, 277, 311, 345].map((f) =>
+                h("option", { value: f, selected: f === 243 || null }, secv(f / FPS, 1))));
+            const state = h("span", { class: "hint ev-state" });
+            const splitBtn = h("button", { class: "ev-split", onclick: async () => {
+                const n = H3.editVideo(p);
+                if (!n || !media || !media.sceneCuts || !current) { H3Dialog.alert(_t("plan.edit_video_choose_first")); return; }
+                const keptAfter = H3.framesLegal(p) ? clips().slice(H3.editClipCount(p)) : [];
+                const replaced = clips().length - keptAfter.length;
+                if (replaced && !(await H3Dialog.confirm(keptAfter.length ? _t("plan.edit_video_replace_clips_keep", { count: replaced, kept: keptAfter.length })
+                    : _t("plan.edit_video_replace_clips", { count: replaced })))) return;
+                splitBtn.disabled = true; state.textContent = _t("plan.edit_video_finding_shots");
+                let cuts;
+                try { cuts = await media.sceneCuts(current, n.start_frame, n.end_frame); }
+                catch (err) { splitBtn.disabled = false; state.textContent = ""; H3Dialog.alert(err.message); return; }
+                const made = H3.editCuts(n.frames, cuts.map((c) => c - n.start_frame), H3.contextOf(p), +maxSel.value);
+                if (!made.length) { splitBtn.disabled = false; state.textContent = ""; H3Dialog.alert(_t("plan.edit_video_too_short")); return; }
+                p.clips = made.map((c, i) => editClip(c, i + 1)).concat(keptAfter);
+                S.sel = 0;
+                changed(true);
+                toast(_t("plan.edit_video_split_done", { count: made.length, shots: cuts.length + 1 }));
+            } }, _t("plan.edit_video_split"));
+            parts.push(h("div", { class: "tk-inline ev-cut" }, splitBtn, h("span", {}, _t("plan.edit_video_max")), maxSel, state),
+                h("div", { class: "hint" }, _t("plan.edit_video_split_hint")));
+        } else {
+            // how it goes on
+            const first = clips()[0];
+            parts.push(h("div", { class: "tk-inline" },
+                h("label", {}, h("input", { type: "radio", name: "svlink", checked: !!(first && first.continue), onchange: () => { setContinue(first, true, 1); changed(true); } }), _t("plan.start_video_continue")),
+                h("label", {}, h("input", { type: "radio", name: "svlink", checked: !(first && first.continue), onchange: () => { setContinue(first, false, 1); changed(true); } }), _t("plan.start_video_cut"))));
+            const inVideo = sv.in_assembly !== false;
+            parts.push(h("label", { class: "tk-inline" }, h("input", { type: "checkbox", checked: inVideo,
+                onchange: (e) => { if (e.target.checked) delete sv.in_assembly; else sv.in_assembly = false; changed(true); } }), _t("plan.start_video_in_assembly")));
+            if (!free) {
+                parts.push(h("label", { class: "tk-inline" }, h("input", { type: "radio", name: "svsong", disabled: !inVideo || null, checked: (sv.song || "with_video") === "with_video",
+                    onchange: () => { delete sv.song; changed(true); } }), _t("plan.start_video_song_with")),
+                h("label", { class: "tk-inline" }, h("input", { type: "radio", name: "svsong", disabled: !inVideo || null, checked: sv.song === "after_video",
+                    onchange: () => { sv.song = "after_video"; changed(true); } }), _t("plan.start_video_song_after")));
+                if (!inVideo) parts.push(h("div", { class: "hint" }, _t("plan.start_video_song_not_in")));
+            }
+        }
+        box.append(...parts);
+        showInfo();
+        return box;
+    }
+    // a clip made by « cut on the shots »: the six sections, keeping the framing, motion and timing of <Video 1>;
+    // only the edit itself is left to write
+    function editClip(c, index) {
+        const style = "Same framing, camera motion, actions and timing as <Video 1>, frame by frame.";
+        const shot = "As <Video 1>, with the edit: {edit}; everything else stays as in <Video 1>.";
+        const opening = H3Sections.expectedSentence(c, index, true, false);
+        const parts = [
+            "<Video 1> is the source footage this clip edits.",
+            "[reference generation] An edit of <Video 1>: {edit}.",
+            "<Video 1> (throughout [Shot 1]): fully_preserved - framing, camera motion, the people's movements, their timing and their lip movements; only what the edit changes is different.",
+            H3Sections.composeDetailed(style, [shot], opening),
+            "The sound of <Video 1>, unchanged.",
+            "No music beyond what <Video 1> already contains.",
+        ];
+        return { name: `edit_${String(index).padStart(2, "0")}`, frames: c.frames, continue: c.continue, refs: [], prompt: H3.composeSections(parts) };
+    }
+    // the link of a clip to the one before it (and the opening sentence of its [Shot 1])
+    function setContinue(c, value, index) {
+        c.continue = value;
+        const parts = H3.parseSections(c.prompt);
+        if (!parts) return;
+        const det = H3Sections.parseDetailed(parts[3]);
+        if (H3Sections.customOpening(det)) return;
+        parts[3] = H3Sections.composeDetailed(det.style, det.shots, H3Sections.expectedSentence(c, index, isFree(), !!S.plan.start_video));
+        c.prompt = H3.composeSections(parts);
+    }
+
     function renderRefRows() {
         const box = $("refRows");
         if (!box) return;
         box.innerHTML = "";
         for (const [name, desc] of Object.entries(S.plan.refs)) {
+            if (name === startVideoRef()) continue;     // the start video has its own section
             box.append(h("div", { class: "refrow" },
                 h("input", { class: "rname", value: name, title: _t("plan.name_letters_digits_and"), onchange: (e) => renameRef(name, e.target.value.trim(), e.target) }),
                 h("button", { class: "small danger", title: _t("plan.delete"), onclick: () => deleteRef(name) }, "✕"),
@@ -501,19 +728,32 @@
             h("span", { class: "tk-split" },
                 h("button", { onclick: () => addClip(S.sel + 1), title: _t("plan.new_clip_after_the_selected_clip") }, "+ clip"),
                 h("button", { class: "tk-split-arrow", title: _t("plan.other_ways_to_add_a_clip"), onclick: (e) => { e.stopPropagation(); addMenu(e.currentTarget); } }, "▾")),
-            h("button", { onclick: duplicateClip, title: _t("plan.duplicate_the_selected_clip") }, _t("plan.duplicate")),
-            h("button", { onclick: () => moveClip(-1), disabled: S.sel === 0, title: _t("plan.move_up") }, "↑"),
-            h("button", { onclick: () => moveClip(1), disabled: S.sel >= clips().length - 1, title: _t("plan.move_down") }, "↓"),
-            h("button", { class: "danger", onclick: deleteClip, disabled: clips().length < 2, title: _t("plan.delete_the_selected_clip") }, "✕")));
+            h("button", { onclick: duplicateClip, disabled: S.sel < 0 || null, title: _t("plan.duplicate_the_selected_clip") }, _t("plan.duplicate")),
+            h("button", { onclick: () => moveClip(-1), disabled: S.sel <= 0, title: _t("plan.move_up") }, "↑"),
+            h("button", { onclick: () => moveClip(1), disabled: S.sel < 0 || S.sel >= clips().length - 1, title: _t("plan.move_down") }, "↓"),
+            h("button", { class: "danger", onclick: deleteClip, disabled: S.sel < 0 || clips().length < 2, title: _t("plan.delete_the_selected_clip") }, "✕")));
         const rows = H3.framesLegal(S.plan) ? H3.timeline(S.plan) : null;
+        const edited = rows ? H3.editClipCount(S.plan) : 0;
+        const ev = S.plan.edit_video;
+        if (ev) {               // the common instruction of the edited video, worked like a prompt
+            const users = clips().filter((c) => String(c.prompt || "").includes(H3.EDIT_MARK)).length;
+            list.append(h("div", { class: `clipitem instr${S.sel === INSTR ? " sel" : ""}`, onclick: () => select(INSTR), title: _t("plan.common_instruction_hint") },
+                h("span", { class: "num" }, "✎"),
+                h("span", { class: "nm" }, _t("plan.common_instruction")),
+                h("span", { class: "dot" }),
+                h("span", { class: "meta" }, ev.instruction ? _t("plan.common_instruction_used", { count: users }) : _t("plan.common_instruction_empty"))));
+        }
         clips().forEach((c, i) => {
             const st = clipStatus(i + 1);
             const r = rows ? rows[i] : null;
+            const isEdit = i < edited;
+            const own = isEdit && ev && ev.instruction && !String(c.prompt || "").includes(H3.EDIT_MARK);
             list.append(h("div", { class: `clipitem${i === S.sel ? " sel" : ""}`, onclick: () => select(i) },
                 h("span", { class: "num" }, i + 1),
-                h("span", { class: "nm", title: c.name }, (c.continue ? "↪ " : i ? "✂ " : "") + (c.name || "")),
+                h("span", { class: "nm", title: c.name + (isEdit ? "\n" + _t("plan.edits_the_video_hint") : "") }, (isEdit ? "🎞 " : "") + (c.continue ? "↪ " : i ? "✂ " : "") + (c.name || "")),
                 h("span", { class: `dot ${st.e ? "e" : st.w ? "w" : ""}` }),
-                h("span", { class: "meta" }, r ? `${sec(r.visible, 1)} → ${sec(r.end, 1)} · ${_t("plan.n_fr", { n: c.frames })}` : _t("plan.n_frames", { n: c.frames }))));
+                h("span", { class: "meta" }, (r ? `${sec(r.visible, 1)} → ${sec(r.end, 1)} · ${_t("plan.n_fr", { n: c.frames })}` : _t("plan.n_frames", { n: c.frames }))
+                    + (own ? " · " + _t("plan.own_text") : ""))));
         });
         list.scrollTop = scroll;
     }
@@ -531,6 +771,13 @@
     function addClip(at, empty = false) {
         const prev = empty ? null : clips()[at - 1];
         clips().splice(at, 0, newClip(at + 1, S.plan, prev));
+        // edited video: a clip added after the segment continues the video, it cannot reuse <Video 1>
+        const added = clips()[at];
+        if (S.plan.edit_video && H3.framesLegal(S.plan) && at + 1 > H3.editClipCount(S.plan) && /<Video \d+>/.test(added.prompt || "")) {
+            added.continue = at > 0;
+            added.refs = [...(added.refs || [])];
+            added.prompt = H3.skeleton(added, at + 1, isFree());
+        }
         S.sel = at;
         changed(true);
     }
@@ -591,6 +838,7 @@
     function renderEditor() {
         const ed = $("editor");
         ed.innerHTML = "";
+        if (onInstr()) { renderInstruction(ed); return; }
         const c = curClip();
         if (!c) { ed.append(h("div", { class: "empty" }, _t("plan.no_clip"))); return; }
         const n = S.sel + 1;
@@ -604,7 +852,7 @@
             h("div", {}, h("label", {}, _t("plan.name")), h("input", { value: c.name ?? "", oninput: (e) => { c.name = e.target.value; changed(false); } })),
             h("div", {}, h("label", {}, _t("plan.raw_length_frames")), h("select", { onchange: (e) => { c.frames = +e.target.value; changed(true); } }, framesOptions(c.frames, n))),
             h("div", {}, h("label", {}, _t("plan.link")), h("label", { class: "toggle", style: "color:var(--text)" },
-                h("input", { type: "checkbox", checked: !!c.continue, disabled: n === 1 && !c.continue, onchange: (e) => toggleContinue(c, e.target.checked) }),
+                h("input", { type: "checkbox", checked: !!c.continue, disabled: n === 1 && !c.continue && !S.plan.start_video, onchange: (e) => toggleContinue(c, e.target.checked) }),
                 _t("plan.continues_the_previous_clip"))),
             h("div", {}, h("label", {}, _t("plan.seed_empty_auto")), h("input", { type: "number", min: 0, value: c.seed ?? "", placeholder: "auto",
                 onchange: (e) => { setKey(c, "seed", numOrUndef(e.target.value)); changed(true); } }))));
@@ -694,7 +942,9 @@
             return card;
         }
         const r = H3.timeline(S.plan)[S.sel];
-        const raw = r.raw_start / FPS, vis = r.visible / FPS, end = r.end / FPS;
+        const off = H3.songOffset(S.plan);     // a start video can move the song: its time = timeline - offset
+        const raw = Math.max(0, (r.raw_start - off) / FPS), vis = Math.max(0, (r.visible - off) / FPS), end = (r.end - off) / FPS;
+        const shared = r.context > 0;
         const total = (S.plan.song && S.plan.song.duration_seconds) || Math.max(end, 1);
         card.dataset.raw = raw; card.dataset.end = end;
         const url = songUrl();
@@ -702,16 +952,16 @@
         const btn = (kind, label, from) => h("button", { class: "small", "data-kind": kind, "data-label": label, disabled: !url || null, onclick: () => playSong(kind, from, end) }, label);
         card.append(h("div", { class: "song-bar-row" },
             btn("all", _t("plan.whole_passage"), raw),
-            S.sel > 0 ? btn("new", _t("plan.new_part"), vis) : null,
-            h("span", { class: "song-range" }, S.sel > 0 ? _t("plan.new_part_from", { v0: secv(raw, 2), v1: secv(end, 2), v2: secv(vis, 2) }) : `0,00 s → ${secv(end, 2)}`),
+            shared ? btn("new", _t("plan.new_part"), vis) : null,
+            h("span", { class: "song-range" }, shared ? _t("plan.new_part_from", { v0: secv(raw, 2), v1: secv(end, 2), v2: secv(vis, 2) }) : `${secv(raw, 2)} → ${secv(end, 2)}`),
             h("span", { class: "grow" }),
             h("span", { class: "song-clock" })));
         card.append(h("div", { class: "song-all", title: _t("plan.the_whole_song_the_clip_s") },
             h("div", { style: `left:${pct(raw / total)};width:${pct((end - raw) / total)}` })));
         const span = end - raw;
         card.append(h("div", { class: "song-clip" },
-            S.sel > 0 ? h("div", { class: "song-ctx", style: `width:${pct((vis - raw) / span)}`, title: _t("plan.overlap_context_taken_over_or_lead") }, h("span", {}, r.continue ? _t("plan.context") : _t("plan.lead_in"))) : null,
-            h("div", { class: "song-new", style: `left:${pct(S.sel > 0 ? (vis - raw) / span : 0)}` }, h("span", {}, _t("plan.new_part_2"))),
+            shared ? h("div", { class: "song-ctx", style: `width:${pct((vis - raw) / span)}`, title: _t("plan.overlap_context_taken_over_or_lead") }, h("span", {}, r.continue ? _t("plan.context") : _t("plan.lead_in"))) : null,
+            h("div", { class: "song-new", style: `left:${pct(shared ? (vis - raw) / span : 0)}` }, h("span", {}, _t("plan.new_part_2"))),
             h("div", { class: "song-head", style: "display:none" })));
         if (!url) {
             const media = window.H3Editor && window.H3Editor.media;
@@ -734,7 +984,7 @@
             const det = H3Sections.parseDetailed(parts[3]);
             if (H3Sections.customOpening(det)) toast(_t("plan.shot_1_starts_with_an_opening"));
             else {
-                parts[3] = H3Sections.composeDetailed(det.style, det.shots, H3Sections.expectedSentence(c, S.sel + 1, isFree()));
+                parts[3] = H3Sections.composeDetailed(det.style, det.shots, H3Sections.expectedSentence(c, S.sel + 1, isFree(), !!S.plan.start_video));
                 c.prompt = H3.composeSections(parts);
             }
         }
@@ -799,6 +1049,77 @@
     }
 
     // ---------------------------------------------------------------- prompt editor
+    // ---------------------------------------------------------------- the common instruction of an edited video
+    function renderInstruction(ed) {
+        const ev = S.plan.edit_video;
+        ed.append(h("div", { class: "ed-head" }, h("span", { class: "t" }, _t("plan.common_instruction")),
+            h("span", { class: "hint" }, _t("plan.common_instruction_replaces"))));
+        const info = h("div", { class: "card instr-info" });
+        const ta = h("textarea", { class: "instr-text", value: ev.instruction ?? "", spellcheck: "true", style: "min-height:110px;font-family:inherit",
+            placeholder: _t("plan.common_instruction_placeholder"),
+            oninput: (e) => { if (e.target.value.trim()) ev.instruction = e.target.value; else delete ev.instruction; changed(false); drawInfo(); autosize(e.target); } });
+        H3Sections.attachAc(ta, () => instructionItems());
+        const card = h("div", { class: "card" }, h("h2", {}, _t("plan.common_instruction")), ta,
+            h("div", { class: "hint" }, _t("plan.common_instruction_tip")));
+        ed.append(card, info);
+        function drawInfo() {
+            const rows = H3.framesLegal(S.plan) ? H3.timeline(S.plan) : [];
+            const edited = rows.length ? H3.editClipCount(S.plan) : 0;
+            const using = [], own = [];
+            clips().forEach((c, i) => { if (String(c.prompt || "").includes(H3.EDIT_MARK)) using.push(i + 1); else if (i < edited) own.push(i + 1); });
+            const named = ev.instruction ? [...new Set(H3.placeholders(ev.instruction).map((p) => p.name))] : [];
+            const media = window.H3Editor && window.H3Editor.media;
+            const chip = (r) => h("span", { class: "sx-chip sx-chipR instr-chip" },
+                media && media.image(r) ? h("img", { src: media.image(r), alt: "", class: "instr-thumb" }) : null, r);
+            const firstUser = using[0];
+            let preview = null;
+            if (firstUser && ev.instruction) {
+                const full = H3.expandedClip(S.plan, clips()[firstUser - 1]).prompt || "";
+                const line = full.split("\n").find((l) => l.includes(ev.instruction.split("\n")[0])) || "";
+                preview = h("div", {}, h("div", { class: "lab" }, _t("plan.common_instruction_preview", { n: firstUser })),
+                    h("div", { class: "mono instr-preview" }, line.replace(/\{picture:([A-Za-z0-9][A-Za-z0-9_-]*)\}/g, (m, r) => `<${r}>`)));
+            }
+            info.replaceChildren(
+                h("div", { class: "lab" }, _t("plan.common_instruction_users")),
+                h("div", {}, using.length ? _t("plan.clips_list", { v0: using.join(", ") }) : _t("plan.common_instruction_nobody"),
+                    own.length ? h("span", { class: "hint" }, " · " + _t("plan.common_instruction_own", { v0: own.join(", ") })) : null),
+                named.length ? h("div", { class: "lab" }, _t("plan.common_instruction_refs_added")) : null,
+                named.length ? h("div", {}, ...named.map(chip)) : null,
+                preview,
+                using.length < edited ? h("button", { class: "small", style: "margin-top:8px", onclick: () => {
+                    for (let i = 0; i < edited; i++) {
+                        const c = clips()[i];
+                        if (!String(c.prompt || "").includes(H3.EDIT_MARK) && /An edit of <Video 1>: TODO, the edit in one sentence\./.test(c.prompt || ""))
+                            c.prompt = c.prompt.replace("An edit of <Video 1>: TODO, the edit in one sentence.", "An edit of <Video 1>: {edit}.");
+                    }
+                    changed(true);
+                } }, _t("plan.common_instruction_fill_todo")) : null);
+        }
+        drawInfo();
+        autosizeAll();
+    }
+    function instructionItems() {
+        const media = window.H3Editor && window.H3Editor.media;
+        return Object.keys(S.plan.refs || {}).filter((r) => r !== startVideoRef()).map((r) => ({ kind: "R", label: `{picture:${r}}`,
+            hint: (S.plan.refs || {})[r] || "", ins: `{picture:${r}}`, img: media ? media.image(r) : null }));
+    }
+    function instructionPalette(side) {
+        const media = window.H3Editor && window.H3Editor.media;
+        const box = h("section", { class: "box sx-pal" }, h("h2", {}, _t("plan.references")),
+            h("div", { class: "hint" }, media ? _t("sections.previews_branch_drag_a_reference_into", { v0: media.label() }) : _t("sections.drag_a_reference_into_a_text")));
+        for (const r of Object.keys(S.plan.refs || {}).filter((x) => x !== startVideoRef())) {
+            const img = media ? media.image(r) : null;
+            const text = `{picture:${r}}`;
+            box.append(h("div", { class: "sx-refrow" },
+                img ? h("img", { src: img, alt: r, class: "sx-thumb" }) : h("div", { class: "sx-thumb sx-thumb-empty" }, "—"),
+                h("div", { class: "sx-refmain" },
+                    h("span", { class: "sx-chip sx-chipR", draggable: "true", title: (S.plan.refs || {})[r] || "",
+                        ondragstart: (e) => { e.dataTransfer.setData("text/plain", text); e.dataTransfer.effectAllowed = "copy"; } }, r),
+                    h("span", { class: "sx-desc" }, (S.plan.refs || {})[r] || ""))));
+        }
+        side.append(box);
+    }
+
     function renderPrompt(c, n) {
         const parts = H3.parseSections(c.prompt);
         const tab = parts ? S.tab : "raw";
@@ -966,7 +1287,8 @@
     function renderPreview() {
         const box = $("preview");
         if (!box) return;
-        const c = curClip();
+        const c = curClip() ? H3.expandedClip(S.plan, curClip()) : null;     // {edit} replaced, as H3 gets it
+        if (!c) return;
         const ph = H3.placeholders(c.prompt);
         const refs = c.refs || [];
         const hasImage = new Set(ph.filter((p) => p.kind === "picture").map((p) => p.name));
@@ -1056,7 +1378,12 @@
 
         setPlan(newPlan("free"), "nouveau_plan_libre.json", null);
     }
-    window.H3Editor = { state: S, setPlan, render: renderAll, toast };
+    // the « Start video » section of the plan settings (from the Takes tab)
+    function openStartVideo() {
+        openSettings();
+        setTimeout(() => { const el = document.querySelector(".start-video"); if (el) el.scrollIntoView({ block: "start" }); }, 50);
+    }
+    window.H3Editor = { state: S, setPlan, render: renderAll, toast, openStartVideo };
     // Plan / Prises tabs
     for (const b of document.querySelectorAll("#viewTabs button")) {
         b.onclick = () => {

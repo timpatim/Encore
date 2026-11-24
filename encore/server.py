@@ -22,13 +22,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from . import mdpage, engine as engine_mod, comfy_setup, downloads
-from . import checkpoints, folders, projects, takeplan, takes
+from . import checkpoints, folders, previews, projects, resources, takeplan, takes
 from .projects import StudioError
 
 STUDIO_ROOT = Path(__file__).resolve().parent.parent
 WEB_DIR = STUDIO_ROOT / "web"
 CONFIG_PATH = STUDIO_ROOT / "config.json"
 MAX_UPLOAD = 2 * 1024 ** 3
+MAX_RESOURCE = 256 * 1024 ** 3      # imported files are written as they arrive, never held in memory
 _LOCK = threading.RLock()
 
 
@@ -590,11 +591,42 @@ def make_handler(studio: Studio):
                     return self.send_json(studio.engine.cancel(name, (self.json_body() or {}).get("ids") or []))
                 if rest == ["remove-job"] and method == "POST":
                     return self.send_json(studio.engine.remove(name, (self.json_body() or {}).get("id")))
+                if rest == ["start-video"] and method == "PUT":
+                    return self.send_json(projects.set_start_video_file(root, name, (self.json_body() or {}).get("file")))
+                if rest == ["resources", "preview"]:
+                    rel = query.get("path", "")
+                    if method == "GET":
+                        return self.send_json(previews.status(root, name, rel))
+                    if method == "POST":
+                        return self.send_json(previews.start(root, name, rel, studio.config))
+                    if method == "DELETE":
+                        return self.send_json(previews.cancel(root, name, rel))
+                if rest == ["resources", "scenes"] and method == "GET":    # changes of shot in a segment
+                    return self.send_json(previews.scene_cuts(root, name, query.get("path", ""), int(query.get("start") or 0),
+                                                              int(query.get("end") or 0), studio.config))
+                if rest == ["resources", "thumb"]:      # the start video's segment, small (Takes tab)
+                    rel, first, last = query.get("path", ""), int(query.get("start") or 0), int(query.get("end") or 0)
+                    if method == "GET":
+                        return self.send_json(previews.thumb_status(root, name, rel, first, last))
+                    if method == "POST":
+                        return self.send_json(previews.thumb_start(root, name, rel, first, last, studio.config))
+                if rest == ["resources", "usage"] and method == "GET":
+                    return self.send_json(resources.usage(root, name, query.get("path", "")))
+                if rest == ["resources"] and method == "DELETE":
+                    out = resources.delete(root, name, query.get("path", ""), confirm=query.get("confirm") == "1",
+                                           comfy_dir=studio.config.get("comfy_dir"))
+                    if out.get("sha"):        # sent again if it is ever imported back
+                        studio.engine.uploaded = {k: v for k, v in studio.engine.uploaded.items() if v != out["sha"]}
+                    return self.send_json(out)
                 if rest == ["resources"]:
                     if method == "GET":
                         return self.send_json(projects.list_resources(root, name))
                     if method == "POST":
-                        return self.send_json(projects.add_resource(root, name, query.get("kind", ""), query.get("filename", ""), self.body()))
+                        length = int(self.headers.get("Content-Length") or 0)
+                        if length > MAX_RESOURCE:
+                            raise StudioError(_t("server.file_too_big"))
+                        return self.send_json(projects.add_resource_stream(root, name, query.get("kind", ""), query.get("filename", ""),
+                                                                           self.rfile, length))
             return self.send_json({"error": _t("server.not_found")}, 404)
 
     return Handler

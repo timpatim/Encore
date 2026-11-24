@@ -75,7 +75,7 @@ not real H3 renders.)*
 - A working **[ComfyUI](https://github.com/comfyanonymous/ComfyUI)** with MiniMax H3 support, on
   this PC or reachable on the network, and **git** (for the node packs).
 - The node packs below; Encore's installation screen can install them for you:
-  [ComfyUI-H3-ClipPlan](https://github.com/timpatim/ComfyUI-H3-ClipPlan) **3.6 or newer**,
+  [ComfyUI-H3-ClipPlan](https://github.com/timpatim/ComfyUI-H3-ClipPlan) **3.11 or newer**,
   ComfyUI-H3-Motion-Context-MultiRef, ComfyUI-VideoHelperSuite; optional: ComfyUI-KJNodes
   (animated preview), the LBH latent upscaler nodes (upscale).
 - The H3 models (diffusion model, text encoder, VAE, turbo LoRA): the installation screen downloads
@@ -230,6 +230,7 @@ node and model lists again.
   refs\images\      imported pictures
   refs\voices\      imported voices
   refs\songs\       imported songs
+  refs\videos\      imported videos (start or edited video)
   takes\clip_NNN\   takes: latent (.pt), signature (.json), preview (.mp4)
   selection.json    chosen take of each clip
   jobs.json         waiting generations (only there while there are some)
@@ -242,7 +243,16 @@ node and model lists again.
 - **☰ Projects**: list, creation (name = folder name; free mode or music video).
 - **Import a plan…**: copies a plan file into the project. The project name in the plan becomes
   the folder's.
-- **Resources…**: imports pictures, voices and songs (copied into `refs\`). An identical file is
+- **Resources…**: imports pictures, voices, songs and videos (copied into `refs\`). A big file shows a
+  progress window (cancel leaves nothing behind); it is written as it arrives. When ComfyUI's folder is known
+  (welcome screen), files are later copied straight into its `input` folder, with no size limit;
+  otherwise they go through ComfyUI's upload route, which refuses files over 100 MB unless ComfyUI is
+  started with `--max-upload-size` (the queue shows « sending … to ComfyUI »). A video the browser
+  cannot play (AVI, ProRes, HEVC…) gets a light H.264 copy for the players only, made by ffmpeg (the
+  one of ComfyUI's Python, or on the PATH) with its progress; ComfyUI always gets the original. 🗑 deletes a file: refused while
+  a branch or the start video uses it (the message says where), after a warning listing the
+  checkpoints and takes that still need it, at once otherwise; its copy in ComfyUI goes too when
+  ComfyUI's folder is known. An identical file is
   not copied twice. Nothing is deleted (checkpoints need them). Accepted pictures: PNG, JPEG, WebP,
   BMP; the content is checked, and JPEG files named `.jfif`, `.jfi`, `.jpe`, `.pjpeg` or `.pjp`
   are saved as `.jpg` (same bytes).
@@ -359,6 +369,66 @@ At least one branch always stays unfolded (the arrow of the last one is greyed o
 never holds the selection: folding the branch of the selection moves it to an unfolded branch (the one
 of the latest valid take of clip 1). The folded bands all have the same width, ▶▶ lined up on the
 right.
+
+## Starting from an existing video
+
+A plan can start from a segment of a video you already have: clip 1 continues it (same shot: its
+last 1.6 s are taken over, picture and, in free mode, sound) or cuts after it. Everything is set in
+one place, **⚙ Plan settings > Video**:
+
+1. Choose « Continue a video (start video) ».
+2. Choose the video in the list (the project's imported videos) or **Import…** one from here. One
+   video for the project: every branch uses it.
+3. Choose the segment in the player: « Segment from … to … », or « ⇤ here » / « here ⇥ » at the
+   player's position; « ▶ play the segment » plays it. The segment is snapped onto the frame grid:
+   its end is kept, its start moves forward by less than 0.7 s (the line below says what is used).
+4. « clip 1 continues the video » or « cut after the video », and whether **the segment opens the
+   final video** (otherwise it is only a springboard: the video starts with clip 1).
+5. Music video, segment in the final video: **the song starts with the video** (default; the video
+   loses its own sound and clip 1 comes later in the song) or **the video keeps its own sound and
+   the song starts with clip 1**.
+
+The segment shows on the Plan tab's timeline before clip 1 (hatched when it is not in the final
+video). When it opens the final video, the Takes tab has a **Start video** column before clip 1:
+the segment, in each branch, linked to the takes of clip 1 that continue it (hover: plays it; click:
+its settings). It is not a take: it is neither generated nor chosen. The video is read at 24 fps,
+resized to cover the branch's picture size and cropped in the middle. Another video or another
+segment invalidates the takes of clip 1 and those that continue them (Encore asks first when you
+change the video; putting the old value back makes them valid again). Whether the segment is in the
+final video changes nothing in free mode (in a music video it moves the song under the clips).
+
+## Editing an existing video
+
+A free-mode plan can edit a segment of a video you have: change its style, replace a character by a
+reference picture, and so on. The timeline of the plan is the segment; each clip edits its own slice
+of it, given to H3 as `<Video 1>` with its sound (the voices of the clip come after it, Encore numbers
+them). In **⚙ Plan settings > Video**:
+
+1. Choose « Edit a video », then the video (or **Import…** one) and the segment, as for a start video.
+   The branches should have the proportions of the video, otherwise its picture is cropped: Encore
+   says so and **gives them the video's proportions** on request (about the same number of pixels).
+2. The sound of the final video: **the original sound of the segment** (default) or **the sound H3
+   made** (to change a voice or a line).
+3. **✂ Cut on the shots**: Encore finds the changes of shot of the segment (ffmpeg) and makes the
+   clips: a new scene at each change of shot, a shot longer than a clip cut in equal parts that
+   continue each other (« clips of at most 10.1 s » by default). The cuts are on the grid where clips
+   can end; move them afterwards like any clip. It asks before replacing the clips of the plan.
+4. Each clip gets a prompt that keeps the framing, motion and timing of `<Video 1>`, with `{edit}`
+   where the edit goes. Write the edit once in **✎ Common instruction**, the first entry of the clip
+   list (also reached from the settings): drag a reference from the right or type `@` to name a picture
+   (« the man is replaced by {picture:homme} »); it is added to every clip that uses `{edit}`. A clip
+   can complete it (`{edit}; the man also wears a red scarf`) or replace it (erase `{edit}`). The
+   entry says which clips use it and shows how H3 gets it.
+
+**Going on after the segment.** The clips that end before the end of the segment edit the video (🎞 in
+the list and on the timeline, which shows the end of the segment); the next ones continue it like any
+clip: add them with « + clip » after the last one (no `<Video 1>` in their prompt). « Cut on the shots »
+replaces the edited clips only and keeps the ones after. With the original sound, the final video keeps
+it over the edited part only.
+
+A clip that edits a video lasts 2 to 15 s. In the Takes tab, the empty card of a clip shows, behind
+the « + », the part of the video it edits (hover: plays it). Another video or another segment makes
+every take stale. A start video and an edited video cannot be combined in one plan.
 
 ## Generation queue (indicator on the right of the top bar)
 

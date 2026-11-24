@@ -18,7 +18,7 @@ from pathlib import Path
 from . import projects, takes
 from .projects import StudioError
 
-KEPT_KEYS = ("settings", "branches")
+KEPT_KEYS = ("settings", "branches", "start_video_file")
 
 
 def _dir(path: Path) -> Path:

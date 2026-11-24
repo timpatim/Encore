@@ -10,8 +10,8 @@ import json
 import re
 
 FPS = 24
-PLAN_VERSION = 3
-ACCEPTED_VERSIONS = (1, 2, 3)   # older plans still load as music_video plans
+PLAN_VERSION = 6
+ACCEPTED_VERSIONS = (1, 2, 3, 4, 5, 6)   # older plans still load as music_video plans
 MODES = ("music_video", "free")
 MAX_CLIPS = 64          # limit of the final assembler node
 MAX_REFS = 9            # MiniMax H3 accepts at most 9 reference images
@@ -32,8 +32,17 @@ _PROMPT_SECTIONS = (
 )
 _PLAN_KEYS = {
     "version", "project", "mode", "refs_dir", "refs", "width", "height", "context_frames",
-    "crossfade_frames", "audio_feather_ticks", "seed", "ref_image_size", "song", "clips", "notes",
+    "crossfade_frames", "audio_feather_ticks", "seed", "ref_image_size", "song", "clips", "notes", "start_video",
+    "edit_video",
 }
+_START_VIDEO_KEYS = {"ref", "start", "end", "in_assembly", "song"}
+START_SONG_CHOICES = ("with_video", "after_video")   # music_video: the song starts with the video, or after it
+_EDIT_VIDEO_KEYS = {"ref", "start", "end", "sound", "instruction"}
+EDIT_MARK = "{edit}"     # replaced by edit_video.instruction, the edit common to the clips
+EDIT_SOUND_CHOICES = ("original", "h3")   # the final video keeps the sound of the segment, or the one H3 made
+EDIT_MIN_FRAMES = 48     # a reference video lasts 2 to 15 s
+EDIT_MAX_FRAMES = 360
+_VIDEO_TAG_RE = re.compile(r"<Video (\d+)>")
 _CLIP_KEYS = {"name", "frames", "continue", "refs", "prompt", "seed", "lyrics", "dialogue", "notes"}
 _DIALOGUE_KEYS = {"speaker", "text", "language"}
 PLACEHOLDER_RE = re.compile(r"\{(picture|voice):([A-Za-z0-9][A-Za-z0-9_-]*)\}")
@@ -182,6 +191,20 @@ def validate(plan, song_duration: float | None = None):
         if not isinstance(description, str):
             errors.append(f"reference '{name}': the description must be a string")
 
+    start_video = plan.get("start_video")
+    start_frames = None
+    if start_video is not None:
+        start_frames = _check_start_video(start_video, refs_map, free, context, errors, warnings)
+    edit_video = plan.get("edit_video")
+    edit_frames = None
+    if edit_video is not None:
+        if start_video is not None:
+            errors.append("'start_video' and 'edit_video' cannot be used together: a plan continues a video or edits one")
+        if not free:
+            errors.append("'edit_video' needs free mode: the edited clips keep the sound of the video (or H3's), not a song")
+        edit_frames = _check_edit_video(edit_video, refs_map, errors, warnings)
+    instruction = edit_instruction(plan) if edit_video is not None else None
+
     song = plan.get("song", {})
     if not isinstance(song, dict):
         errors.append("'song' must be an object")
@@ -238,13 +261,18 @@ def validate(plan, song_duration: float | None = None):
         cont = clip.get("continue", False)
         if not isinstance(cont, bool):
             errors.append(f"{label}: 'continue' must be true or false")
-        elif cont and index == 1:
-            errors.append("clip 1: 'continue' must be false, there is no previous clip")
+        elif cont and index == 1 and start_video is None:
+            errors.append("clip 1: 'continue' must be false, there is no previous clip (or set 'start_video')")
 
         refs = clip.get("refs", [])
         if not isinstance(refs, list) or not all(isinstance(r, str) for r in refs):
             errors.append(f"{label}: 'refs' must be an array of reference names")
             refs = []
+        raw_prompt = clip.get("prompt")
+        if isinstance(raw_prompt, str) and EDIT_MARK in raw_prompt and instruction is None:
+            errors.append(f"{label}: the prompt uses {EDIT_MARK} but the plan has no common edit instruction "
+                          "('instruction' of 'edit_video')")
+        expanded_prompt, refs = expand_edit(raw_prompt, refs, instruction)
         if len(set(refs)) != len(refs):
             errors.append(f"{label}: the same reference is listed twice")
         limit = MAX_REF_FILES if free else MAX_REFS
@@ -258,7 +286,7 @@ def validate(plan, song_duration: float | None = None):
         if not refs:
             warnings.append(f"{label}: no reference; the clip is generated from text only")
 
-        prompt = clip.get("prompt")
+        prompt = expanded_prompt
         if not isinstance(prompt, str) or not prompt.strip():
             errors.append(f"{label}: 'prompt' must be a non-empty string")
             prompt = ""
@@ -296,6 +324,11 @@ def validate(plan, song_duration: float | None = None):
                 if "{voice:" in line and ("{picture:" in line or "<Picture" in line):
                     errors.append(f"{label}: put each {{voice:NAME}} on its own line, without any picture on that line")
                     break
+            videos = sorted({int(n) for n in _VIDEO_TAG_RE.findall(prompt)})
+            if videos and edit_video is None:
+                errors.append(f"{label}: the prompt uses <Video N> but the plan edits no video (set 'edit_video')")
+            elif any(n != 1 for n in videos):
+                errors.append(f"{label}: the edited video is <Video 1> (the only reference video of a clip)")
             if "<Audio " in prompt:
                 if free:
                     errors.append(f"{label}: do not write <Audio N>; write {{voice:NAME}} on its own line and the node numbers it")
@@ -344,21 +377,181 @@ def validate(plan, song_duration: float | None = None):
         if "seed" in clip and (not _is_int(clip["seed"]) or clip["seed"] < 0):
             errors.append(f"{label}: 'seed' must be a non-negative integer")
 
+    if frames_ok and not errors and edit_frames:
+        normal = normalize(plan)
+        rows = timeline(normal)
+        edited = edit_clip_count(normal)
+        if not edited:
+            errors.append(f"no clip ends before the end of the edited segment ({edit_frames / FPS:.3f} s): "
+                          "clip 1 must end within it")
+        for clip, row in zip(normal["clips"], rows):
+            label = f"clip {row['index']}"
+            if row["index"] <= edited:
+                if not EDIT_MIN_FRAMES <= row["frames"] <= EDIT_MAX_FRAMES:
+                    errors.append(f"{label}: a clip that edits a video lasts 2 to 15 s ({EDIT_MIN_FRAMES} to {EDIT_MAX_FRAMES} "
+                                  f"frames), got {row['frames']}: H3 takes reference videos of that length")
+            elif _VIDEO_TAG_RE.search(clip["prompt"]):
+                errors.append(f"{label}: it ends after the edited segment, so it continues the video instead of editing it; "
+                              "its prompt cannot use <Video 1>")
+        if edited and edited < len(rows):
+            row = rows[edited]
+            if edit_frames - row["visible"] >= 17:
+                warnings.append(f"clip {row['index']} ends {(row['end'] - edit_frames) / FPS:.2f} s after the end of the segment: "
+                                f"it continues the video instead of editing it (the segment from {row['visible'] / FPS:.2f} s "
+                                "is not edited)")
+        elif edited and edit_frames - rows[-1]["end"] >= FPS:
+            warnings.append(f"the clips cover {rows[-1]['end'] / FPS:.2f} s of the {edit_frames / FPS:.2f} s segment; "
+                            "the rest is not edited")
     if frames_ok and not errors:
-        rows = timeline(normalize(plan))
+        normal = normalize(plan)
+        rows = timeline(normal)
+        offset = song_offset(normal) / FPS
         if song_duration is not None:
             for row in rows:
-                if row["end_seconds"] > song_duration + 1.0 / FPS:
+                if row["end_seconds"] - offset > song_duration + 1.0 / FPS:
                     errors.append(
                         f"clip {row['index']}: ends at {row['end_seconds']:.3f} s, after the end of the song "
                         f"({song_duration:.3f} s); shorten it or remove it"
                     )
-            if rows[-1]["end_seconds"] < song_duration - 1.0:
+            if rows[-1]["end_seconds"] - offset < song_duration - 1.0:
                 warnings.append(
-                    f"the plan ends at {rows[-1]['end_seconds']:.2f} s but the song lasts {song_duration:.2f} s; "
+                    f"the plan ends at {rows[-1]['end_seconds'] - offset:.2f} s of the song but the song lasts {song_duration:.2f} s; "
                     "the end of the song has no picture"
                 )
     return errors, warnings
+
+
+def _check_start_video(spec, refs_map, free, context, errors, warnings):
+    """Check 'start_video'; return the number of frames of the segment, or None."""
+    if not isinstance(spec, dict):
+        errors.append("'start_video' must be an object: {\"ref\": NAME, \"start\": seconds, \"end\": seconds}")
+        return None
+    for key in spec:
+        if key not in _START_VIDEO_KEYS and not key.startswith("_"):
+            warnings.append(f"start_video: unknown key '{key}' is ignored")
+    ref = spec.get("ref")
+    if not isinstance(ref, str) or not _NAME_RE.match(ref):
+        errors.append("start_video: 'ref' must be a reference name")
+    elif ref not in refs_map:
+        errors.append(f"start_video: reference '{ref}' is not declared in the top-level 'refs' object")
+    start, end = spec.get("start", 0), spec.get("end")
+    number = lambda v: isinstance(v, (int, float)) and not isinstance(v, bool)  # noqa: E731
+    if not number(start) or start < 0:
+        errors.append("start_video: 'start' must be a number of seconds, 0 or more")
+        return None
+    if not number(end) or end <= start:
+        errors.append("start_video: 'end' must be a number of seconds after 'start'")
+        return None
+    frames = start_video_frames(spec)
+    if frames <= context:
+        errors.append(
+            f"start_video: the segment lasts {frames} usable frames; it must be longer than context_frames "
+            f"({context}), that is at least {(context + 17) / FPS:.2f} s"
+        )
+        return None
+    if not isinstance(spec.get("in_assembly", True), bool):
+        errors.append("start_video: 'in_assembly' must be true or false")
+    song = spec.get("song", "with_video")
+    if song not in START_SONG_CHOICES:
+        errors.append(f"start_video: 'song' must be one of {', '.join(START_SONG_CHOICES)} (got {song!r})")
+    elif free and "song" in spec:
+        warnings.append("start_video: 'song' is only used in music_video mode")
+    return frames
+
+
+def _check_edit_video(spec, refs_map, errors, warnings):
+    """Check 'edit_video'; return the number of frames of the segment, or None."""
+    if not isinstance(spec, dict):
+        errors.append("'edit_video' must be an object: {\"ref\": NAME, \"start\": seconds, \"end\": seconds}")
+        return None
+    for key in spec:
+        if key not in _EDIT_VIDEO_KEYS and not key.startswith("_"):
+            warnings.append(f"edit_video: unknown key '{key}' is ignored")
+    ref = spec.get("ref")
+    if not isinstance(ref, str) or not _NAME_RE.match(ref):
+        errors.append("edit_video: 'ref' must be a reference name")
+    elif ref not in refs_map:
+        errors.append(f"edit_video: reference '{ref}' is not declared in the top-level 'refs' object")
+    start, end = spec.get("start", 0), spec.get("end")
+    number = lambda v: isinstance(v, (int, float)) and not isinstance(v, bool)  # noqa: E731
+    if not number(start) or start < 0:
+        errors.append("edit_video: 'start' must be a number of seconds, 0 or more")
+        return None
+    if not number(end) or end <= start:
+        errors.append("edit_video: 'end' must be a number of seconds after 'start'")
+        return None
+    instruction = spec.get("instruction")
+    if instruction is not None:
+        if not isinstance(instruction, str):
+            errors.append("edit_video: 'instruction' must be a text")
+        else:
+            if EDIT_MARK in instruction:
+                errors.append(f"edit_video: the instruction cannot contain {EDIT_MARK}")
+            for match in _ANY_BRACE_RE.finditer(instruction):
+                if not PLACEHOLDER_RE.fullmatch(match.group(0)):
+                    errors.append(f"edit_video: '{match.group(0)}' in the instruction is not a valid placeholder")
+            for _kind, name in PLACEHOLDER_RE.findall(instruction):
+                if refs_map and name not in refs_map:
+                    errors.append(f"edit_video: the instruction names '{name}', which is not declared in 'refs'")
+    if spec.get("sound", "original") not in EDIT_SOUND_CHOICES:
+        errors.append(f"edit_video: 'sound' must be one of {', '.join(EDIT_SOUND_CHOICES)} (got {spec.get('sound')!r})")
+    frames = edit_video_frames(spec)
+    if frames < EDIT_MIN_FRAMES:
+        errors.append(f"edit_video: the segment lasts {frames / FPS:.2f} s; at least 2 s are needed")
+        return None
+    return frames
+
+
+def edit_video_frames(spec) -> int:
+    """Frames of the edited segment: from 'start' to 'end' on the 24 fps grid of the file."""
+    return int(round(float(spec["end"]) * FPS)) - int(round(float(spec.get("start", 0)) * FPS))
+
+
+def edit_slice(plan, index: int):
+    """(first frame in the file, frames) of the source that clip ``index`` edits, or None."""
+    spec = plan.get("edit_video")
+    if not spec:
+        return None
+    row = timeline(plan)[index - 1]
+    if row["end"] > spec["frames"]:
+        return None              # after the segment: this clip continues the video
+    return spec["start_frame"] + row["raw_start"], row["frames"]
+
+
+def edit_instruction(plan):
+    """The common edit instruction of an edited video, or None."""
+    spec = plan.get("edit_video")
+    if isinstance(spec, dict) and isinstance(spec.get("instruction"), str):
+        return spec["instruction"]
+    return None
+
+
+def expand_edit(prompt, refs, instruction):
+    """A clip's prompt with {edit} replaced by the common instruction, and its references with those the
+    instruction names added at the end (so a picture named once in the instruction is in every clip)."""
+    if instruction is None or not isinstance(prompt, str) or EDIT_MARK not in prompt:
+        return prompt, list(refs)
+    refs = list(refs)
+    for _kind, name in PLACEHOLDER_RE.findall(instruction):
+        if name not in refs:
+            refs.append(name)
+    return prompt.replace(EDIT_MARK, instruction), refs
+
+
+def edit_clip_count(plan) -> int:
+    """How many clips edit the video (normalized plan): those ending before the end of the segment. The
+    clips after them continue the video instead (no <Video 1>)."""
+    spec = plan.get("edit_video")
+    if not spec:
+        return 0
+    return sum(1 for row in timeline(plan) if row["end"] <= spec["frames"])
+
+
+def start_video_frames(spec) -> int:
+    """Frames of the start video segment that are used: the longest 17k + 5 run that ends at 'end'."""
+    end_frame = int(round(float(spec["end"]) * FPS))
+    start_frame = int(round(float(spec.get("start", 0)) * FPS))
+    return largest_h3_run(end_frame - start_frame)
 
 
 def _squash(text: str) -> str:
@@ -379,9 +572,35 @@ def normalize(plan):
         "audio_feather_ticks": int(plan.get("audio_feather_ticks", DEFAULT_FEATHER)),
         "ref_image_size": plan.get("ref_image_size", "match"),
         "song": dict(plan.get("song", {})),
+        "start_video": None,
+        "edit_video": None,
         "clips": [],
     }
+    edit = plan.get("edit_video")
+    if isinstance(edit, dict):
+        first = int(round(float(edit.get("start", 0)) * FPS))
+        out["edit_video"] = {
+            "ref": edit["ref"],
+            "start_frame": first,
+            "end_frame": first + edit_video_frames(edit),
+            "frames": edit_video_frames(edit),
+            "sound": edit.get("sound", "original"),
+            "instruction": edit.get("instruction") if isinstance(edit.get("instruction"), str) else None,
+        }
+    spec = plan.get("start_video")
+    if isinstance(spec, dict):
+        frames = start_video_frames(spec)
+        end_frame = int(round(float(spec["end"]) * FPS))
+        out["start_video"] = {
+            "ref": spec["ref"],
+            "frames": frames,
+            "start_frame": end_frame - frames,   # 'start' moved forward onto the frame grid
+            "end_frame": end_frame,
+            "in_assembly": bool(spec.get("in_assembly", True)),
+            "song": spec.get("song", "with_video"),
+        }
     base_seed = plan.get("seed")
+    instruction = (out["edit_video"] or {}).get("instruction")
     for index, clip in enumerate(plan["clips"], start=1):
         seed = clip.get("seed")
         if seed is None:
@@ -391,8 +610,7 @@ def normalize(plan):
             "name": clip.get("name", f"clip_{index:03d}"),
             "frames": int(clip["frames"]),
             "continue": bool(clip.get("continue", False)),
-            "refs": list(clip.get("refs", [])),
-            "prompt": clip["prompt"],
+            **dict(zip(("prompt", "refs"), expand_edit(clip["prompt"], clip.get("refs", []), instruction))),
             "seed": int(seed),
             "lyrics": clip.get("lyrics", ""),
             "dialogue": [dict(line) for line in clip.get("dialogue", []) if isinstance(line, dict)],
@@ -415,7 +633,7 @@ def timeline(plan):
     end          frame after the last one
     """
     rows = []
-    previous = None
+    previous = start_row(plan)   # the start video segment acts as the clip before clip 1
     for clip in plan["clips"]:
         frames = clip["frames"]
         if previous is None:
@@ -441,6 +659,57 @@ def timeline(plan):
     return rows
 
 
+def start_row(plan):
+    """Timing of the start video segment (frames 0 to its length on the timeline), or None."""
+    spec = plan.get("start_video")
+    if not spec:
+        return None
+    return {"index": 0, "frames": spec["frames"], "raw_start": 0, "visible": 0, "end": spec["frames"], "context": 0}
+
+
+def final_start(plan) -> int:
+    """First timeline frame of the assembled video.
+
+    With a start video kept out of the assembly, the video starts where clip 1 starts: its first
+    frames are the regenerated end of the segment (or the lead-in of a new scene).
+    """
+    spec = plan.get("start_video")
+    if not spec or spec["in_assembly"]:
+        return 0
+    return timeline(plan)[0]["raw_start"]
+
+
+def song_offset(plan) -> int:
+    """Timeline frame at which the song starts (music_video mode).
+
+    No start video, or one kept in the video with 'with_video': the song starts with the timeline.
+    'after_video': the segment keeps its own sound, the song starts when clip 1 shows.
+    Start video kept out of the video: the song starts with the assembled video.
+    """
+    spec = plan.get("start_video")
+    if not spec or plan.get("mode") == "free":
+        return 0
+    if not spec["in_assembly"]:
+        return final_start(plan)
+    return 0 if spec["song"] == "with_video" else spec["frames"]
+
+
+def segment_chunks(frames: int, context: int, limit: int = SOFT_MAX_FRAMES):
+    """Split a start video segment of ``frames`` (17k + 5) into pieces the assembler can join like clips:
+    [(first frame, length), ...], each piece overlapping the previous one by ``context`` frames."""
+    pieces = []
+    start = 0
+    while True:
+        length = min(frames - start, limit)
+        length = largest_h3_run(length)
+        if length <= context:
+            raise ValueError(f"cannot split {frames} frames into pieces overlapping by {context}")
+        pieces.append((start, length))
+        if start + length >= frames:
+            return pieces
+        start = start + length - context
+
+
 def total_frames(plan) -> int:
     return timeline(plan)[-1]["end"]
 
@@ -456,6 +725,7 @@ def clip_fingerprint(plan, index: int) -> str:
     }
     if plan.get("mode", "music_video") != "music_video":
         payload["mode"] = plan["mode"]   # keeps music_video fingerprints identical to plan v2
+    payload.update(_start_video_payload(plan, index))
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:16]
 
 
@@ -466,6 +736,19 @@ def format_timeline(plan) -> str:
         f"context {plan['context_frames']} frames - crossfade {plan['crossfade_frames']} frames",
         "clip  name                      frames  raw start  visible     end     shown  type      refs",
     ]
+    spec = plan.get("start_video")
+    if spec:
+        lines.append(
+            f"   0  start video '{spec['ref']}' {spec['start_frame'] / FPS:.3f}-{spec['end_frame'] / FPS:.3f} s of the file: "
+            f"{spec['frames']} frames, {'in' if spec['in_assembly'] else 'not in'} the final video"
+            + (f", song from timeline {song_offset(plan) / FPS:.3f} s" if plan.get("mode") != "free" else "")
+        )
+    edit = plan.get("edit_video")
+    if edit:
+        lines.append(
+            f"   edits the video '{edit['ref']}' {edit['start_frame'] / FPS:.3f}-{edit['end_frame'] / FPS:.3f} s of the file "
+            f"({edit['frames']} frames), {'original' if edit['sound'] == 'original' else 'generated'} sound in the final video"
+        )
     for clip, row in zip(plan["clips"], timeline(plan)):
         lines.append(
             f"{row['index']:>4}  {row['name'][:24]:<24}  {row['frames']:>6}  {row['raw_start_seconds']:>9.3f}  "
@@ -473,7 +756,8 @@ def format_timeline(plan) -> str:
             f"{(row['end'] - row['visible']) / FPS:>6.2f}s  {'continue' if row['continue'] else 'new     '}  "
             f"{', '.join(clip['refs']) or '-'}"
         )
-    lines.append(f"final video: {total_frames(plan)} frames = {total_frames(plan) / FPS:.3f} s")
+    shown = total_frames(plan) - final_start(plan)
+    lines.append(f"final video: {shown} frames = {shown / FPS:.3f} s")
     return "\n".join(lines)
 
 
@@ -488,8 +772,10 @@ def reference_names(plan):
 
 
 def reference_kinds(plan, name):
-    """What the prompts of a normalized plan need for a reference: ['image'], ['voice'] or both."""
+    """What a normalized plan needs for a reference: 'video' (start video), 'image', 'voice'."""
     kinds = []
+    if (plan.get("start_video") or {}).get("ref") == name or (plan.get("edit_video") or {}).get("ref") == name:
+        kinds.append("video")
     for clip in plan["clips"]:
         if name not in clip["refs"]:
             continue
@@ -511,13 +797,14 @@ def check_size(width, height):
 
 
 # --------------------------------------------------------------------------- prompt placeholders
-def resolve_prompt(prompt: str, refs, has_image, has_voice, use_voices: bool = True):
+def resolve_prompt(prompt: str, refs, has_image, has_voice, use_voices: bool = True, audio_offset: int = 0):
     """Turn {picture:NAME} / {voice:NAME} placeholders into H3's <Picture N> / <Audio N>.
 
     refs       the clip's reference names, in order
     has_image  names for which the workflow provides an image
     has_voice  names for which the workflow provides a voice
     use_voices False in music_video mode (the song is injected, voices cannot be used)
+    audio_offset  <Audio N> labels taken before the voices (the sound of the edited video is <Audio 1>)
 
     Images are numbered in the order of ``refs`` among the names that have an image.
     Voices are numbered in the order of ``refs`` among the names whose voice is used.
@@ -557,7 +844,7 @@ def resolve_prompt(prompt: str, refs, has_image, has_voice, use_voices: bool = T
         kind, name = match.group(1), match.group(2)
         if kind == "picture":
             return f"<Picture {images.index(name) + 1}>"
-        return f"<Audio {voices.index(name) + 1}>"
+        return f"<Audio {audio_offset + voices.index(name) + 1}>"
 
     return PLACEHOLDER_RE.sub(number, text), images, voices, notes
 
@@ -572,7 +859,25 @@ def take_fingerprint(plan, index: int) -> str:
         "prompt": clip["prompt"], "raw_start": row["raw_start"], "context": row["context"],
         "mode": plan.get("mode", "music_video"),
     }
+    payload.update(_start_video_payload(plan, index))
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+
+
+def _start_video_payload(plan, index: int):
+    """What a start video adds to a fingerprint (nothing without one, so older fingerprints stay the same):
+    the segment for clip 1 when it continues it, and where the song lies under the clips."""
+    edit = plan.get("edit_video")
+    if edit:      # with raw_start: the slice of the file (the clips after the segment have none)
+        return {"edit_video": [edit["ref"], edit["start_frame"]]} if edit_slice(plan, index) else {}
+    spec = plan.get("start_video")
+    if not spec:
+        return {}
+    extra = {}
+    if index == 1 and plan["clips"][0]["continue"]:
+        extra["start_video"] = [spec["ref"], spec["start_frame"], spec["end_frame"]]
+    if plan.get("mode", "music_video") == "music_video":
+        extra["song_offset"] = song_offset(plan)
+    return extra
 
 
 def resolve_takes(plan, takes, selection=None):
@@ -600,7 +905,7 @@ def resolve_takes(plan, takes, selection=None):
     current_refs, current_size = {}, None
     for record in sorted(everything, key=lambda r: r.get("saved_at", 0)):
         for name, kinds in (record.get("refs") or {}).items():
-            for kind in ("image", "voice"):
+            for kind in ("image", "voice", "video"):
                 current_refs[(name, kind)] = (kinds or {}).get(kind)
         current_size = (record.get("width"), record.get("height"))
 
@@ -622,7 +927,7 @@ def resolve_takes(plan, takes, selection=None):
                 kind = "size"
             else:
                 for name, kinds in sorted((record.get("refs") or {}).items()):
-                    for what in ("image", "voice"):
+                    for what in ("image", "voice", "video"):
                         if (kinds or {}).get(what) != current_refs.get((name, what)):
                             reason = f"the {what} of '{name}' changed since"
                             kind = "refs"

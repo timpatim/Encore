@@ -218,6 +218,8 @@ def _take_keys(record, index, free, branch, legacy_ref_size):
         keys[f"{branch}|image:{name}"] = (kinds or {}).get("image")
         if free:
             keys[f"{branch}|voice:{name}"] = (kinds or {}).get("voice")
+        if (kinds or {}).get("video"):          # the start video (clip 1 continuing it)
+            keys[f"{branch}|video:{name}"] = kinds["video"]
     if not free and "song" in studio:
         keys[f"{branch}|song"] = studio.get("song")
     return keys
@@ -227,7 +229,8 @@ def _reason(key, final):
     key = key.split("|", 1)[-1]
     kind, _, name = key.partition(":")
     what = {"size": _t("takes.the_picture_size"), "refsize": _t("takes.the_reference_size"), "plan": _t("takes.the_clip_s_plan"), "image": _t("takes.the_picture_of_name", name=name),
-            "voice": _t("takes.the_voice_of", name=name), "song": _t("takes.the_song")}[kind]
+            "voice": _t("takes.the_voice_of", name=name), "song": _t("takes.the_song"),
+            "video": _t("takes.the_video_of", name=name)}[kind]
     return _t("takes.redone_since_with_another_value", what=what) if final else _t("takes.has_changed", what=what)
 
 
@@ -248,6 +251,7 @@ def studio_resolve(plan, takes_by_clip, selection, current):
         for name, kinds in ((bset or {}).get("refs") or {}).items():
             now[f"{bid}|image:{name}"] = (kinds or {}).get("image")
             now[f"{bid}|voice:{name}"] = (kinds or {}).get("voice")
+            now[f"{bid}|video:{name}"] = (kinds or {}).get("video")
         now[f"{bid}|song"] = (bset or {}).get("song")
         now[f"{bid}|size"] = list((bset or {}).get("size") or [None, None])
         now[f"{bid}|refsize"] = (bset or {}).get("ref_image_size")
@@ -325,18 +329,33 @@ def branch_state(project: Path, branch):
     def sha(rel):
         path = project / rel if rel else None
         return file_sha(path) if path and path.is_file() else None
-    return {"refs": {name: {"image": sha((files or {}).get("image")), "voice": sha((files or {}).get("voice"))}
+    return {"refs": {name: {"image": sha((files or {}).get("image")), "voice": sha((files or {}).get("voice")),
+                            "video": sha((files or {}).get("video"))}
                      for name, files in (branch.get("refs") or {}).items()},
             "song": sha(branch.get("song")), "size": [branch.get("width"), branch.get("height")],
             "ref_image_size": branch.get("ref_image_size")}
 
 
+def plan_video(plan):
+    """The plan's video (start_video or edit_video, never both), or None. It is the project's video file."""
+    for key in ("start_video", "edit_video"):
+        if isinstance(plan.get(key), dict):
+            return plan[key]
+    return None
+
+
 def current_state(project: Path, plan, settings, branches):
     """What studio_resolve compares the takes with, read from the project files."""
     try:
-        legacy = json.loads((project / "project.json").read_text(encoding="utf-8")).get("legacy_ref_image_size") or "match"
+        meta = json.loads((project / "project.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        legacy = "match"
+        meta = {}
+    legacy = meta.get("legacy_ref_image_size") or "match"
+    spec = plan_video(plan)
+    if spec:            # the project's video (start or edited) counts as the file of the plan's start_video reference, in every branch
+        video = meta.get("start_video_file") or None
+        branches = [dict(b, refs={**(b.get("refs") or {}), spec["ref"]: {"image": None, "voice": None, "video": video}})
+                    for b in branches]
     return {"branches": {b["id"]: branch_state(project, b) for b in branches}, "legacy_ref_image_size": legacy,
             "default_branch": branches[0]["id"] if branches else None,
             "fingerprints": {c["index"]: plan_core.take_fingerprint(plan, c["index"]) for c in plan["clips"]}}

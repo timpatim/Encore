@@ -68,6 +68,23 @@ header .spacer { flex: 1; }
 .tl .block .n { font-weight: 700; margin-right: 4px; }
 .tl .block .d { opacity: .75; }
 .tl .block.sel { outline: 2px solid #fff; outline-offset: 1px; z-index: 3; }
+.tl .block.startvid { background: #4a5260; }
+.tl .block.startvid.out { background: repeating-linear-gradient(135deg, #4a5260 0 6px, #343a44 6px 12px); opacity: .8; }
+.start-video .sv-player { width: 100%; max-height: 260px; margin: 6px 0; background: #000; border-radius: 4px; }
+.start-video .sv-range { flex-wrap: wrap; gap: 6px; margin: 4px 0; }
+.start-video .sv-info { margin: 4px 0 8px; }
+.start-video label.tk-inline { display: flex; gap: 6px; align-items: center; margin: 3px 0; }
+.studio-res-video { width: 100%; max-height: 140px; background: #000; border-radius: 4px; }
+.tk-refvid { object-fit: cover; background: #000; }
+.tk-card.tk-startvid { cursor: pointer; border-style: dashed; }
+.tk-card.tk-startvid .tk-thumb video { width: 100%; height: 100%; object-fit: cover; }
+.tk-link.start { stroke: #8a90a0; stroke-dasharray: 5 4; }
+.studio-progress { min-width: 420px; }
+.studio-preview-note { margin-top: 4px; }
+.studio-preview-note .studio-progress-track { margin-top: 4px; }
+.studio-res-del { flex: none; padding: 0 5px; }
+.studio-progress-track { height: 10px; background: #2a2f38; border-radius: 5px; overflow: hidden; margin-top: 8px; }
+.studio-progress-bar { height: 100%; width: 0; background: #4f8cff; transition: width .15s; }
 .tl .block.has-err::after, .tl .block.has-warn::after { content: ""; position: absolute; right: 3px; top: 3px; width: 7px; height: 7px; border-radius: 50%; background: var(--err); }
 .tl .block.has-warn:not(.has-err)::after { background: var(--warn); }
 .tl .lead { position: absolute; top: 56px; height: 9px; border-radius: 2px; }
@@ -202,6 +219,19 @@ section.box { margin-bottom: 18px; }
 .tk-pane-tab { writing-mode: vertical-rl; font-size: 12px; color: #cfd5e0; white-space: nowrap; }
 .tk-pane-head { display: flex; align-items: center; gap: 6px; padding: 7px 8px; border-bottom: 1px solid var(--line); font-size: 12.5px; }
 .tk-pane-list { flex: 1; min-height: 0; overflow-y: auto; padding: 6px; display: flex; flex-direction: column; gap: 6px; }
+.tk-pane-list > * { flex: none; }
+.tk-src-thumb { position: absolute; left: 0; top: 0; width: 100%; height: 110px; object-fit: cover; opacity: .35; pointer-events: none; border-radius: 7px 7px 0 0; }
+.tk-card.has-src:hover .tk-src-thumb { opacity: .8; }
+.tk-card.has-src .tk-plus, .tk-card.has-src .hint { position: relative; }
+.clipitem.instr .num { color: var(--accent, #6aa0ff); }
+.clipitem.instr { border-bottom: 1px dashed var(--line, #333); }
+.instr-info .lab { font-size: 11px; color: var(--muted); margin: 10px 0 4px; }
+.instr-info .lab:first-child { margin-top: 0; }
+.instr-chip { display: inline-flex; align-items: center; gap: 4px; margin-right: 6px; }
+.instr-thumb { width: 18px; height: 18px; object-fit: cover; border-radius: 3px; }
+.instr-preview { font-family: ui-monospace, monospace; font-size: 12px; color: var(--muted); white-space: pre-wrap; }
+.tl .songend.segend { border-left-color: #e0a040; }
+.tk-sv-wait { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 12px; color: var(--muted); pointer-events: none; }   /* never squeezed to fit: the list scrolls instead */
 .tk-pane-group { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--muted); margin-top: 4px; }
 .tk-branch-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; flex: none; }
 .tk-pane-item { border: 1px solid #6a8f6a; border-radius: 7px; background: var(--panel2); overflow: hidden; cursor: pointer; }
@@ -470,7 +500,9 @@ body.studio .studio-bar { display: flex; }
 .studio-list .studio-res { flex-direction: row; align-items: center; }
 .studio-list .studio-res audio { flex: 1; }
 .studio-grid .tk-refimg { width: 100%; height: 110px; }
-.studio-res-name { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.studio-res-name { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
+.studio-res-foot { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.studio-list .studio-res-foot { flex: 0 1 45%; }
 .toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: var(--panel2); border: 1px solid var(--line); padding: 8px 14px; border-radius: 6px; z-index: 60; opacity: 0; transition: opacity .2s; pointer-events: none; }
 .toast.on { opacity: 1; }
 

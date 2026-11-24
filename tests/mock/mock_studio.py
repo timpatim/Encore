@@ -3,7 +3,7 @@
     H3_PLUGIN=/path/to/ComfyUI-H3-ClipPlan PYTHONPATH=tests/mock/shim MOCK_PORT=8771 python tests/mock/mock_studio.py
 Test hooks: POST /test/run (finish the job running), /test/start, /test/foreign, /test/interrupts.
 """
-import random, json, os, sys, shutil, threading, uuid, glob, time, base64, hashlib, struct
+import random, json, os, sys, shutil, subprocess, threading, uuid, glob, time, base64, hashlib, struct
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from email.parser import BytesParser
 from email.policy import default as email_default
@@ -23,7 +23,18 @@ na.load = lambda path: (torch.full((1, 32000 * 6), float(int(_h.md5(path.encode(
 class AVAE:
     audio_sample_rate = 32000; audio_sample_rate_output = 44100
     def decode(self, z): return torch.ones(1, int(z.shape[-1] * 44100 / 40), 2)
+    def encode(self, w):   # [1, samples, 2] -> [1, 32, 2, steps at 40 Hz]
+        CAP.setdefault("audio_encoded", []).append(int(w.shape[1]))
+        return torch.zeros(1, 32, 2, int(round(w.shape[1] / 32000 * 40)))
+class VVAE:
+    def decode(self, latent):    # small pictures: only the plugin's fallback (no preview) uses it
+        n = int(latent.shape[2]); return torch.zeros(1, 1 + 8 * max(0, n - 1), 16, 16, 3)
+    def encode(self, images):   # [frames, h, w, 3] -> [1, 24, steps, h/16, w/16]
+        n = int(images.shape[0])
+        CAP.setdefault("video_encoded", []).append(tuple(images.shape))
+        return torch.zeros(1, 24, 2 + 5 * ((n - 5) // 17), int(images.shape[1]) // 16, int(images.shape[2]) // 16)
 HISTORY, PROMPTS, QUEUE = {}, {}, []
+STREAM, LAST_ASSEMBLY = {}, {}
 RUNNING = []
 WS = []
 WSLOCK = threading.Lock()
@@ -44,7 +55,7 @@ def ws_send(msg):
 
 def combo(values): return [values, {}]
 HIDDEN = set()
-STATE = {"down": False}
+STATE = {"down": False, "max_upload": 0}
 
 
 def object_info():
@@ -105,16 +116,26 @@ def execute(pid, prompt):
             node = nodes[link[0]]; i = node["inputs"]
             prev = refs_of(i.get("references"))
             if node["class_type"] == "H3PlanReference": return pkg.H3PlanReference().add(i["name"], i["image"], prev)[0]
+            if node["class_type"] == "H3PlanVideo": return pkg.H3PlanVideo().add(i["name"], i["video_file"], prev)[0]
             return pkg.H3PlanVoice().add(i["name"], i["voice_file"], prev)[0]
         clipn = next(n for n in nodes.values() if n["class_type"] == "H3PlanClip")["inputs"]
         refs = refs_of(clipn.get("references"))
         song = {"waveform": torch.zeros((1, 2, 8000 * 60)), "sample_rate": 8000} if clipn.get("master_audio") else None   # music_video: a silent song
-        o = pkg.H3PlanClip().prepare("CLIP", "VAE", AVAE(), clipn["plan_file"], clipn["clip_index"], clipn["seed_mode"], references=refs, master_audio=song,
+        o = pkg.H3PlanClip().prepare("CLIP", VVAE(), AVAE(), clipn["plan_file"], clipn["clip_index"], clipn["seed_mode"], references=refs, master_audio=song,
                                      width=clipn["width"], height=clipn["height"], take_token=clipn["take_token"], parent_token=clipn["parent_token"], seed_override=clipn["seed_override"])
+        CAP["clip_info"] = o[6]          # the clip node's report, for the tests
         sl = next(n for n in nodes.values() if n["class_type"] == "H3PlanSaveLatent")["inputs"]
         pkg.H3PlanSaveLatent().save(o[1], o[5], sl["delete_stale"], AVAE())
         dst = os.path.join(outp, o[4] + "_00001.mp4"); os.makedirs(os.path.dirname(dst), exist_ok=True)
-        shutil.copy(screenshot_video(nodes) or VIDEOS[clipn["clip_index"] % len(VIDEOS)], dst)
+        shot = screenshot_video(nodes)
+        if shot: shutil.copy(shot, dst)
+        else:      # a preview as long as the take (an edit clip that continues it reads its last frames)
+            metas = glob.glob(os.path.join(outp, "h3_clip_plan", "*", "latents", f"clip_{int(clipn['clip_index']):03d}", o[5]["take_id"] + ".json"))
+            frames = json.load(open(metas[0])).get("frames", 0) if metas else 0
+            made = frames and subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=320x180:rate=24", "-f", "lavfi", "-i",
+                                              f"sine=frequency={200 + 100 * int(clipn['clip_index'])}:sample_rate=48000", "-frames:v", str(frames),
+                                              "-shortest", "-c:a", "aac", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", dst]).returncode == 0
+            if not made: shutil.copy(VIDEOS[clipn["clip_index"] % len(VIDEOS)], dst)
         HISTORY[pid] = {"status": {"status_str": "success", "completed": True, "messages": []}, "outputs": {}}
         try:
             with open("/tmp/mock_last_prompt.json", "w") as fh: json.dump(prompt, fh, indent=1)
@@ -127,13 +148,25 @@ def execute_assemble(pid, prompt):
     a = prompt["10"]["inputs"]
     class Stream:
         def stream_to_vhs(self, **kw):
+            STREAM.clear(); STREAM.update(input_count=kw["input_count"], audio_samples=int(kw["master_audio"]["waveform"].shape[-1]),
+                                          audio_rate=int(kw["master_audio"]["sample_rate"]),
+                                          audio_level=float(abs(kw["master_audio"]["waveform"]).mean()))
             dst = os.path.join(outp, kw["filename_prefix"] + "_00001.mp4"); os.makedirs(os.path.dirname(dst), exist_ok=True); shutil.copy(screenshot_video({}) or VIDEOS[0], dst)
             return {"ui": {"gifs": [{"filename": os.path.basename(dst), "subfolder": os.path.dirname(kw["filename_prefix"]), "type": "output"}]}, "result": ([dst],)}
     nodes_mod.NODE_CLASS_MAPPINGS["MiniMaxH3StreamLiveMusicVideoToVHS"] = Stream
     pkg._decode_audio = lambda vae, z: (torch.zeros((1, 2, int(z.shape[-1] * 44100 / 40))), 44100)
     try:
         song = {"waveform": torch.zeros((1, 2, 8000 * 60)), "sample_rate": 8000} if a.get("master_audio") else None
-        r = pkg.H3PlanAssemble().assemble("VAE", a["plan_file"], 0, 19, master_audio=song, audio_vae=AVAE())
+        def refs_of(link):
+            if not link: return None
+            node = prompt[link[0]]; i = node["inputs"]
+            prev = refs_of(i.get("references"))
+            if node["class_type"] == "H3PlanVideo": return pkg.H3PlanVideo().add(i["name"], i["video_file"], prev)[0]
+            if node["class_type"] == "H3PlanReference": return pkg.H3PlanReference().add(i["name"], i["image"], prev)[0]
+            return pkg.H3PlanVoice().add(i["name"], i["voice_file"], prev)[0]
+        r = pkg.H3PlanAssemble().assemble(VVAE(), a["plan_file"], 0, 19, master_audio=song, audio_vae=AVAE(),
+                                          references=refs_of(a.get("references")), width=a.get("width"), height=a.get("height"))
+        LAST_ASSEMBLY.clear(); LAST_ASSEMBLY.update(STREAM)
         HISTORY[pid] = {"status": {"status_str": "success", "messages": []}, "outputs": {"10": {**r["ui"], "text": [r["result"][1]]}}}
     except Exception as e:
         HISTORY[pid] = {"status": {"status_str": "error", "messages": [["execution_error", {"node_type": "H3PlanAssemble", "exception_message": str(e)}]]}, "outputs": {}}
@@ -188,6 +221,8 @@ class H(BaseHTTPRequestHandler):
     def do_POST(self):
         u = urlparse(self.path); n = int(self.headers.get("Content-Length", 0)); raw = self.rfile.read(n)
         if u.path == "/upload/image":
+            if STATE["max_upload"] and n > STATE["max_upload"]:     # like ComfyUI's --max-upload-size (aiohttp)
+                return self.send(f"Maximum request body size {STATE['max_upload']} exceeded, actual body size {n}".encode(), 413, ctype="text/plain")
             msg = BytesParser(policy=email_default).parsebytes(b"Content-Type: " + self.headers["Content-Type"].encode() + b"\r\n\r\n" + raw)
             fields, filedata, fname = {}, None, None
             for part in msg.iter_parts():
@@ -260,14 +295,34 @@ class H(BaseHTTPRequestHandler):
             pid = "foreign-" + uuid.uuid4().hex[:6]; PROMPTS[pid] = ({}, {}); NUM[pid] = next(COUNTER)
             (RUNNING if body.get("run") else QUEUE).append(pid); FOREIGN.add(pid)
             return self.send({"prompt_id": pid})
+        if u.path == "/test/max_upload":   # test hook: ComfyUI refuses uploads over this many bytes (0: no limit)
+            STATE["max_upload"] = int(body.get("bytes") or 0); return self.send(STATE)
+        if u.path == "/test/comfy_root":   # test hook: the fake ComfyUI folder (input/ inside), and what went through the upload route
+            os.makedirs(os.path.join(os.path.dirname(inp), "custom_nodes"), exist_ok=True); os.makedirs(os.path.join(os.path.dirname(inp), "models"), exist_ok=True)
+            return self.send({"root": os.path.dirname(inp), "uploads": [list(u_) for u_ in UPLOADS]})
         if u.path == "/test/interrupts": return self.send({"interrupts": INTERRUPTS})
+        if u.path == "/test/cap":   # test hook: what the plugin gave the fake nodes (video encodes, contexts, last assembly)
+            return self.send({"video_encoded": CAP.get("video_encoded", []), "song_ctx": list(CAP.get("song_ctx", ())),
+                              "ctx": [CAP["ctx"][0], CAP["ctx"][1], list(CAP["ctx"][2])] if "ctx" in CAP else None,
+                              "assembly": LAST_ASSEMBLY,
+                              "clip_info": CAP.get("clip_info"),
+                              "r2v": {"prompt": CAP.get("prompt"), "videos": [list(v.shape) for v in (CAP.get("ref_videos") or {}).values()],
+                                      "video_audios": len(CAP.get("ref_video_audios") or {})}})
+        if u.path == "/test/cap_reset":
+            CAP.pop("video_encoded", None); CAP.pop("audio_encoded", None); CAP.pop("song_ctx", None); CAP.pop("ctx", None)
+            return self.send({})
         if u.path == "/test/run":   # test hook: execute the oldest queued prompt
             if RUNNING: ws_send({"type": "executing", "data": {"prompt_id": RUNNING[0], "node": "26"}}); time.sleep(0.3)
+            if not RUNNING and not QUEUE: return self.send({"empty": True})
             pid = RUNNING.pop(0) if RUNNING else QUEUE.pop(0); prompt = PROMPTS[pid][0]
             if pid in FOREIGN:
                 HISTORY[pid] = {"status": {"status_str": "success", "completed": True, "messages": []}, "outputs": {}}
                 return self.send({"prompt_id": pid, "status": "success", "messages": []})
-            (execute_assemble if "10" in prompt else execute)(pid, prompt)
+            RUNNING.insert(0, pid)          # still in the queue (running) until its history is written
+            try:
+                (execute_assemble if "10" in prompt else execute)(pid, prompt)
+            finally:
+                if pid in RUNNING: RUNNING.remove(pid)
             return self.send({"prompt_id": pid, "status": HISTORY[pid]["status"]["status_str"], "messages": HISTORY[pid]["status"]["messages"]})
         self.send({"error": "nf"}, 404)
 PORT = int(os.environ.get("MOCK_PORT", "8771"))

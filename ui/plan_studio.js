@@ -196,6 +196,43 @@
         image: (name) => { const r = ((mediaBranch() || {}).refs || {})[name]; return r && r.image ? fileUrl(r.image) : null; },
         voice: (name) => { const r = ((mediaBranch() || {}).refs || {})[name]; return r && r.voice ? fileUrl(r.voice) : null; },
         song: () => { const b = mediaBranch(); return b && b.song ? fileUrl(b.song) : null; },
+        // the start video: one file for the project, chosen in the plan settings
+        video: () => (P.startVideoFile ? fileUrl(P.startVideoFile) : null),
+        videos: () => (P.resources && P.resources.videos) || [],
+        startVideoFile: () => P.startVideoFile,
+        playableVideo: (rel, cls) => playableVideo(rel, cls),
+        importVideo: async () => {
+            const [file] = await pickFiles(ACCEPT.videos);
+            if (!file) return null;
+            const [path] = await importFiles("videos", [file]);
+            return path;
+        },
+        // another file: the takes of clip 1 made with the current one (and those that continue them) are listed first
+        setStartVideoFile: async (rel) => {
+            if ((rel || null) === (P.startVideoFile || null)) return true;
+            if (P.startVideoFile && window.H3Takes && window.H3Takes.confirmStartVideo
+                && !(await window.H3Takes.confirmStartVideo(rel ? ((P.resources.videos || []).find((v) => v.path === rel) || {}).sha || null : null))) return false;
+            const res = await put(`/api/projects/${encodeURIComponent(P.name)}/start-video`, { file: rel || null });
+            P.startVideoFile = res.start_video_file || null;
+            if (window.H3Takes) window.H3Takes.recompute();
+            return true;
+        },
+        clip1Takes: async () => (window.H3Takes && window.H3Takes.takeCount ? window.H3Takes.takeCount(1) : 0),
+        // edited video: the changes of shot in a segment (frames of the file), found by the server with ffmpeg
+        sceneCuts: async (rel, start, end) => (await api(`/api/projects/${encodeURIComponent(P.name)}/resources/scenes?path=${encodeURIComponent(rel)}&start=${start}&end=${end}`)).cuts || [],
+        branchSizes: () => P.branches.map((b) => ({ id: b.id, name: b.name, width: Number(b.width), height: Number(b.height) })),
+        // the branches take the proportions of the video, about the same number of pixels (multiples of 32)
+        fitBranchSizes: async (vw, vh, ids) => {
+            for (const id of ids) {
+                const b = P.branches.find((x) => x.id === id);
+                if (!b) continue;
+                const area = Number(b.width) * Number(b.height), ratio = vw / vh;
+                const r32 = (v) => Math.max(64, Math.round(v / 32) * 32);
+                const w = r32(Math.sqrt(area * ratio)), hh = r32(Math.sqrt(area / ratio));
+                if (window.H3Takes && !(await window.H3Takes.changeSize(id, w, hh))) return;
+                await putBranch(id, { width: w, height: hh });
+            }
+        },
     };
 
     // ------------------------------------------------------------------ projects
@@ -206,6 +243,7 @@
         P.branches = data.branches || [];
         P.legacyRefSize = data.legacy_ref_image_size || "match";
         P.clipDefaults = data.clip_defaults || {};
+        P.startVideoFile = data.start_video_file || null;
         P.resources = data.resources;
         ed().media = media;
         ed().setPlan(data.plan, `${data.name} · plan.json`, null);
@@ -346,6 +384,7 @@
         P.branches = data.branches || [];
         P.legacyRefSize = data.legacy_ref_image_size || "match";
         P.clipDefaults = data.clip_defaults || {};
+        P.startVideoFile = data.start_video_file || null;
         P.resources = data.resources;
         ed().media = media;
         ed().setPlan(data.plan, `${data.name} · plan.json`, null);
@@ -432,19 +471,99 @@
         P.resources = await api(`/api/projects/${encodeURIComponent(P.name)}/resources`);
         return P.resources;
     }
+    // Import files into the project's resources. The file is sent as it is read (no copy in memory), with a
+    // progress window (file, %, MB, cancel) as soon as the transfer takes more than a moment.
     async function importFiles(kind, files) {
         const added = [];
-        for (const file of files) {
-            const res = await api(`/api/projects/${encodeURIComponent(P.name)}/resources?kind=${kind}&filename=${encodeURIComponent(file.name)}`,
-                { method: "POST", body: await file.arrayBuffer() });
-            added.push(res.path);
+        const total = files.reduce((n, f) => n + f.size, 0);
+        let done = 0, cancelled = false, xhr = null, win = null;
+        const bar = h("div", { class: "studio-progress-bar" }), label = h("div", { class: "hint" });
+        const showProgress = () => {
+            if (win) return;
+            win = modal(_t("studio.importing"), h("div", { class: "studio-progress" }, label, h("div", { class: "studio-progress-track" }, bar),
+                h("div", { class: "tk-inline", style: "justify-content:flex-end;margin-top:8px" },
+                    h("button", { onclick: () => { cancelled = true; if (xhr) xhr.abort(); } }, _t("studio.cancel")))),
+            { onClose: () => { cancelled = true; if (xhr) xhr.abort(); } });
+        };
+        const timer = setTimeout(showProgress, 400);
+        const mb = (n) => (n / 1048576).toFixed(n < 10485760 ? 1 : 0).replace(".", H3I18n.decimal());
+        try {
+            for (const file of files) {
+                if (cancelled) break;
+                const res = await new Promise((resolve, reject) => {
+                    xhr = new XMLHttpRequest();
+                    xhr.open("POST", `/api/projects/${encodeURIComponent(P.name)}/resources?kind=${kind}&filename=${encodeURIComponent(file.name)}`);
+                    xhr.setRequestHeader("X-Encore", "1");
+                    xhr.upload.onprogress = (e) => {
+                        const sent = done + (e.lengthComputable ? e.loaded : 0);
+                        bar.style.width = `${total ? Math.min(100, (100 * sent) / total) : 100}%`;
+                        label.textContent = _t("studio.importing_file", { file: file.name, v1: total ? Math.floor((100 * sent) / total) : 100, v2: mb(sent), v3: mb(total) });
+                    };
+                    xhr.onload = () => {
+                        let data = null;
+                        try { data = JSON.parse(xhr.responseText || "null"); } catch (_) { data = { error: xhr.responseText }; }
+                        if (xhr.status >= 400 || (data && data.error)) reject(new Error((data && data.error) || `HTTP ${xhr.status}`));
+                        else resolve(data);
+                    };
+                    xhr.onerror = () => reject(new Error(_t("studio.import_failed")));
+                    xhr.onabort = () => reject(Object.assign(new Error(_t("studio.import_cancelled")), { code: "cancelled" }));
+                    xhr.send(file);
+                });
+                added.push(res.path);
+                done += file.size;
+            }
+        } finally {
+            clearTimeout(timer);
+            if (win) win.overlay.remove();
+            await refreshResources();
         }
-        await refreshResources();
         return added;
     }
-    const ACCEPT = { images: "image/*", voices: "audio/*", songs: "audio/*" };
-    const KIND_LABEL = { images: _t("studio.pictures"), voices: _t("studio.voices"), songs: _t("studio.songs") };
+    const ACCEPT = { images: "image/*", voices: "audio/*", songs: "audio/*", videos: "video/*" };
+    const KIND_LABEL = { images: _t("studio.pictures"), voices: _t("studio.voices"), songs: _t("studio.songs"), videos: _t("studio.videos") };
+    // a player for a project video; when the browser cannot play it (AVI, ProRes, HEVC…), a light H.264 copy is made
+    // by the server (ffmpeg), with its progress under the player, and played instead. ComfyUI always gets the original.
+    function playableVideo(rel, cls) {
+        const video = h("video", { controls: true, preload: "metadata", class: cls });
+        const note = h("div", { class: "hint studio-preview-note", hidden: true });
+        const wrap = h("div", { class: "studio-playable" }, video, note);
+        const q = `/api/projects/${encodeURIComponent(P.name)}/resources/preview?path=${encodeURIComponent(rel)}`;
+        let tried = false, seen = false;
+        const play = (path) => { note.hidden = true; video.src = `${fileUrl(path)}?v=${Date.now()}`; };
+        const say = (text, ...buttons) => { note.hidden = false; note.replaceChildren(h("span", {}, text), ...buttons); };
+        const failed = (err) => say(err.code === "no_ffmpeg" ? err.message : _t("studio.preview_failed", { error: err.message }),
+            " ", h("button", { class: "small", onclick: () => make() }, _t("studio.preview_retry")));
+        async function follow() {
+            for (;;) {
+                if (wrap.isConnected) seen = true; else if (seen) return;      // the player was closed or drawn again
+                let st;
+                try { st = await api(q); } catch (err) { failed(err); return; }
+                if (st.state === "done") { play(st.path); return; }
+                if (st.state === "error") { failed({ message: st.error || "?" }); return; }
+                if (st.state === "none") { say(_t("studio.preview_cancelled"), " ", h("button", { class: "small", onclick: () => make() }, _t("studio.preview_retry"))); return; }
+                const bar = h("div", { class: "studio-progress-track" }, h("div", { class: "studio-progress-bar", style: `width:${Math.round(100 * st.progress)}%` }));
+                say(_t("studio.preview_making", { v0: Math.round(100 * st.progress) }), " ",
+                    h("button", { class: "small", onclick: () => api(q, { method: "DELETE" }).catch(() => {}) }, _t("studio.cancel")), bar);
+                await new Promise((r) => setTimeout(r, 700));
+            }
+        }
+        async function make() {
+            say(_t("studio.preview_making", { v0: 0 }));
+            try { await api(q, { method: "POST" }); } catch (err) { failed(err); return; }
+            follow();
+        }
+        const unplayable = () => { if (tried) return; tried = true; make(); };
+        video.addEventListener("error", unplayable);
+        video.addEventListener("loadedmetadata", () => { if (!video.videoWidth) unplayable(); });     // sound only: the picture is not decoded
+        api(q).then((st) => {
+            if (st.state === "done") { tried = true; play(st.path); }
+            else if (st.state === "running") { tried = true; follow(); }
+            else video.src = fileUrl(rel);
+        }).catch(() => { video.src = fileUrl(rel); });
+        return { wrap, video };
+    }
     function preview(kind, rel) {
+        if (kind === "videos") return playableVideo(rel, "studio-res-video").wrap;
         return kind === "images" ? zoom(h("img", { src: fileUrl(rel), class: "tk-refimg", loading: "lazy" }), rel.split("/").pop())
             : h("audio", { controls: true, preload: "none", src: fileUrl(rel) });
     }
@@ -453,15 +572,37 @@
     function openResources() {
         if (!P.name) return showHome();
         const body = h("div", {});
+        const mb = (size) => _t("studio.mb_2", { v0: (size / 1e6).toFixed(1).replace(".", H3I18n.decimal()) });
+        // delete a file: refused while the project uses it, a warning when checkpoints or takes still need it
+        const remove = async (it) => {
+            const base = `/api/projects/${encodeURIComponent(P.name)}/resources?path=${encodeURIComponent(it.path)}`;
+            try {
+                const use = await api(`/api/projects/${encodeURIComponent(P.name)}/resources/usage?path=${encodeURIComponent(it.path)}`);
+                if (use.current.length) { await H3Dialog.alert(_t("resources.in_use", { file: it.name, v1: use.current.join("; ") })); return; }
+                const why = [use.checkpoints.length ? _t("studio.used_by_checkpoints", { v0: use.checkpoints.join(", ") }) : null,
+                    use.takes ? _t("studio.used_by_takes", { count: use.takes }) : null].filter(Boolean);
+                const ok = await H3Dialog.confirm(why.length ? _t("studio.delete_resource_used", { file: it.name, v1: mb(it.size), v2: why.map((w) => "• " + w).join("\n") })
+                    : _t("studio.delete_resource_confirm", { file: it.name, v1: mb(it.size) }));
+                if (!ok) return;
+                await api(base + (why.length ? "&confirm=1" : ""), { method: "DELETE" });
+            } catch (e) { await H3Dialog.alert(e.message); }
+            await refreshResources();
+            draw();
+        };
         const draw = () => {
             fill(body);
-            for (const kind of ["images", "voices", "songs"]) {
+            const all = Object.values(P.resources).flat();
+            body.append(h("p", { class: "hint" }, _t("studio.resources_total", { count: all.length, v1: mb(all.reduce((n, it) => n + (it.size || 0), 0)) })));
+            for (const kind of ["images", "voices", "songs", "videos"]) {
                 const items = P.resources[kind] || [];
                 body.append(h("h3", {}, `${KIND_LABEL[kind]} (${items.length})`),
                     h("button", { onclick: async () => { const files = await pickFiles(ACCEPT[kind], true); if (files.length) { try { await importFiles(kind, files); } catch (e) { alert(e.message); } draw(); } } }, _t("studio.import")),
-                    h("div", { class: kind === "images" ? "studio-grid" : "studio-list" }, items.map((it) => h("div", { class: "studio-res" },
+                    h("div", { class: kind === "images" || kind === "videos" ? "studio-grid" : "studio-list" }, items.map((it) => h("div", { class: "studio-res" },
                         preview(kind, it.path),
-                        h("div", { class: "studio-res-name", title: it.path }, it.name, h("span", { class: "hint" }, _t("studio.mb_2", { v0: (it.size / 1e6).toFixed(1).replace(".", H3I18n.decimal()) })))))));
+                        h("div", { class: "studio-res-foot" },
+                            h("div", { class: "studio-res-name", title: it.path }, it.name, h("span", { class: "hint" }, mb(it.size))),
+                            // outside the name, which is cut when long: always visible
+                            h("button", { class: "small danger studio-res-del", title: _t("studio.delete_resource"), onclick: () => remove(it) }, "🗑"))))));
             }
             body.append(h("p", { class: "hint" }, _t("studio.imported_files_are_copied_into_the")));
         };
@@ -591,7 +732,7 @@
                     body.append(h("div", { class: "tk-ref" }, h("div", { class: "tk-refimg empty" }, "♪"),
                         h("div", { class: "tk-refbody" }, h("b", {}, _t("studio.song")), h("div", { class: "tk-inline" }, sel, up), player)));
                 }
-                const names = Object.keys(plan().refs || {});
+                const names = Object.keys(plan().refs || {}).filter((n) => n !== (plan().start_video || plan().edit_video || {}).ref);
                 if (!names.length) body.append(h("p", { class: "hint" }, _t("studio.the_plan_declares_no_reference_plan")));
                 for (const name of names) {
                     const r = { ...((branch.refs || {})[name] || {}) };
@@ -607,16 +748,18 @@
                         draw();
                     };
                     const pick = (kind, label, list) => {
+                        const folder = { image: "images", voice: "voices", video: "videos" }[kind];
                         const sel = h("select", { onchange: (e) => setRef(kind, e.target.value || null) },
                             h("option", { value: "" }, label),
                             list.map((it) => h("option", { value: it.path, selected: it.path === r[kind] || null }, it.name)));
                         const up = h("button", { onclick: async () => {
-                            const [file] = await pickFiles(ACCEPT[kind === "image" ? "images" : "voices"]);
+                            const [file] = await pickFiles(ACCEPT[folder]);
                             if (!file) return;
-                            try { const [path] = await importFiles(kind === "image" ? "images" : "voices", [file]); await setRef(kind, path); } catch (e) { alert(e.message); draw(); }
+                            try { const [path] = await importFiles(folder, [file]); await setRef(kind, path); } catch (e) { alert(e.message); draw(); }
                         } }, _t("studio.import"));
                         return h("div", { class: "tk-inline" }, sel, up);
                     };
+                    if (kinds.includes("video")) continue;    // the start video is chosen in the plan settings, for every branch
                     body.append(h("div", { class: "tk-ref" },
                         r.image ? zoom(h("img", { src: fileUrl(r.image), class: "tk-refimg" }), name) : h("div", { class: "tk-refimg empty" }, _t("studio.no_picture_2")),
                         h("div", { class: "tk-refbody" },
@@ -1519,6 +1662,8 @@
             assembleCheck: (clip, take) => post(`${base()}/assemble-check`, { clip, take }),
             takePlan: (clip, take) => api(`${base()}/takes/${clip}/${encodeURIComponent(take)}/plan`),
             exports: () => api(`${base()}/exports`),
+            // the start video's segment, small (made once by ffmpeg): GET its state, POST to have it made
+            segmentThumb: (file, start, end, method) => api(`${base()}/resources/thumb?path=${encodeURIComponent(file)}&start=${start}&end=${end}`, { method: method || "GET" }),
             restoreCheckpoint,
             generate: (clip, parent, random, seed, branch, upscale, loras, upscaleSettings) => post(`${base()}/generate`, { clip, parent, random: !!random, seed: seed ?? null, branch: branch || null, upscale: upscale || null, loras: loras ?? null, upscale_settings: upscaleSettings || null }),
             jobPlan: (id) => api(`${base()}/jobs/${encodeURIComponent(id)}/plan`),
@@ -1550,6 +1695,8 @@
                 for (const b of P.branches) {
                     const refs = {};
                     for (const [name, r] of Object.entries(b.refs || {})) refs[name] = { image: sha("images", r && r.image), voice: sha("voices", r && r.voice) };
+                    const sv = plan().start_video || plan().edit_video;    // the project's video, the same for every branch
+                    if (sv && sv.ref) refs[sv.ref] = { image: null, voice: null, video: sha("videos", P.startVideoFile) };
                     branches[b.id] = { refs, song: sha("songs", b.song), size: [Number(b.width), Number(b.height)], ref_image_size: b.ref_image_size || null };
                 }
                 return { branches, default_branch: P.branches.length ? P.branches[0].id : null, legacy_ref_image_size: P.legacyRefSize || "match" };

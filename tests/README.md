@@ -23,10 +23,10 @@ Each test starts Encore's server on its own port with a project folder in `/tmp`
 `mock/` (port 8771) and a headless browser. Needs `pip install pillow numpy playwright`, then
 `playwright install chromium` (or `CHROME=/path/to/chrome`), and the plugin folder in `H3_PLUGIN`: the fake
 ComfyUI runs the plugin's real nodes (plan, takes, assembly) with a numpy stand-in for torch
-(`mock/shim`) and fake models. Logs and screenshots: `e2e/out/`.
+(`mock/shim`) and fake models. `ffmpeg` must be on the PATH (`v30_test` reads a real video). Logs and screenshots: `e2e/out/`.
 
 The tests are run in a fixed order (`run_tests.py`): some reuse the project made by the one before.
-`v24_test`, `v25_test`, `v25_ui_test`, `v28_test` and `v29_test` check their results themselves (PASS / FAIL lines); the others are
+`v24_test`, `v25_test`, `v25_ui_test`, `v28_test`, `v29_test`, `v30_test` and `v31_test` check their results themselves (PASS / FAIL lines); the others are
 mostly scenarios that must run through without error, page error or exception — their printed values are
 for a human reader (`e2e/out/<test>.log`).
 
@@ -44,6 +44,8 @@ for a human reader (`e2e/out/<test>.log`).
 | `v25_test`, `v25_ui_test` | refusing other pages' requests, ComfyUI unreachable / restarted, buttons of an invalidated take, page opened by network address |
 | `v28_test` | ≡ on « generate » boxes and queued generations with the « Generation » block, ▶▶ label, upscale settings of a take (folded form of ▾), LoRA-only column settings, version banner, no « null » in the windows |
 | `v29_test` | folded branches: same width, no « selection » label, the selection moves to an unfolded branch, at least one branch stays unfolded |
+| `v30_test` | start video: the project's video (plan settings), clip 1 continuing the segment (read and encoded), validity, assembly with and without the segment, plan settings without « null », timeline, start video column |
+| `v31_test` | resources: big import piece by piece (progress window, cancel), no duplicate, deletion refused / with warning / direct |
 
 `fixtures/` holds the plans, pictures, song and short videos the tests use (the plans `robot_*` are the
 plugin's examples).

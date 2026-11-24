@@ -13,6 +13,7 @@ class Tensor(np.ndarray):
     def movedim(self, a, b): return np.moveaxis(self, a, b).view(Tensor)
     def unbind(self): return list(self)
     def numpy(self): return np.asarray(self)
+    def mean(self, dim=None, keepdim=False, **k): return _t(np.mean(np.asarray(self), axis=dim, keepdims=keepdim))
 
 def _t(a): return np.asarray(a, dtype=np.float32).view(Tensor)
 def _shape(args): return tuple(args[0]) if len(args) == 1 and isinstance(args[0], (tuple, list)) else tuple(args)
@@ -22,6 +23,7 @@ def randn(*s, **k): return _t(np.random.randn(*_shape(s)))
 def full(s, v, **k): return _t(np.full(tuple(s), v))
 def full_like(x, v): return _t(np.full(x.shape, v))
 def from_numpy(a): return _t(a)
+def cat(xs, dim=0): return _t(np.concatenate([np.asarray(x) for x in xs], axis=dim))
 def std(x, dim, keepdim=False): return _t(np.std(np.asarray(x), axis=tuple(dim), keepdims=keepdim, ddof=1))
 def save(obj, path):
     with open(path, "wb") as f: pickle.dump(obj, f)

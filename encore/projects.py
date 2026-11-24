@@ -8,6 +8,7 @@ A project is a folder of the projects root:
         refs/images/     imported reference images
         refs/voices/     imported voice samples
         refs/songs/      imported songs
+        refs/videos/     imported videos (a plan can start from a segment of one)
         takes/           generated takes (step 2)
         checkpoints/     saved states (step 3)
         store/           files kept once, by content hash (step 3)
@@ -16,23 +17,26 @@ A project is a folder of the projects root:
 from __future__ import annotations
 
 from .i18n import t as _t
+import hashlib
 import json
 import os
 import re
 import shutil
 import time
+import uuid
 from pathlib import Path
 
 from . import plan_core, takes
 
-STUDIO_VERSION = "0.29"
+STUDIO_VERSION = "0.40"
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 RESOURCE_KINDS = {
     "images": (".png", ".jpg", ".jpeg", ".webp", ".bmp"),
     "voices": (".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".opus"),
     "songs": (".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".opus"),
+    "videos": (".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"),
 }
-SUBDIRS = ("refs/images", "refs/voices", "refs/songs", "takes", "checkpoints", "store", "exports")
+SUBDIRS = ("refs/images", "refs/voices", "refs/songs", "refs/videos", "takes", "checkpoints", "store", "exports")
 DEFAULT_SETTINGS = {
     "unet_name": "minimax_h3_ref2va_pruned_int8_convrot.safetensors", "weight_dtype": "default",
     "clip_name": "qwen3vl_32b_minimax_h3_int8_convrot.safetensors", "clip_type": "minimax",
@@ -63,6 +67,7 @@ def default_config():
         "comfy_url": "http://127.0.0.1:8188",
         "checkpoint_limit": 0,          # 0 = no limit (step 3)
         "purge_comfy_copy": True,       # remove ComfyUI's copy of the takes once they are in the project
+        "assembly_engine": "ffmpeg",    # final videos made by Encore with ffmpeg ("plugin": by ComfyUI, as before 0.40)
     }
 
 
@@ -312,7 +317,7 @@ def safe_filename(name: str) -> str:
 
 # --------------------------------------------------------------------------- projects
 def skeleton_plan(name: str, mode: str):
-    plan = {"version": 3, "project": name, "mode": mode, "refs": {}, "context_frames": 39, "crossfade_frames": 0, "clips": []}
+    plan = {"version": plan_core.PLAN_VERSION, "project": name, "mode": mode, "refs": {}, "context_frames": 39, "crossfade_frames": 0, "clips": []}
     if mode == "music_video":
         plan["song"] = {"file": "", "duration_seconds": 60}
     clip = {"name": "clip_001", "frames": 209, "continue": False, "refs": [],
@@ -420,7 +425,38 @@ def read_project(root, name):
     return {"name": path.name, "path": str(path), "plan": plan, "settings": settings, "branches": meta["branches"],
             "legacy_ref_image_size": meta.get("legacy_ref_image_size") or "match",
             "clip_defaults": meta.get("clip_defaults") or {},
+            "start_video_file": meta.get("start_video_file") or None,
             "resources": list_resources(root, name), "validation": {"errors": errors, "warnings": warnings}}
+
+
+# --------------------------------------------------------------------------- start video
+# The video a plan starts from (start_video) is one file for the whole project, chosen in the plan settings;
+# every branch uses it, as if each one had it as the file of the plan's start_video reference.
+def set_start_video_file(root, name, rel):
+    path = project_dir(root, name)
+    meta = read_meta(path)
+    if rel:
+        file = safe_join(path, rel)
+        if not rel.startswith("refs/videos/") or not file.is_file():
+            raise StudioError(_t("projects.start_video_file_not_found", file=rel))
+        meta["start_video_file"] = rel
+    else:
+        meta.pop("start_video_file", None)
+    _write_json(path / "project.json", meta)
+    return {"start_video_file": meta.get("start_video_file")}
+
+
+plan_video = takes.plan_video
+
+
+def effective_refs(path: Path, branch, plan):
+    """The references of a branch, with the project's video for the plan's start_video / edit_video reference."""
+    refs = dict(branch.get("refs") or {})
+    spec = plan_video(plan)
+    file = read_meta(path).get("start_video_file") if spec else None
+    if spec and spec.get("ref"):
+        refs[spec["ref"]] = {"image": None, "voice": None, "video": file or None}
+    return refs
 
 
 # --------------------------------------------------------------------------- branches
@@ -518,7 +554,7 @@ def save_plan(root, name, plan):
     if plan.get("project") != path.name:
         notes.append(_t("projects.the_project_name_in_the_plan", name=path.name))
         plan["project"] = path.name
-    plan["version"] = 3
+    plan["version"] = plan_core.PLAN_VERSION
     if "ref_image_size" in plan:
         plan.pop("ref_image_size")
         notes.append(_t("projects.ref_image_size_is_removed_from"))
@@ -586,30 +622,50 @@ def normalize_image(filename: str, data: bytes) -> str:
     return filename
 
 
-def add_resource(root, name, kind: str, filename: str, data: bytes):
-    """Copy an image, a voice or a song into the project. Same content = same file (no duplicate)."""
+def add_resource_stream(root, name, kind: str, filename: str, stream, length: int, chunk: int = 1024 * 1024):
+    """Copy an image, a voice, a song or a video into the project. Same content = same file (no duplicate).
+    The file is written to the disk as it arrives, never held whole in memory; a transfer cut short leaves
+    nothing behind."""
     path = project_dir(root, name)
     if kind not in RESOURCE_KINDS:
         raise StudioError(_t("projects.unknown_resource_type"))
     filename = safe_filename(filename)
-    if kind == "images":
-        filename = normalize_image(filename, data)
-    if not filename.lower().endswith(RESOURCE_KINDS[kind]):
-        raise StudioError(_t("projects.format_not_accepted_for", filename=filename, kind=kind, v2=', '.join(RESOURCE_KINDS[kind])))
     folder = path / "refs" / kind
     folder.mkdir(parents=True, exist_ok=True)
-    target = folder / filename
-    stem, ext = os.path.splitext(filename)
-    number = 2
-    while target.exists():
-        if target.read_bytes() == data:
-            return {"path": target.relative_to(path).as_posix(), "reused": True}
-        target = folder / f"{stem}_{number}{ext}"
-        number += 1
-    tmp = target.with_suffix(target.suffix + ".tmp")
-    tmp.write_bytes(data)
-    os.replace(tmp, target)
-    return {"path": target.relative_to(path).as_posix(), "reused": False}
+    part = folder / f".upload_{uuid.uuid4().hex}.part"
+    sha = hashlib.sha256()
+    head = b""
+    try:
+        with open(part, "wb") as handle:
+            remaining = int(length)
+            while remaining > 0:
+                data = stream.read(min(chunk, remaining))
+                if not data:
+                    raise StudioError(_t("projects.upload_interrupted"))
+                if len(head) < 16:
+                    head += data[:16]
+                handle.write(data)
+                sha.update(data)
+                remaining -= len(data)
+        if kind == "images":
+            filename = normalize_image(filename, head)
+        if not filename.lower().endswith(RESOURCE_KINDS[kind]):
+            raise StudioError(_t("projects.format_not_accepted_for", filename=filename, kind=kind, v2=', '.join(RESOURCE_KINDS[kind])))
+        digest = sha.hexdigest()
+        for other in folder.iterdir():           # the same content already imported: keep that file
+            if other.is_file() and other.suffix != ".part" and other.stat().st_size == length and takes.file_sha(other) == digest:
+                return {"path": other.relative_to(path).as_posix(), "reused": True}
+        target = folder / filename
+        stem, ext = os.path.splitext(filename)
+        number = 2
+        while target.exists():
+            target = folder / f"{stem}_{number}{ext}"
+            number += 1
+        os.replace(part, target)
+        return {"path": target.relative_to(path).as_posix(), "reused": False}
+    finally:
+        if part.exists():
+            part.unlink()
 
 
 def list_resources(root, name):

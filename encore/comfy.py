@@ -105,22 +105,50 @@ class ComfyClient:
     def delete_queued(self, ids):
         return self.post("/queue", {"delete": list(ids)})
 
-    def upload(self, data: bytes, filename: str, subfolder: str = "", kind: str = "input"):
-        """Send a file with ComfyUI's upload route; returns its path as ComfyUI names it."""
+    def upload(self, data, filename: str, subfolder: str = "", kind: str = "input", progress=None):
+        """Send a file with ComfyUI's upload route; returns its path as ComfyUI names it.
+        ``data``: bytes, or the path of a file, sent piece by piece (never held whole in memory);
+        ``progress(sent, total)`` is called as it goes."""
         boundary = "----h3studio" + uuid.uuid4().hex
-        parts = []
+        head = b""
         for name, value in (("subfolder", subfolder), ("type", kind), ("overwrite", "true")):
-            parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode("utf-8"))
+            head += f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode("utf-8")
         safe = filename.replace('"', "_")
-        parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="image"; filename="{safe}"\r\n'
-                     f"Content-Type: application/octet-stream\r\n\r\n".encode("utf-8") + data + b"\r\n")
-        parts.append(f"--{boundary}--\r\n".encode("utf-8"))
-        body = b"".join(parts)
-        headers = {"Content-Type": f"multipart/form-data; boundary={boundary}", "Content-Length": str(len(body))}
-        with self._open("/upload/image", data=body, headers=headers, method="POST", timeout=max(self.timeout, 120)) as response:
+        head += (f'--{boundary}\r\nContent-Disposition: form-data; name="image"; filename="{safe}"\r\n'
+                 f"Content-Type: application/octet-stream\r\n\r\n").encode("utf-8")
+        tail = f"\r\n--{boundary}--\r\n".encode("utf-8")
+        if isinstance(data, (bytes, bytearray)):
+            body, size = head + bytes(data) + tail, len(data)
+        else:
+            size = os.path.getsize(data)
+
+            def pieces(path=data):
+                yield head
+                sent = 0
+                with open(path, "rb") as handle:
+                    for chunk in iter(lambda: handle.read(4 * 1024 * 1024), b""):
+                        sent += len(chunk)
+                        if progress:
+                            progress(sent, size)
+                        yield chunk
+                yield tail
+            body = pieces()
+        headers = {"Content-Type": f"multipart/form-data; boundary={boundary}",
+                   "Content-Length": str(len(head) + size + len(tail))}
+        with self._open("/upload/image", data=body, headers=headers, method="POST",
+                        timeout=max(self.timeout, 120 + size // (2 * 1024 * 1024))) as response:
             answer = json.loads(response.read().decode("utf-8"))
         sub = answer.get("subfolder") or ""
         return f"{sub}/{answer['name']}" if sub else answer["name"]
+
+    def exists(self, filename: str, subfolder: str = "", kind: str = "input") -> bool:
+        """Whether ComfyUI serves this file (only its headers are read)."""
+        query = urllib.parse.urlencode({"filename": filename, "subfolder": subfolder, "type": kind})
+        try:
+            with self._open("/view?" + query):
+                return True
+        except ComfyError:
+            return False
 
     def download(self, filename: str, subfolder: str, target: str, kind: str = "output"):
         """Copy a file of ComfyUI's output (or input) folder to ``target`` (written atomically)."""

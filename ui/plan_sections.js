@@ -94,9 +94,10 @@ const H3Sections = (() => {
         return [H3.CONTINUE_SENTENCE + H3.FREE_CONTINUE_SUFFIX, H3.CONTINUE_SENTENCE, H3.HIDDEN_LEADIN_FREE, H3.HIDDEN_LEADIN_MUSIC];
     }
     // the sentence a clip must open with: continuation, hidden lead-in of a new scene, or none (first clip)
-    function expectedSentence(clip, index, free) {
+    // afterVideo: the plan starts from a video, so clip 1 follows it like any other clip
+    function expectedSentence(clip, index, free, afterVideo = false) {
         if (clip.continue) return H3.CONTINUE_SENTENCE + (free ? H3.FREE_CONTINUE_SUFFIX : "");
-        if (index > 1) return free ? H3.HIDDEN_LEADIN_FREE : H3.HIDDEN_LEADIN_MUSIC;
+        if (index > 1 || afterVideo) return free ? H3.HIDDEN_LEADIN_FREE : H3.HIDDEN_LEADIN_MUSIC;
         return "";
     }
     function parseDetailed(display) {
@@ -519,7 +520,7 @@ const H3Sections = (() => {
         // ---- detailed_description
         const det = parseDetailed(disp[3]);
         const custom = customOpening(det);
-        const auto = custom ? "" : expectedSentence(c, ctx.index, free);
+        const auto = custom ? "" : expectedSentence(c, ctx.index, free, !!(ctx.plan && ctx.plan.start_video));
         const commitDet = (structural, fix) => commit(3, composeDetailed(det.style, det.shots, fix ? auto : openingFor(det)), structural);
         const s3 = box("detailed_description:", _t("sections.style_then_one_block_per_shot"),
             fromPrev(_t("sections.style_of_the_previous_clip"), () => { const p = prevDisplay(3); if (p == null) return; det.style = toDisplay(toPrompt(parseDetailed(p).style, subjectNames(prev, prevParts)), names); commitDet(true); }));
@@ -560,7 +561,7 @@ const H3Sections = (() => {
         if (!c) return;
 
         // references of the clip
-        const declared = Object.keys(ctx.plan.refs || {});
+        const declared = Object.keys(ctx.plan.refs || {}).filter((r) => r !== (ctx.plan.start_video || ctx.plan.edit_video || {}).ref);   // not the plan's video
         const avail = declared.filter((r) => !(c.refs || []).includes(r));
         const refs = sect(_t("sections.clip_references"),
             h("div", { class: "hint" }, ctx.media ? _t("sections.previews_branch_drag_a_reference_into", { v0: ctx.media.label() }) : _t("sections.drag_a_reference_into_a_text")));
@@ -643,7 +644,7 @@ const H3Sections = (() => {
     return {
         subjectNames, toDisplay, toPrompt, parseSubjects, composeSubjects, parseRetention, composeRetention, splitSummary, composeSummary,
         parseDetailed, composeDetailed, expectedSentence, customOpening, openingFor, remapSubjects, inheritedPrompt, unknownMentions,
-        render, palette, refreshChecks, closeAc,
+        render, palette, refreshChecks, closeAc, attachAc,
     };
 })();
 if (typeof module !== "undefined") module.exports = H3Sections;

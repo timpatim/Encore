@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------------------------
-// H3 Clip Plan - plan logic (pure functions, port of core.py v3). No DOM access in this part.
+// H3 Clip Plan - plan logic (pure functions, port of core.py v6). No DOM access in this part.
 // ---------------------------------------------------------------------------------------------
 const H3 = (() => {
     const _t = typeof H3I18n !== "undefined" ? H3I18n.t : (id) => id;
@@ -12,7 +12,14 @@ const H3 = (() => {
         "overall_soundscape:", "non_diegetic_music:"];
     const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
     const PLAN_KEYS = new Set(["version", "project", "mode", "refs_dir", "refs", "width", "height", "context_frames",
-        "crossfade_frames", "audio_feather_ticks", "seed", "ref_image_size", "song", "clips", "notes"]);
+        "crossfade_frames", "audio_feather_ticks", "seed", "ref_image_size", "song", "clips", "notes", "start_video", "edit_video"]);
+    const START_VIDEO_KEYS = new Set(["ref", "start", "end", "in_assembly", "song"]);
+    const START_SONG_CHOICES = ["with_video", "after_video"];
+    const EDIT_VIDEO_KEYS = new Set(["ref", "start", "end", "sound", "instruction"]);
+    const EDIT_MARK = "{edit}";     // replaced by edit_video.instruction
+    const EDIT_SOUND_CHOICES = ["original", "h3"];
+    const EDIT_MIN_FRAMES = 48, EDIT_MAX_FRAMES = 360;    // a reference video lasts 2 to 15 s
+    const PLAN_VERSION = 6;
     const CLIP_KEYS = new Set(["name", "frames", "continue", "refs", "prompt", "seed", "lyrics", "dialogue", "notes"]);
     const DIALOGUE_KEYS = new Set(["speaker", "text", "language"]);
 
@@ -38,6 +45,114 @@ const H3 = (() => {
         return String(text).toLowerCase().replace(/[^\p{L}\p{N}_]+/gu, " ").trim();
     }
 
+    // Python's round(): halves go to the even neighbour
+    function pyRound(x) {
+        const f = Math.floor(x), d = x - f;
+        if (d > 0.5) return f + 1;
+        if (d < 0.5) return f;
+        return f % 2 === 0 ? f : f + 1;
+    }
+    const isNumber = (v) => typeof v === "number" && Number.isFinite(v);
+    // The start video segment as core.normalize gives it, or null (also when start_video is not usable).
+    function startVideo(plan) {
+        const sv = plan && plan.start_video;
+        if (!sv || typeof sv !== "object" || !isNumber(sv.end)) return null;
+        const start = sv.start ?? 0;
+        if (!isNumber(start) || start < 0 || sv.end <= start) return null;
+        const endFrame = pyRound(sv.end * FPS), startFrame = pyRound(start * FPS);
+        const frames = largestRun(endFrame - startFrame);
+        if (frames <= 0) return null;
+        return { ref: sv.ref, frames, start_frame: endFrame - frames, end_frame: endFrame,
+            in_assembly: sv.in_assembly !== false, song: sv.song || "with_video" };
+    }
+    // The edited video segment as core.normalize gives it, or null.
+    function editVideo(plan) {
+        const ev = plan && plan.edit_video;
+        if (!ev || typeof ev !== "object" || !isNumber(ev.end)) return null;
+        const start = ev.start ?? 0;
+        if (!isNumber(start) || start < 0 || ev.end <= start) return null;
+        const startFrame = pyRound(start * FPS), frames = pyRound(ev.end * FPS) - startFrame;
+        return { ref: ev.ref, start_frame: startFrame, end_frame: startFrame + frames, frames, sound: ev.sound || "original",
+            instruction: typeof ev.instruction === "string" ? ev.instruction : null };
+    }
+    // core.expand_edit: {edit} replaced by the common instruction, the references it names added at the end
+    function expandEdit(prompt, refs, instruction) {
+        refs = [...(refs || [])];
+        if (instruction === null || instruction === undefined || typeof prompt !== "string" || !prompt.includes(EDIT_MARK)) return [prompt, refs];
+        for (const p of placeholders(instruction)) if (!refs.includes(p.name)) refs.push(p.name);
+        return [prompt.split(EDIT_MARK).join(instruction), refs];
+    }
+    const instructionOf = (plan) => (plan && plan.edit_video && typeof plan.edit_video.instruction === "string" ? plan.edit_video.instruction : null);
+    // a clip as the plugin sees it: prompt and references with {edit} expanded
+    function expandedClip(plan, clip) {
+        const [prompt, refs] = expandEdit(clip.prompt, clip.refs, instructionOf(plan));
+        return { ...clip, prompt, refs };
+    }
+    // core.edit_clip_count: the clips ending before the end of the segment edit it; the next ones continue the video
+    function editClipCount(plan) {
+        const ev = editVideo(plan);
+        if (!ev) return 0;
+        return timeline(plan).filter((r) => r.end <= ev.frames).length;
+    }
+    // (first frame in the file, frames) of the source that clip `index` edits, or null (core.edit_slice)
+    function editSlice(plan, index) {
+        const ev = editVideo(plan);
+        if (!ev) return null;
+        const row = timeline(plan)[index - 1];
+        return row && row.end <= ev.frames ? [ev.start_frame + row.raw_start, row.frames] : null;
+    }
+    // Clips that cover an edited segment of `segFrames` frames: a new scene at each cut of the video (frames from the
+    // start of the segment, put on the 17k + 5 grid where clips can end), a shot longer than a clip split in equal
+    // parts that continue each other. Every clip lasts at most maxFrames (and 2 s at least). [{frames, continue}]
+    function editCuts(segFrames, cuts, context, maxFrames) {
+        const grid = (x) => 5 + 17 * Math.round((x - 5) / 17);
+        const end = largestRun(segFrames);
+        const MIN_FIRST = 56, MIN_SECTION = 34;
+        if (end < MIN_FIRST) return [];
+        const bounds = [0];
+        for (const c of [...cuts].sort((a, b) => a - b)) {
+            const b = grid(c);
+            const last = bounds[bounds.length - 1];
+            if (b < (last === 0 ? MIN_FIRST : last + MIN_SECTION) || b > end - MIN_SECTION) continue;
+            bounds.push(b);
+        }
+        bounds.push(end);
+        const out = [];
+        for (let i = 0; i + 1 < bounds.length; i++) {
+            const a = bounds[i], b = bounds[i + 1];
+            for (let parts = 1; parts < 400; parts++) {
+                const marks = [a];
+                for (let j = 1; j < parts; j++) marks.push(grid(a + (b - a) * j / parts));
+                marks.push(b);
+                const clips = [];
+                let ok = true;
+                for (let j = 0; j + 1 < marks.length; j++) {
+                    const frames = marks[j] === 0 ? marks[j + 1] : marks[j + 1] - marks[j] + context;
+                    if (marks[j + 1] <= marks[j] || frames > maxFrames || frames < EDIT_MIN_FRAMES || frames <= context) { ok = false; break; }
+                    clips.push({ frames, continue: j > 0 });
+                }
+                if (ok) { out.push(...clips); break; }
+            }
+        }
+        return out;
+    }
+    function startRow(plan) {
+        const sv = startVideo(plan);
+        return sv ? { index: 0, frames: sv.frames, raw_start: 0, visible: 0, end: sv.frames, context: 0 } : null;
+    }
+    // first timeline frame of the assembled video, and timeline frame at which the song starts (core.final_start / song_offset)
+    function finalStart(plan) {
+        const sv = startVideo(plan);
+        if (!sv || sv.in_assembly) return 0;
+        return timeline(plan)[0].raw_start;
+    }
+    function songOffset(plan) {
+        const sv = startVideo(plan);
+        if (!sv || mode(plan) === "free") return 0;
+        if (!sv.in_assembly) return finalStart(plan);
+        return sv.song === "with_video" ? 0 : sv.frames;
+    }
+
     function contextOf(plan) {
         const c = plan.context_frames ?? DEFAULT_CONTEXT;
         return isRun(c) ? c : DEFAULT_CONTEXT;
@@ -46,7 +161,7 @@ const H3 = (() => {
     // Per-clip timing. Only meaningful when every frames value is legal.
     function timeline(plan) {
         const rows = [];
-        let prev = null;
+        let prev = startRow(plan);   // the start video segment acts as the clip before clip 1
         const ctx = contextOf(plan);
         (plan.clips || []).forEach((clip, i) => {
             const frames = clip.frames;
@@ -82,7 +197,7 @@ const H3 = (() => {
             if (!PLAN_KEYS.has(key) && !key.startsWith("_")) warn(_t("check.unknown_key_ignored", { key }));
         }
         const version = plan.version;
-        if (![1, 2, 3].includes(version)) err(_t("check.version_must_be_3"));
+        if (![1, 2, 3, 4, 5, 6].includes(version)) err(_t("check.version_must_be_3"));
         if ("mode" in plan && !MODES.includes(plan.mode)) err(_t("check.mode_must_be_music_video_or", { v0: JSON.stringify(plan.mode) }));
         if ((version === 1 || version === 2) && plan.mode === "free") err(_t("check.the_free_mode_needs_version_3"));
         const free = mode(plan) === "free";
@@ -117,6 +232,57 @@ const H3 = (() => {
         for (const [name, desc] of Object.entries(refsMap)) {
             if (!NAME_RE.test(name)) err(_t("check.reference_name_letters_digits_and_only_2", { name }));
             if (typeof desc !== "string") err(_t("check.reference_the_description_must_be_a", { name }));
+        }
+
+        const sv = plan.start_video;
+        if (sv !== undefined && sv !== null) {
+            if (typeof sv !== "object" || Array.isArray(sv)) err(_t("check.start_video_must_be_an_object"));
+            else {
+                for (const key of Object.keys(sv)) if (!START_VIDEO_KEYS.has(key) && !key.startsWith("_")) warn(_t("check.start_video_unknown_key", { key }));
+                if (typeof sv.ref !== "string" || !NAME_RE.test(sv.ref)) err(_t("check.start_video_ref_must_be_a_name"));
+                else if (!declared.includes(sv.ref)) err(_t("check.start_video_ref_not_declared", { ref: sv.ref }));
+                const start = sv.start ?? 0;
+                if (!isNumber(start) || start < 0) err(_t("check.start_video_start_must_be"));
+                else if (!isNumber(sv.end) || sv.end <= start) err(_t("check.start_video_end_must_be"));
+                else {
+                    const frames = startVideo(plan).frames;
+                    if (frames <= context) err(_t("check.start_video_too_short", { frames, context, v2: ((context + 17) / FPS).toFixed(2) }));
+                }
+                if ("in_assembly" in sv && typeof sv.in_assembly !== "boolean") err(_t("check.start_video_in_assembly_bool"));
+                const sg = sv.song ?? "with_video";
+                if (!START_SONG_CHOICES.includes(sg)) err(_t("check.start_video_song_choices", { v0: JSON.stringify(sg) }));
+                else if (free && "song" in sv) warn(_t("check.start_video_song_only_music"));
+            }
+        }
+
+        const ev = plan.edit_video;
+        let editFrames = null;
+        if (ev !== undefined && ev !== null) {
+            if (sv !== undefined && sv !== null) err(_t("check.edit_video_and_start_video"));
+            if (!free) err(_t("check.edit_video_needs_free"));
+            if (typeof ev !== "object" || Array.isArray(ev)) err(_t("check.edit_video_must_be_an_object"));
+            else {
+                for (const key of Object.keys(ev)) if (!EDIT_VIDEO_KEYS.has(key) && !key.startsWith("_")) warn(_t("check.edit_video_unknown_key", { key }));
+                if (typeof ev.ref !== "string" || !NAME_RE.test(ev.ref)) err(_t("check.edit_video_ref_must_be_a_name"));
+                else if (!declared.includes(ev.ref)) err(_t("check.edit_video_ref_not_declared", { ref: ev.ref }));
+                const start = ev.start ?? 0;
+                if (!isNumber(start) || start < 0) err(_t("check.edit_video_start_must_be"));
+                else if (!isNumber(ev.end) || ev.end <= start) err(_t("check.edit_video_end_must_be"));
+                else {
+                    if (ev.instruction !== undefined && ev.instruction !== null) {
+                        if (typeof ev.instruction !== "string") err(_t("check.edit_instruction_must_be_text"));
+                        else {
+                            if (ev.instruction.includes(EDIT_MARK)) err(_t("check.edit_instruction_no_mark"));
+                            for (const m of ev.instruction.matchAll(/\{(picture|voice|image|audio)\s*:[^}]*\}/gi)) if (!/^\{(picture|voice):[A-Za-z0-9][A-Za-z0-9_-]*\}$/.test(m[0])) err(_t("check.edit_instruction_bad_placeholder", { v0: m[0] }));
+                            for (const p of placeholders(ev.instruction)) if (declared.length && !declared.includes(p.name)) err(_t("check.edit_instruction_unknown_ref", { ref: p.name }));
+                        }
+                    }
+                    if (!EDIT_SOUND_CHOICES.includes(ev.sound ?? "original")) err(_t("check.edit_video_sound_choices", { v0: JSON.stringify(ev.sound) }));
+                    const frames = editVideo(plan).frames;
+                    if (frames < EDIT_MIN_FRAMES) err(_t("check.edit_video_too_short", { v0: (frames / FPS).toFixed(2) }));
+                    else editFrames = frames;
+                }
+            }
         }
 
         let song = plan.song ?? {};
@@ -156,10 +322,14 @@ const H3 = (() => {
 
             const cont = clip.continue ?? false;
             if (typeof cont !== "boolean") err(_t("check.continue_must_be_true_or_false"), n);
-            else if (cont && n === 1) err(_t("check.clip_1_cannot_be_a_continuation"));
+            else if (cont && n === 1 && (sv === undefined || sv === null)) err(_t("check.clip_1_cannot_be_a_continuation"));
 
             let refs = clip.refs ?? [];
             if (!Array.isArray(refs) || !refs.every((r) => typeof r === "string")) { err(_t("check.refs_must_be_a_list_of"), n); refs = []; }
+            const instruction = ev !== undefined && ev !== null ? instructionOf(plan) : null;
+            if (typeof clip.prompt === "string" && clip.prompt.includes(EDIT_MARK) && instruction === null) err(_t("check.edit_mark_without_instruction"), n);
+            let expandedPrompt;
+            [expandedPrompt, refs] = expandEdit(clip.prompt, refs, instruction);
             if (new Set(refs).size !== refs.length) err(_t("check.a_reference_is_listed_twice"), n);
             const limit = free ? MAX_REF_FILES : MAX_REFS;
             if (refs.length > limit) err(_t("check.at_most_references_per_clip_found", { limit, length: refs.length }), n);
@@ -169,7 +339,7 @@ const H3 = (() => {
             }
             if (!refs.length) warn(_t("check.no_reference_the_clip_will_be"), n);
 
-            let prompt = clip.prompt;
+            let prompt = expandedPrompt;
             if (typeof prompt !== "string" || !prompt.trim()) { err(_t("check.the_prompt_is_empty"), n); prompt = ""; }
             else {
                 let position = -1;
@@ -200,6 +370,9 @@ const H3 = (() => {
                         break;
                     }
                 }
+                const vids = [...new Set([...prompt.matchAll(/<Video (\d+)>/g)].map((m) => +m[1]))];
+                if (vids.length && (ev === undefined || ev === null)) err(_t("check.video_tag_without_edit"), n);
+                else if (vids.some((k) => k !== 1)) err(_t("check.video_tag_is_video_1"), n);
                 if (prompt.includes("<Audio ")) {
                     if (free) err(_t("check.do_not_write_audio_n_write"), n);
                     else warn(_t("check.the_prompt_mentions_audio_n_the"), n);
@@ -230,13 +403,30 @@ const H3 = (() => {
             if ("seed" in clip && clip.seed !== null && (!isInt(clip.seed) || clip.seed < 0)) err(_t("check.seed_must_be_a_positive_integer"), n);
         });
 
+        if (framesOk && editFrames && !out.some((m) => m.level === "error")) {
+            const rows = timeline(plan);
+            const edited = editClipCount(plan);
+            if (!edited) err(_t("check.edit_no_clip_inside", { v0: (editFrames / FPS).toFixed(3) }));
+            rows.forEach((row, k) => {
+                if (row.index <= edited) {
+                    if (row.frames < EDIT_MIN_FRAMES || row.frames > EDIT_MAX_FRAMES) err(_t("check.edit_clip_length", { frames: row.frames }), row.index);
+                } else if (/<Video (\d+)>/.test(expandedClip(plan, plan.clips[k]).prompt || "")) err(_t("check.edit_video_tag_after_segment"), row.index);
+            });
+            if (edited && edited < rows.length) {
+                const row = rows[edited];
+                if (editFrames - row.visible >= 17) warn(_t("check.edit_clip_past_segment", { n: row.index, v0: ((row.end - editFrames) / FPS).toFixed(2), v1: (row.visible / FPS).toFixed(2) }));
+            } else if (edited && editFrames - rows[rows.length - 1].end >= FPS) {
+                warn(_t("check.edit_rest_not_edited", { v0: (rows[rows.length - 1].end / FPS).toFixed(2), v1: (editFrames / FPS).toFixed(2) }));
+            }
+        }
         if (framesOk && !out.some((m) => m.level === "error")) {
             const rows = timeline(plan);
+            const offset = songOffset(plan);
             if (songDuration !== null) {
                 for (const row of rows) {
-                    if (row.end / FPS > songDuration + 1 / FPS) err(_t("check.ends_at_s_after_the_end", { v0: (row.end / FPS).toFixed(3), v1: songDuration.toFixed(3) }), row.index);
+                    if ((row.end - offset) / FPS > songDuration + 1 / FPS) err(_t("check.ends_at_s_after_the_end", { v0: ((row.end - offset) / FPS).toFixed(3), v1: songDuration.toFixed(3) }), row.index);
                 }
-                const last = rows[rows.length - 1].end / FPS;
+                const last = (rows[rows.length - 1].end - offset) / FPS;
                 if (last < songDuration - 1) warn(_t("check.the_plan_ends_at_s_but", { v0: last.toFixed(2), v1: songDuration.toFixed(2) }));
             }
         }
@@ -287,6 +477,9 @@ const H3 = (() => {
 
     function renameRef(plan, oldName, newName) {
         const re = new RegExp(`\\{(picture|voice):${escapeRe(oldName)}\\}`, "g");
+        if (plan.start_video && plan.start_video.ref === oldName) plan.start_video.ref = newName;
+        if (plan.edit_video && plan.edit_video.ref === oldName) plan.edit_video.ref = newName;
+        if (plan.edit_video && typeof plan.edit_video.instruction === "string") plan.edit_video.instruction = plan.edit_video.instruction.replace(re, (_m, kind) => `{${kind}:${newName}}`);
         for (const clip of plan.clips || []) {
             if (Array.isArray(clip.refs)) clip.refs = clip.refs.map((r) => (r === oldName ? newName : r));
             if (typeof clip.prompt === "string") clip.prompt = clip.prompt.replace(re, (_m, kind) => `{${kind}:${newName}}`);
@@ -296,7 +489,9 @@ const H3 = (() => {
 
     function referenceKinds(plan, name) {
         const kinds = new Set();
-        for (const clip of plan.clips || []) {
+        if ((plan.start_video && plan.start_video.ref === name) || (plan.edit_video && plan.edit_video.ref === name)) kinds.add("video");
+        for (const raw of plan.clips || []) {
+            const clip = expandedClip(plan, raw);
             if (!(clip.refs || []).includes(name)) continue;
             const prompt = String(clip.prompt || "");
             const found = placeholders(prompt).filter((p) => p.name === name).map((p) => p.kind);
@@ -383,11 +578,18 @@ const H3 = (() => {
         const rows = timeline(plan);
         const out = {};
         for (const row of rows) {
-            const clip = plan.clips[row.index - 1];
+            const clip = expandedClip(plan, plan.clips[row.index - 1]);
             const payload = {
                 frames: clip.frames, continue: !!clip.continue, refs: [...(clip.refs || [])], prompt: clip.prompt,
                 raw_start: row.raw_start, context: row.context, mode: mode(plan),
             };
+            const sv = startVideo(plan);   // same as core._start_video_payload
+            const ev = editVideo(plan);
+            if (ev) { if (editSlice(plan, row.index)) payload.edit_video = [ev.ref, ev.start_frame]; }
+            else if (sv) {
+                if (row.index === 1 && plan.clips[0].continue) payload.start_video = [sv.ref, sv.start_frame, sv.end_frame];
+                if (mode(plan) === "music_video") payload.song_offset = songOffset(plan);
+            }
             out[row.index] = (await sha256Hex(pyDumps(payload))).slice(0, 16);
         }
         return out;
@@ -401,7 +603,7 @@ const H3 = (() => {
         let currentSize = null;
         for (const r of [...everything].sort((a, b) => (a.saved_at || 0) - (b.saved_at || 0))) {
             for (const [name, kinds] of Object.entries(r.refs || {})) {
-                for (const kind of ["image", "voice"]) currentRefs.set(`${name}\u0000${kind}`, (kinds || {})[kind] ?? null);
+                for (const kind of ["image", "voice", "video"]) currentRefs.set(`${name}\u0000${kind}`, (kinds || {})[kind] ?? null);
             }
             currentSize = [r.width, r.height];
         }
@@ -421,7 +623,7 @@ const H3 = (() => {
                     kind = "size";
                 } else {
                     outer: for (const name of Object.keys(r.refs || {}).sort()) {
-                        for (const kind of ["image", "voice"]) {
+                        for (const kind of ["image", "voice", "video"]) {
                             const mine = (r.refs[name] || {})[kind] ?? null;
                             if (mine !== (currentRefs.get(`${name}\u0000${kind}`) ?? null)) {
                                 reason = _t("check.of_has_changed_since", { v0: kind === "image" ? _t("check.the_picture") : _t("check.the_voice"), name });
@@ -469,6 +671,7 @@ const H3 = (() => {
             for (const [name, kinds] of Object.entries((bset && bset.refs) || {})) {
                 now[`${bid}|image:${name}`] = J((kinds || {}).image ?? null);
                 now[`${bid}|voice:${name}`] = J((kinds || {}).voice ?? null);
+                now[`${bid}|video:${name}`] = J((kinds || {}).video ?? null);
             }
             now[`${bid}|song`] = J((bset || {}).song ?? null);
             now[`${bid}|size`] = J((bset || {}).size || [null, null]);
@@ -483,6 +686,7 @@ const H3 = (() => {
             for (const name of Object.keys(refs).sort()) {
                 keys[`${branch}|image:${name}`] = J((refs[name] || {}).image ?? null);
                 if (free) keys[`${branch}|voice:${name}`] = J((refs[name] || {}).voice ?? null);
+                if ((refs[name] || {}).video) keys[`${branch}|video:${name}`] = J(refs[name].video);
             }
             if (!free && "song" in st) keys[`${branch}|song`] = J(st.song ?? null);
             return keys;
@@ -491,7 +695,7 @@ const H3 = (() => {
             const k = key.includes("|") ? key.slice(key.indexOf("|") + 1) : key;
             const [kind, ...rest] = k.split(":");
             const name = rest.join(":");
-            const what = { size: _t("check.the_picture_size"), refsize: _t("check.the_reference_size"), plan: _t("check.the_clip_s_plan"), image: _t("check.the_picture_of", { name }), voice: _t("check.the_voice_of", { name }), song: _t("check.the_song") }[kind];
+            const what = { size: _t("check.the_picture_size"), refsize: _t("check.the_reference_size"), plan: _t("check.the_clip_s_plan"), image: _t("check.the_picture_of", { name }), voice: _t("check.the_voice_of", { name }), song: _t("check.the_song"), video: _t("check.the_video_of", { name }) }[kind];
             return final ? _t("check.redone_since_with_another_value", { what }) : _t("check.has_changed", { what });
         };
         const records = [], branchOf = {};
@@ -565,6 +769,7 @@ const H3 = (() => {
         FPS, MAX_CLIPS, SOFT_MAX_FRAMES, DEFAULT_CONTEXT, DEFAULT_FEATHER, SECTIONS, NAME_RE, MODES,
         CONTINUE_SENTENCE, FREE_CONTINUE_SUFFIX, HIDDEN_LEADIN_FREE, HIDDEN_LEADIN_MUSIC,
         isRun, largestRun, isAvBoundary, avContextValues, mode, placeholders, timeline, framesLegal, validate,
+        PLAN_VERSION, startVideo, startRow, finalStart, songOffset, pyRound, editVideo, editSlice, editCuts, EDIT_MAX_FRAMES, EDIT_MARK, expandEdit, expandedClip, editClipCount,
         parseSections, composeSections, skeleton, renameRef, referenceKinds, contextOf, squash,
         pyDumps, takeFingerprints, resolveTakes, studioResolveTakes, takeBranch, usablePrefix, sha256Plain,
     };

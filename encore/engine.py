@@ -27,7 +27,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import checkpoints, comfy, plan_core, projects, takeplan, takes
+from . import assembler, checkpoints, comfy, comfy_setup, plan_core, projects, takeplan, takes
 from .projects import StudioError
 
 MIRROR_PREFIX = "h3studio_"
@@ -100,6 +100,8 @@ def clip_workflow(job):
                 inputs["references"] = refs
             p[str(node)] = {"class_type": "H3PlanVoice", "inputs": inputs}
             refs, node = [str(node), 0], node + 1
+        if ref.get("video"):
+            refs, node = _video_node(p, node, ref, refs)
     clip = {"clip": ["5", 0], "vae": ["6", 0], "audio_vae": ["8", 0], "plan_file": job["plan_file"],
             "clip_index": int(job["clip_index"]), "seed_mode": "plan", "width": int(s["width"]), "height": int(s["height"]),
             "take_token": job["take_token"], "parent_token": job.get("parent_token") or "", "seed_override": int(job["seed"])}
@@ -126,14 +128,32 @@ def clip_workflow(job):
     return p
 
 
-def assemble_workflow(plan_file, mode, last_clip, settings, song=None):
-    """The plugin's assembly node: the selection of ComfyUI's working copy, clips 1 to last_clip."""
+def _video_node(p, node, ref, refs):
+    """An « H3 Plan - Video » node (the start video) in the chain of references."""
+    inputs = {"name": ref["name"], "video_file": ref["video"]}
+    if refs:
+        inputs["references"] = refs
+    p[str(node)] = {"class_type": "H3PlanVideo", "inputs": inputs}
+    return [str(node), 0], node + 1
+
+
+def assemble_workflow(plan_file, mode, last_clip, settings, song=None, start_video=None, size=None, edit_video=None):
+    """The plugin's assembly node: the selection of ComfyUI's working copy, clips 1 to last_clip.
+    start_video: {"name", "video"} (ComfyUI path) when the segment opens the video;
+    edit_video: the same for the edited video, when the final video keeps its original sound."""
     p = {"1": {"class_type": "VAELoader", "inputs": {"vae_name": settings["video_vae"]}}}
     inputs = {"video_vae": ["1", 0], "plan_file": plan_file, "last_clip": int(last_clip), "crf": int(settings["crf"])}
-    if mode == "free":
+    if mode == "free" or start_video:
         p["2"] = {"class_type": "VAELoader", "inputs": {"vae_name": settings["audio_vae"]}}
-        inputs["audio_vae"] = ["2", 0]
-    else:
+        p["4"] = {"class_type": "MiniMaxH3AudioVAECompatibility", "inputs": {"audio_vae": ["2", 0]}}
+        inputs["audio_vae"] = ["4", 0] if start_video else ["2", 0]
+    if start_video:
+        refs, _node = _video_node(p, 30, start_video, None)
+        inputs.update(references=refs, width=int(size[0]), height=int(size[1]))
+    if edit_video:
+        refs, _node = _video_node(p, 30, edit_video, None)
+        inputs["references"] = refs
+    if mode != "free":
         p["3"] = {"class_type": "LoadAudio", "inputs": {"audio": song}}
         inputs["master_audio"] = ["3", 0]
     p["10"] = {"class_type": "H3PlanAssemble", "inputs": inputs}
@@ -175,6 +195,7 @@ def build_infos(project_dir: Path, job, report=""):
     rows = {r["index"]: r for r in plan_core.timeline(plan)} if plan else {}
     clips_by_index = {c["index"]: c for c in (plan or {}).get("clips", [])}
     fps = plan_core.FPS
+    first = plan_core.final_start(plan) if plan else 0     # a start video: times counted from the video's first frame
     out_clips = []
     chosen = {str(k): v for k, v in (job.get("takes") or {}).items()}
     for index in range(1, int(job.get("clips") or 0) + 1):
@@ -186,11 +207,12 @@ def build_infos(project_dir: Path, job, report=""):
         except (OSError, ValueError, TypeError):
             pass
         studio = record.get("studio") or {}
-        start = row.get("visible", 0) if index > 1 else 0
+        start = max(row.get("visible", 0), first) - first if (index > 1 or first or (plan or {}).get("start_video")) else 0
+        stop = (row.get("end") or 0) - first
         out_clips.append({
             "index": index, "name": clip.get("name") or row.get("name"),
-            "video": {"start_frame": start, "end_frame": row.get("end"), "start_s": round(start / fps, 3),
-                      "end_s": round((row.get("end") or 0) / fps, 3)},
+            "video": {"start_frame": start, "end_frame": stop, "start_s": round(start / fps, 3),
+                      "end_s": round(stop / fps, 3)},
             "frames": clip.get("frames"), "continue": bool(clip.get("continue")), "context_frames": row.get("context"),
             "lyrics": clip.get("lyrics"),
             "take": {"id": take_id, "seed": record.get("seed"), "parent": record.get("parent"),
@@ -206,8 +228,10 @@ def build_infos(project_dir: Path, job, report=""):
             "prompt": clip.get("prompt"),
         })
     size = job.get("size") or [None, None]
-    end = rows.get(int(job.get("clips") or 0), {}).get("end") or 0
+    end = (rows.get(int(job.get("clips") or 0), {}).get("end") or 0) - first
     created = time.strftime("%Y-%m-%d %H:%M:%S")
+    sv = (plan or {}).get("start_video")
+    ev = (plan or {}).get("edit_video")
     data = {
         "video": {"file": f"{job['export']}.mp4", "project": job["project"], "created": created,
                   "studio_version": projects.STUDIO_VERSION, "clips": job.get("clips"),
@@ -216,6 +240,12 @@ def build_infos(project_dir: Path, job, report=""):
         "branch": {"id": job.get("branch"), "name": job.get("branch_name"), "size": size,
                     "ref_image_size": job.get("ref_image_size"), "song": job.get("song_file")},
         "clips": out_clips,
+        **({"start_video": {"ref": sv["ref"], "file": ((job.get("spec") or {}).get("start_video") or {}).get("video"),
+                            "segment_s": [round(sv["start_frame"] / fps, 3), round(sv["end_frame"] / fps, 3)],
+                            "in_video": sv["in_assembly"], "song": sv["song"]}} if sv else {}),
+        **({"edit_video": {"ref": ev["ref"], "file": ((job.get("spec") or {}).get("edit_video") or {}).get("video"),
+                           "segment_s": [round(ev["start_frame"] / fps, 3), round(ev["end_frame"] / fps, 3)],
+                           "sound": ev["sound"]}} if ev else {}),
         "assembly_report": report,
         "invalidated_takes": (job.get("rewrite") or {}).get("invalid") or [],
         "warnings": (job.get("rewrite") or {}).get("warnings") or [],
@@ -322,6 +352,18 @@ def clip_needs(plan, index, settings):
         refs.append({"name": name, "image": chosen.get("image") or None, "voice": (chosen.get("voice") or None) if free else None})
     if not free and not settings.get("song"):
         problems.append(_t("engine.song_not_chosen"))
+    spec = plan.get("start_video")
+    if index == 1 and clip["continue"] and spec:      # clip 1 continues the start video
+        chosen = (settings.get("refs") or {}).get(spec["ref"]) or {}
+        if not chosen.get("video"):
+            problems.append(_t("engine.start_video_not_chosen"))
+        refs.append({"name": spec["ref"], "image": None, "voice": None, "video": chosen.get("video") or None})
+    edit = plan.get("edit_video")
+    if edit and plan_core.edit_slice(plan, index):    # the clips inside the segment edit their slice of the video
+        chosen = (settings.get("refs") or {}).get(edit["ref"]) or {}
+        if not chosen.get("video"):
+            problems.append(_t("engine.edit_video_not_chosen"))
+        refs.append({"name": edit["ref"], "image": None, "voice": None, "video": chosen.get("video") or None})
     return refs, problems
 
 
@@ -483,8 +525,10 @@ def add_upscale(p, job, model):
     return p
 
 
-def missing_nodes(info, settings, music=False, upscale=None):
+def missing_nodes(info, settings, music=False, upscale=None, video=False):
     need = list(NEEDED_NODES)
+    if video:
+        need.append("H3PlanVideo")
     if upscale:
         need += UPSCALE_NODES + UPSCALER_NODES[upscale["upscaler"]]
         if upscale.get("pass2_loras"):
@@ -501,6 +545,8 @@ def missing_nodes(info, settings, music=False, upscale=None):
     clip = info.get("H3PlanClip")
     if clip and "take_token" not in ((clip.get("input") or {}).get("optional") or {}):
         missing.append(_t("engine.h3planclip_up_to_date_plugin_comfyui"))
+    elif clip and "H3PlanVideo" not in info and "H3PlanVideo" not in missing:
+        missing.append(_t("engine.plugin_too_old_plan_v4"))     # plans are version 4 since Encore 0.30
     return missing
 
 
@@ -649,6 +695,7 @@ class Engine:
         self.info = None
         self.info_time = 0
         self.previews = {}          # prompt id -> (image bytes, mime type)
+        self.local_procs = {}       # job id -> ffmpeg process of an assembly made by Encore
         self.diagnostic = Diagnostic(Path(studio.config_path).resolve().parent) if studio.config.get("diagnostic_preview", False) else None
         self.wake = threading.Event()
         self._load_queue()
@@ -709,6 +756,8 @@ class Engine:
         for job in data.get("jobs") or []:
             if job.get("id") and job["id"] not in self.jobs:
                 job["progress"] = None
+                if job.get("local") and job["status"] in ACTIVE:     # Encore closed during its own assembly
+                    job.update(status="queued", local=None, step=None)
                 if "dispatched" not in job:         # jobs of earlier versions: sent to ComfyUI at once
                     job["dispatched"], job["prompt_id"] = True, job["id"]
                 self.jobs[job["id"]] = job
@@ -1134,6 +1183,13 @@ class Engine:
                         client.interrupt(j["prompt_id"])
             except comfy.ComfyError as exc:
                 raise StudioError(str(exc)) from exc
+        for job in targets:
+            proc = self.local_procs.get(job["id"])
+            if proc is not None:
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
         with self.lock:
             for job in targets:
                 self.jobs.pop(job["id"], None)
@@ -1143,7 +1199,7 @@ class Engine:
             self._save(name)
             self._save_queue()
         for job in targets:
-            if job.get("kind") == "assemble":
+            if job.get("kind") == "assemble" and job.get("dispatched"):
                 self._purge_workspace(client, job)
         self.wake.set()
         return self.list_jobs(name)
@@ -1428,9 +1484,28 @@ class Engine:
             info = self._object_info()
         except comfy.ComfyError as exc:
             raise StudioError(str(exc)) from exc
-        missing = [n for n in ["VAELoader", "H3PlanAssemble"] + ([] if free else ["LoadAudio"]) if n not in info]
+        start = plan.get("start_video") if (plan.get("start_video") or {}).get("in_assembly") else None
+        edit = plan.get("edit_video") if (plan.get("edit_video") or {}).get("sound") == "original" else None
+        missing = [n for n in ["VAELoader", "H3PlanAssemble"] + ([] if free else ["LoadAudio"])
+                   + (["H3PlanVideo", "MiniMaxH3AudioVAECompatibility"] if start else [])
+                   + (["H3PlanVideo"] if edit else []) if n not in info]
         if missing:
-            raise StudioError(_t("engine.nodes_missing_from_comfyui") + ", ".join(missing))
+            raise StudioError(_t("engine.nodes_missing_from_comfyui") + ", ".join(missing)
+                              + (_t("engine.video_node_needs_plugin") if "H3PlanVideo" in missing else ""))
+        start_video = None
+        if start:                                     # the segment opens the video: the project's start video
+            rel = (projects.effective_refs(path, branch, plan).get(start["ref"]) or {}).get("video")
+            video_file = projects.safe_join(path, rel or "")
+            if not rel or not video_file.is_file():
+                raise StudioError(_t("engine.start_video_not_chosen"))
+            start_video = {"name": start["ref"], "video": rel, "sha": takes.file_sha(video_file)}
+        edit_video = None
+        if edit:                                      # the final video keeps the edited video's sound
+            rel = (projects.effective_refs(path, branch, plan).get(edit["ref"]) or {}).get("video")
+            video_file = projects.safe_join(path, rel or "")
+            if not rel or not video_file.is_file():
+                raise StudioError(_t("engine.edit_video_not_chosen"))
+            edit_video = {"name": edit["ref"], "video": rel, "sha": takes.file_sha(video_file)}
         if not free and not projects.safe_join(path, branch.get("song") or "").is_file():
             raise StudioError(_t("engine.song_of_branch_not_found", v0=branch['name']))
         # the state that produced this video, to come back to it (later for a planned assembly)
@@ -1439,9 +1514,10 @@ class Engine:
                                 selection={**{str(k): v for k, v in chosen.items()}, "branch": branch_id})
         size = list(rewrite["size"]) if rewrite and rewrite.get("size") else [branch.get("width"), branch.get("height")]
         job = {"id": "j" + uuid.uuid4().hex[:15], "prompt_id": None, "dispatched": False,
-               "spec": {"raw": raw, "mode": plan["mode"], "settings": settings, "song": None if free else branch.get("song")},
+               "spec": {"raw": raw, "mode": plan["mode"], "settings": settings, "song": None if free else branch.get("song"),
+                        "start_video": start_video, "edit_video": edit_video},
                "project": name, "branch": branch_id, "kind": "assemble", "clips": count,
-               "frames": int(plan_core.timeline(plan)[count - 1]["end"]),
+               "frames": int(plan_core.timeline(plan)[count - 1]["end"]) - plan_core.final_start(plan),
                "workspace": workspace, "leaf": leaf,
                "takes": {str(k): v for k, v in chosen.items()}, "pending": {str(k): v for k, v in (pending or {}).items()},
                "parentJob": parent_job, "waitFor": list(wait_for or []), "lot": lot, "lot_label": lot_label,
@@ -1547,9 +1623,10 @@ class Engine:
             base2 = [{"name": l["name"], "strength": float(l["strength"])} for l in projects.active_loras({"loras": upscale["pass2_loras"]})]
             upscale["pass2_loras"] = [dict(l, enabled=True) for l in projects.merge_loras(base2, extra_loras)]
         context_latent = 0
-        if upscale and clip["continue"] and index > 1:
-            context_latent = latent_frames(int(plan_core.timeline(plan)[index - 1]["context"]))
-        refs, problems = clip_needs(plan, index, {"refs": branch.get("refs") or {}, "song": branch.get("song") or ""})
+        if upscale and clip["continue"]:     # clip 1 too when it continues the start video
+            context = int(plan_core.timeline(plan)[index - 1]["context"])
+            context_latent = latent_frames(context) if context else 0
+        refs, problems = clip_needs(plan, index, {"refs": projects.effective_refs(path, branch, plan), "song": branch.get("song") or ""})
         if problems:
             raise StudioError(_t("engine.clip_references_button_of_branch", index=index, v1=', '.join(problems), v2=branch['name']))
 
@@ -1568,11 +1645,13 @@ class Engine:
             info = self._object_info()
         except comfy.ComfyError as exc:
             raise StudioError(str(exc)) from exc
-        missing = missing_nodes(info, settings, music=not free, upscale=upscale)
+        missing = missing_nodes(info, settings, music=not free, upscale=upscale,
+                                video=any(r.get("video") for r in refs))
         if missing:
             raise StudioError(_t("engine.nodes_missing_from_comfyui") + ", ".join(missing)
                               + (_t("engine.kjnodes_preview_install_comfyui_kjnodes_or")
-                                 if "ModelPreviewOverrideKJ" in missing else ""))
+                                 if "ModelPreviewOverrideKJ" in missing else "")
+                              + (_t("engine.video_node_needs_plugin") if "H3PlanVideo" in missing else ""))
         if extra_loras:
             known = set(((((info.get("LoraLoaderModelOnly") or {}).get("input") or {}).get("required") or {}).get("lora_name") or [[]])[0] or [])
             unknown = [l["name"] for l in extra_loras if known and l["name"] not in known]
@@ -1582,8 +1661,8 @@ class Engine:
         files = {}
         for ref in refs:
             files[ref["name"]] = {"image": None, "voice": None, "image_sha": None, "voice_sha": None}
-            for kind in ("image", "voice"):
-                if ref[kind]:
+            for kind in ("image", "voice", "video"):
+                if ref.get(kind):
                     local_file = projects.safe_join(path, ref[kind])
                     if not local_file.is_file():
                         raise StudioError(_t("engine.file_of_not_found", v0=ref['name'], v1=ref[kind]))
@@ -1602,8 +1681,10 @@ class Engine:
 
         studio_info = {
             "branch": branch_id,
-            "refs": {n: {"image": f["image_sha"], "voice": f["voice_sha"]} for n, f in files.items()},
-            "files": {n: {"image": f["image"], "voice": f["voice"]} for n, f in files.items()},
+            "refs": {n: {"image": f["image_sha"], "voice": f["voice_sha"], **({"video": f["video_sha"]} if f.get("video") else {})}
+                     for n, f in files.items()},
+            "files": {n: {"image": f["image"], "voice": f["voice"], **({"video": f["video"]} if f.get("video") else {})}
+                      for n, f in files.items()},
             "width": int(settings["width"]), "height": int(settings["height"]),
             "ref_image_size": branch.get("ref_image_size") or projects.DEFAULT_REF_SIZE,
             **({"song": song_sha, "song_file": branch["song"]} if not free else {}),
@@ -1650,13 +1731,13 @@ class Engine:
         sent_refs = []
         for ref_name in spec["refs"]:
             f = spec["files"].get(ref_name) or {}
-            item = {"name": ref_name, "image": None, "voice": None}
-            for kind in ("image", "voice"):
+            item = {"name": ref_name, "image": None, "voice": None, "video": None}
+            for kind in ("image", "voice", "video"):
                 if f.get(kind):
                     local_file = projects.safe_join(path, f[kind])
                     if not local_file.is_file() or takes.file_sha(local_file) != f.get(kind + "_sha"):
                         raise StudioError(_t("engine.the_file_of_has_changed_or", ref_name=ref_name, v1=f[kind]))
-                    item[kind] = self._send_input(client, local_file, f[kind + "_sha"], f"{INPUT_DIR}/{name}")
+                    item[kind] = self._send_input(client, local_file, f[kind + "_sha"], f"{INPUT_DIR}/{name}", job=job)
             sent_refs.append(item)
         song = None
         if spec.get("song"):
@@ -1675,20 +1756,91 @@ class Engine:
         })
         return client.queue_prompt(workflow, self.client_id, {"project": name, "clip": index, "token": job["token"]})
 
-    def _dispatch_assembly(self, client, job):
-        name, spec = job["project"], job["spec"]
-        path, raw, workspace = self._project(name), spec["raw"], job["workspace"]
+    def _resolve_assembly(self, job):
+        """The takes of a planned assembly (generations it waited for) and its checkpoint, known only now."""
+        name = job["project"]
         for clip_key, jid in list((job.get("pending") or {}).items()):
             other = self.jobs.get(jid)
             if not other or not other.get("take"):
                 raise StudioError(_t("engine.the_take_of_clip_does_not", clip_key=clip_key))
             job["takes"][clip_key] = other["take"]
             del job["pending"][clip_key]
-        if not job.get("checkpoint"):                   # planned assembly: the state is known only now
+        if not job.get("checkpoint"):
             cp = checkpoints.create(self.studio.root, name, label=_t("engine.assembly_3", v0=job['export']), kind="auto",
                                     reason=_t("engine.assembly_of_mp4_2", v0=job['export']), limit=self.studio.config.get("checkpoint_limit", 0),
                                     selection={**{str(k): v for k, v in job["takes"].items()}, "branch": job["branch"]})
             job["checkpoint"] = cp["id"]
+
+    def _local_assemblies(self):
+        """Assemblies Encore makes itself with ffmpeg from the takes' previews, beside ComfyUI's work (one at a
+        time). One that cannot (no ffmpeg, a take without preview, invalidated takes) goes to the plugin."""
+        self._sweep_orphans()
+        with self.lock:
+            if self.paused or any(j.get("local") and j["status"] == "running" for j in self.jobs.values()):
+                return
+            job = next((self.jobs[i] for i in self.order if i in self.jobs and self.jobs[i]["kind"] == "assemble"
+                        and self.jobs[i].get("local") is not False and self._ready(self.jobs[i])), None)
+            if job is None:
+                return
+            try:
+                self._resolve_assembly(job)
+            except (StudioError, OSError, ValueError) as exc:
+                return self._fail(job, str(exc))
+            path = self._project(job["project"])
+            ffmpeg, why = (None, "invalidated takes") if job.get("rewrite") else assembler.ready_for(path, job, self.studio.config)
+            if ffmpeg is None:
+                job["local"] = False
+                print(f"[Encore] assembly {job['export']} by the plugin: {why}", flush=True)
+                self._save(job["project"])
+                return
+            job.update(local=True, status="running", t_start=time.time(), step=_t("assembler.step", pct=0),
+                       progress={"value": 0, "max": 100})
+            if job["id"] in self.order:
+                self.order.remove(job["id"])
+            self._save(job["project"])
+            self._save_queue()
+        threading.Thread(target=self._run_local_assembly, args=(job, path, ffmpeg), daemon=True,
+                         name=f"encore-assemble-{job['id']}").start()
+
+    def _run_local_assembly(self, job, path, ffmpeg):
+        def progress(share):
+            pct = int(100 * share)
+            job["step"], job["progress"] = _t("assembler.step", pct=pct), {"value": pct, "max": 100}
+        try:
+            target = path / "exports" / f"{job['export']}.mp4"
+            report = assembler.build(path, job, ffmpeg, target, on_progress=progress, procs=self.local_procs)
+            if job["id"] not in self.jobs:          # cancelled meanwhile
+                target.unlink(missing_ok=True)
+                return
+            self._write_export(path, job, report)
+            with self.lock:
+                job["status"], job["ended"], job["progress"], job["step"] = "done", time.time(), None, None
+                self._save(job["project"])
+        except Exception as exc:  # noqa: BLE001 - the job shows the error
+            if job["id"] in self.jobs:
+                self._fail(job, str(exc))
+        finally:
+            self.wake.set()
+
+    def _write_export(self, path, job, report):
+        """The information file of an assembled video (exports/<name>.json and its infos)."""
+        info = {"name": job["export"], "created": time.time(), "branch": job.get("branch"), "branch_name": job.get("branch_name"),
+                "clips": job.get("clips"), "takes": {str(k): v for k, v in (job.get("takes") or {}).items()},
+                "checkpoint": job.get("checkpoint"), "size": job.get("size"), "report": report, "prompt_id": job.get("prompt_id"),
+                "assembled_by": "ffmpeg" if job.get("local") else "plugin"}
+        meta = path / "exports" / f"{job['export']}.json"
+        tmp = meta.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(info, indent=1, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, meta)
+        try:
+            write_infos(path, job, report)
+        except Exception as exc:          # never lose a video because of its information file
+            print(_t("engine.encore_infos_of_not_written", v0=job['export'], exc=exc), flush=True)
+
+    def _dispatch_assembly(self, client, job):
+        name, spec = job["project"], job["spec"]
+        path, raw, workspace = self._project(name), spec["raw"], job["workspace"]
+        self._resolve_assembly(job)
         plan_file = self._send_plan(client, name, workspace, raw, settings_branch=job["branch"])
         chosen = {int(k): v for k, v in job["takes"].items()}
         sent_plan = plan_core.normalize(json.loads(json.dumps(raw))) if job.get("rewrite") else None
@@ -1708,7 +1860,22 @@ class Engine:
             if not song_file.is_file():
                 raise StudioError(_t("engine.song_not_found", v0=spec['song']))
             song = self._send_input(client, song_file, takes.file_sha(song_file), "", prefix=f"{INPUT_DIR}_{name}_")
-        workflow = assemble_workflow(plan_file, spec["mode"], job["clips"], spec["settings"], song)
+        start_video = None
+        if spec.get("start_video"):
+            sv = spec["start_video"]
+            video_file = projects.safe_join(path, sv["video"])
+            if not video_file.is_file() or takes.file_sha(video_file) != sv["sha"]:
+                raise StudioError(_t("engine.the_file_of_has_changed_or", ref_name=sv["name"], v1=sv["video"]))
+            start_video = {"name": sv["name"], "video": self._send_input(client, video_file, sv["sha"], f"{INPUT_DIR}/{name}", job=job)}
+        edit_video = None
+        if spec.get("edit_video"):
+            ev = spec["edit_video"]
+            video_file = projects.safe_join(path, ev["video"])
+            if not video_file.is_file() or takes.file_sha(video_file) != ev["sha"]:
+                raise StudioError(_t("engine.the_file_of_has_changed_or", ref_name=ev["name"], v1=ev["video"]))
+            edit_video = {"name": ev["name"], "video": self._send_input(client, video_file, ev["sha"], f"{INPUT_DIR}/{name}", job=job)}
+        workflow = assemble_workflow(plan_file, spec["mode"], job["clips"], spec["settings"], song,
+                                     start_video=start_video, size=job.get("size"), edit_video=edit_video)
         return client.queue_prompt(workflow, self.client_id, {"project": name, "kind": "assemble", "branch": job["branch"]})
 
     def _ready(self, job):
@@ -1751,7 +1918,8 @@ class Engine:
                     return
                 if any(j["status"] == "harvest" for j in self.jobs.values()):
                     return
-                job = next((self.jobs[i] for i in self.order if i in self.jobs and self._ready(self.jobs[i])), None)
+                job = next((self.jobs[i] for i in self.order if i in self.jobs and self._ready(self.jobs[i])
+                            and not (self.jobs[i]["kind"] == "assemble" and self.jobs[i].get("local") is not False)), None)
                 if job is None:
                     return
             client = self.client
@@ -1792,19 +1960,67 @@ class Engine:
         meta = projects.read_meta(self._project(name))
         copy["ref_image_size"] = next((b.get("ref_image_size") for b in meta["branches"] if b["id"] == (settings_branch or branch)), None) \
             or projects.DEFAULT_REF_SIZE        # a branch setting: the plan does not hold it any more
-        copy["version"] = 3
+        # version 5 only for an edited video: plans without one stay readable by the plugin 3.7
+        copy["version"] = plan_core.PLAN_VERSION if copy.get("edit_video") else 4
         data = (json.dumps(copy, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
-        return client.upload(data, "plan.json", f"{INPUT_DIR}/{name}/{branch}", "input")
+        return self._put(client, data, "plan.json", f"{INPUT_DIR}/{name}/{branch}", "input")
 
-    def _send_input(self, client, local_file: Path, sha, subfolder, prefix=""):
-        """A project file in ComfyUI's input folder, named after its content (sent once)."""
+    def _send_input(self, client, local_file: Path, sha, subfolder, prefix="", job=None):
+        """A project file in ComfyUI's input folder, named after its content (sent once; a big file shows its
+        progress on the job)."""
         stem, ext = os.path.splitext(local_file.name)
         name = f"{prefix}{stem[:40]}_{sha[:10]}{ext.lower()}"
         key = (self.studio.config["comfy_url"], subfolder, name)
         if self.uploaded.get(key) != sha:
-            client.upload(local_file.read_bytes(), name, subfolder, "input")
+            def progress(sent, total):
+                if job is not None and total > 8 * 1024 * 1024:
+                    job["step"] = _t("engine.sending_to_comfyui", file=local_file.name, v1=int(100 * sent / total))
+            self._put(client, local_file, name, subfolder, "input", progress, named_by_content=True)
             self.uploaded[key] = sha
         return f"{subfolder}/{name}" if subfolder else name
+
+    def _put(self, client, data, name, subfolder, kind, progress=None, named_by_content=False):
+        """A file (bytes, or the path of a file) into ComfyUI's input or output folder; returns its path there.
+        When ComfyUI's folder is known (configuration) the file is written straight into it: no size limit. Otherwise,
+        or if ComfyUI does not see that copy (another input folder, another machine), it goes through ComfyUI's upload
+        route, which refuses files over its --max-upload-size (100 MB by default)."""
+        rel = f"{subfolder}/{name}" if subfolder else name
+        if self._copy_into(client, data, name, subfolder, kind, progress, named_by_content):
+            return rel
+        try:
+            return client.upload(data, name, subfolder, kind, progress=progress)
+        except comfy.ComfyError as exc:
+            if exc.status == 413:
+                size = len(data) if isinstance(data, (bytes, bytearray)) else Path(data).stat().st_size
+                label = name if isinstance(data, (bytes, bytearray)) else Path(data).name
+                raise StudioError(_t("engine.upload_too_big", file=label, v1=f"{size / 1024 ** 2:.0f}")) from exc
+            raise
+
+    def _copy_into(self, client, data, name, subfolder, kind, progress, named_by_content):
+        root = comfy_setup.comfy_root(self.studio.config.get("comfy_dir"))
+        if root is None:
+            return False
+        folder = root / kind / subfolder if subfolder else root / kind
+        target = folder / name
+        try:
+            size = len(data) if isinstance(data, (bytes, bytearray)) else Path(data).stat().st_size
+            if not (named_by_content and target.is_file() and target.stat().st_size == size):
+                folder.mkdir(parents=True, exist_ok=True)
+                part = target.with_name(target.name + ".part")
+                if isinstance(data, (bytes, bytearray)):
+                    part.write_bytes(data)
+                else:
+                    sent = 0
+                    with open(data, "rb") as src, open(part, "wb") as dst:
+                        for chunk in iter(lambda: src.read(8 * 1024 * 1024), b""):
+                            dst.write(chunk)
+                            sent += len(chunk)
+                            if progress:
+                                progress(sent, size)
+                os.replace(part, target)
+        except OSError:
+            return False
+        return client.exists(name, subfolder, kind)
 
     def _send_take(self, client, name, branch, path, index, record):
         key = (index, record["id"])
@@ -1813,9 +2029,9 @@ class Engine:
             return
         pt, meta, _mp4 = takes.take_files(path, index, record["id"])
         sub = f"h3_clip_plan/{mirror_name(name, branch)}/latents/clip_{index:03d}"
-        client.upload(pt.read_bytes(), pt.name, sub, "output")
+        self._put(client, pt, pt.name, sub, "output")
         data = {k: v for k, v in record.items() if k != "id"}
-        client.upload(json.dumps(data, indent=1).encode("utf-8"), meta.name, sub, "output")
+        self._put(client, json.dumps(data, indent=1).encode("utf-8"), meta.name, sub, "output")
         present.add(key)
 
     def _send_chain(self, client, name, branch, path, raw, index, take_id):
@@ -1958,6 +2174,7 @@ class Engine:
 
     def _poll(self):
         self._follow()
+        self._local_assemblies()
         self._dispatch_next()
 
     def _follow(self):
@@ -2113,17 +2330,7 @@ class Engine:
             target = path / "exports" / f"{job['export']}.mp4"
             client.download(video["filename"], video.get("subfolder", ""), str(target), video.get("type", "output"))
             report = (outputs.get("text") or [""])[0]
-            info = {"name": job["export"], "created": time.time(), "branch": job.get("branch"), "branch_name": job.get("branch_name"),
-                    "clips": job.get("clips"), "takes": {str(k): v for k, v in (job.get("takes") or {}).items()},
-                    "checkpoint": job.get("checkpoint"), "size": job.get("size"), "report": report, "prompt_id": job.get("prompt_id")}
-            meta = path / "exports" / f"{job['export']}.json"
-            tmp = meta.with_suffix(".json.tmp")
-            tmp.write_text(json.dumps(info, indent=1, ensure_ascii=False), encoding="utf-8")
-            os.replace(tmp, meta)
-            try:
-                write_infos(path, job, report)
-            except Exception as exc:          # never lose a video because of its information file
-                print(_t("engine.encore_infos_of_not_written", v0=job['export'], exc=exc), flush=True)
+            self._write_export(path, job, report)
             with self.lock:
                 job["status"], job["ended"], job["progress"] = "done", time.time(), None
                 self._record_timing(job)
