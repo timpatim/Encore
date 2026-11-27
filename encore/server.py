@@ -22,7 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from . import mdpage, engine as engine_mod, comfy_setup, downloads, exports
-from . import folders, plan_core, plans, previews, projects, resources, takeplan, takes, trash
+from . import folders, latents, plan_core, plans, previews, projects, resources, takeplan, takes, trash
 from .projects import StudioError
 
 STUDIO_ROOT = Path(__file__).resolve().parent.parent
@@ -309,8 +309,12 @@ def make_handler(studio: Studio):
                 branch = branch or (meta["branches"][0]["id"] if meta["branches"] else None)
             twig = plans.plan_of(path, branch, leaf, pending=studio.engine._pending_takes(name), project_name=name)
             errors, warnings = plan_core.validate(json.loads(json.dumps(twig["plan"])))
-            return dict(twig, branch=branch, leaf=leaf, takes={str(k): v for k, v in twig["takes"].items()},
-                        validation={"errors": errors, "warnings": warnings})
+            out = dict(twig, branch=branch, leaf=leaf, takes={str(k): v for k, v in twig["takes"].items()},
+                       validation={"errors": errors, "warnings": warnings})
+            if plans.holes_of(path, branch):
+                # 0.49: before the last clip taken over, the clips keep their length and their link
+                out["lock_length"] = list(range(1, max(plans.kept_of(path, branch))))
+            return out
 
         def takes_listing(self, name):
             """The takes, with the clip names of the selected twig's plan for the column headers."""
@@ -324,6 +328,15 @@ def make_handler(studio: Studio):
             out = takes.listing(path, names)
             out["twig"] = selected
             out["fits"] = plans.fits_map(path)
+            # the master line of each branch (0.48): the clips of its master plan, the frozen ones
+            out["masters"] = {}
+            data = plans.load(path)
+            for branch in projects.read_meta(path)["branches"]:
+                master = data["masters"].get(branch["id"]) or {}
+                frozen = plans.frozen_of(path, branch["id"], pending=studio.engine._pending_takes(name))
+                out["masters"][branch["id"]] = {"clips": [{"name": c.get("name") or "", "continue": bool(c.get("continue"))}
+                                                          for c in master.get("clips") or [] if isinstance(c, dict)],
+                                                "frozen": frozen["clips"] if frozen else 0}
             return out
 
         # ---------------------------------------------------------- routing
@@ -492,6 +505,14 @@ def make_handler(studio: Studio):
                 rest = api[2:]
                 if not rest and method == "GET":
                     return self.send_json(projects.read_project(root, name))
+                if rest == ["summary"] and method == "GET":         # what deleting it would remove
+                    return self.send_json(dict(projects.project_summary(root, name), busy=studio.engine.project_busy(name)))
+                if not rest and method == "DELETE":                  # for good (the page asks first)
+                    if studio.engine.project_busy(name):
+                        raise StudioError(_t("server.project_busy"), code="busy")
+                    out = projects.delete_project(root, name, studio.config.get("comfy_dir"))
+                    studio.engine.forget_project(name)
+                    return self.send_json(out)
                 if rest == ["plan"] and method == "GET":
                     # the plan of a twig (leaf = its last take) or the master plan of a branch (no leaf)
                     return self.send_json(self.twig_plan(name, query.get("branch"), query.get("leaf") or None))
@@ -507,6 +528,12 @@ def make_handler(studio: Studio):
                         raise StudioError(_t("server.plan_branch_missing"))
                     out = projects.save_plan(root, name, plan, branch, leaf)
                     return self.send_json(dict(out, **self.twig_plan(name, branch, leaf)))
+                if rest == ["plan", "compose"] and method == "POST":
+                    # the composed H3 prompt of every clip of a plan being edited (nothing saved)
+                    body = self.json_body() or {}
+                    plan = body.get("plan") if isinstance(body.get("plan"), dict) else body
+                    plan = dict(plan, project=projects.project_dir(root, name).name)
+                    return self.send_json(plan_core.preview(plan))
                 if rest == ["settings"] and method == "PUT":
                     return self.send_json(projects.save_settings(root, name, self.json_body()))
                 if rest == ["import-plan"] and method == "POST":
@@ -532,7 +559,8 @@ def make_handler(studio: Studio):
                     return self.send_json(studio.engine.generate(
                         name, body.get("clip"), after=body.get("after"), plan_from=body.get("plan_from"), entry=body.get("entry"),
                         seed=body.get("seed"), branch=body.get("branch"), loras=body.get("loras"),
-                        upscale_settings=body.get("upscale_settings"), edit_instruction=body.get("edit_instruction")))
+                        upscale_settings=body.get("upscale_settings"), edit_instruction=body.get("edit_instruction"),
+                        line=bool(body.get("line"))))
                 if len(rest) == 3 and rest[0] == "branches" and rest[2] == "fill" and method == "POST":
                     body = self.json_body() or {}
                     return self.send_json(studio.engine.fill_twig(name, rest[1], leaf=body.get("leaf") or None,
@@ -540,23 +568,23 @@ def make_handler(studio: Studio):
                                                                   assemble=bool(body.get("assemble", True))))
                 if rest == ["branches"] and method == "POST":
                     # « + nouvelle branche »: empty, from a plan file (?how=file&filename=…, the file as body), or a
-                    # duplicate of a branch, with or without the clips of a twig ({how: copy|clips, source, leaf, upto})
+                    # duplicate of a branch, with or without the clips of a twig ({how: copy|clips, source, leaf, upto | keep})
                     if query.get("how") == "file":
                         out = projects.new_branch(root, name, "file", data=self.body(), filename=query.get("filename", "plan.json"),
                                                   label=query.get("name"))
                     else:
                         body = self.json_body() or {}
                         out = projects.new_branch(root, name, body.get("how") or "empty", source=body.get("source"),
-                                                  leaf=body.get("leaf"), upto=body.get("upto"), label=body.get("name"))
+                                                  leaf=body.get("leaf"), upto=body.get("upto"), label=body.get("name"), keep=body.get("keep"))
                     out["project"] = projects.read_project(root, name)
                     return self.send_json(out)
                 if len(rest) == 2 and rest[0] == "branches" and method == "PUT":
                     body = self.json_body() or {}
-                    if any(k in body for k in ("refs", "song", "width", "height", "ref_image_size")):
+                    if any(k in body for k in ("song", "width", "height", "ref_image_size")):
                         meta = projects.read_meta(projects.project_dir(root, name))
                         branch = projects.find_branch(meta["branches"], rest[1])
                         default = meta["branches"][0]["id"]
-                        changed = ("refs" in body and body["refs"] != branch.get("refs")) or ("song" in body and (body["song"] or "") != (branch.get("song") or "")) \
+                        changed = ("song" in body and (body["song"] or "") != (branch.get("song") or "")) \
                             or any(k in body and int(body[k]) != int(branch.get(k) or 0) for k in ("width", "height")) \
                             or ("ref_image_size" in body and body["ref_image_size"] != branch.get("ref_image_size"))
                         if changed and studio.engine.active_in_branch(name, rest[1], default):
@@ -595,7 +623,11 @@ def make_handler(studio: Studio):
                         return self.send_json(studio.engine.assemble(name, None, None, job_id=body["job"]))
                     if not body.get("clip") or not body.get("take"):
                         raise StudioError(_t("server.assembly_give_the_last_take_of"))
-                    return self.send_json(studio.engine.assemble(name, body["clip"], body["take"]))
+                    return self.send_json(studio.engine.assemble(name, body["clip"], body["take"], branch=body.get("branch")))
+                if rest == ["convert-latents"]:
+                    # 0.50: the takes' latents written by the plugin (.pt) rewritten in MultiRef's format, once
+                    path = projects.project_dir(root, name)
+                    return self.send_json(latents.start_conversion(path) if method == "POST" else latents.conversion(path))
                 if rest == ["exports"] and method == "GET":
                     return self.send_json({"exports": exports.list_exports(projects.project_dir(root, name))})
                 if rest == ["jobs"] and method == "GET":
@@ -629,7 +661,7 @@ def make_handler(studio: Studio):
                     return self.send_json(out)
                 if rest == ["use-plan"] and method == "POST":
                     body = self.json_body() or {}
-                    return self.send_json(projects.use_twig_plan(root, name, body.get("branch"), body.get("leaf"), body.get("target") or "master",
+                    return self.send_json(projects.use_twig_plan(root, name, body.get("branch"), body.get("leaf"),
                                                                  body.get("name"), pending=studio.engine._pending_takes(name)))
                 if rest == ["trash"] and method == "GET":
                     return self.send_json(trash.listing(root, name))
@@ -663,10 +695,18 @@ def make_handler(studio: Studio):
                     if method == "POST":
                         return self.send_json(previews.thumb_start(root, name, rel, first, last, studio.config))
                 if rest == ["resources", "usage"] and method == "GET":
-                    return self.send_json(resources.usage(root, name, query.get("path", "")))
+                    return self.send_json(resources.usage(root, name, query.get("path", ""), studio.engine.files_waiting(name)))
+                if rest == ["resources", "usages"] and method == "GET":     # every file: used, by takes only, unused
+                    return self.send_json(resources.usages(root, name, studio.engine.files_waiting(name)))
+                if rest == ["resources", "delete-unused"] and method == "POST":
+                    body = self.json_body() or {}
+                    out = resources.delete_unused(root, name, list(body.get("paths") or []), studio.engine.files_waiting(name),
+                                                  comfy_dir=studio.config.get("comfy_dir"))
+                    studio.engine.uploaded = {}         # sent again if they are ever imported back
+                    return self.send_json(out)
                 if rest == ["resources"] and method == "DELETE":
                     out = resources.delete(root, name, query.get("path", ""), confirm=query.get("confirm") == "1",
-                                           comfy_dir=studio.config.get("comfy_dir"))
+                                           comfy_dir=studio.config.get("comfy_dir"), busy=studio.engine.files_waiting(name))
                     if out.get("sha"):        # sent again if it is ever imported back
                         studio.engine.uploaded = {k: v for k, v in studio.engine.uploaded.items() if v != out["sha"]}
                     return self.send_json(out)

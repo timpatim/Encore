@@ -1,5 +1,6 @@
 // ---------------------------------------------------------------------------------------------
-// H3 Clip Plan - plan logic (pure functions, port of core.py v6). No DOM access in this part.
+// H3 Clip Plan - plan logic (pure functions, port of core.py v7: timing and checks; the H3 prompt itself is composed by
+// the server, POST /plan/compose). No DOM access in this part.
 // ---------------------------------------------------------------------------------------------
 const H3 = (() => {
     const _t = typeof H3I18n !== "undefined" ? H3I18n.t : (id) => id;
@@ -11,20 +12,25 @@ const H3 = (() => {
     const SECTIONS = ["subject_definitions:", "summary:", "retention_analysis:", "detailed_description:",
         "overall_soundscape:", "non_diegetic_music:"];
     const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
-    const PLAN_KEYS = new Set(["version", "project", "mode", "refs_dir", "refs", "width", "height", "context_frames",
+    const PLAN_KEYS = new Set(["version", "project", "mode", "files", "subjects", "width", "height", "context_frames",
         "crossfade_frames", "audio_feather_ticks", "seed", "ref_image_size", "song", "clips", "notes", "start_video", "edit_video"]);
     const START_VIDEO_KEYS = new Set(["ref", "start", "end", "in_assembly", "song"]);
     const START_SONG_CHOICES = ["with_video", "after_video"];
     const EDIT_VIDEO_KEYS = new Set(["ref", "start", "end", "sound", "instruction"]);
-    const EDIT_MARK = "{edit}";     // replaced by edit_video.instruction
     const EDIT_SOUND_CHOICES = ["original", "h3"];
     const EDIT_MIN_FRAMES = 48, EDIT_MAX_FRAMES = 360;    // a reference video lasts 2 to 15 s
-    const PLAN_VERSION = 6;
-    const CLIP_KEYS = new Set(["name", "frames", "continue", "refs", "prompt", "seed", "lyrics", "dialogue", "notes"]);
+    const PLAN_VERSION = 7;
+    const CLIP_KEYS = new Set(["name", "frames", "continue", "anchors", "subjects", "summary", "description", "soundscape", "music",
+        "prompt_override", "defs", "seed", "lyrics", "dialogue", "notes"]);
+    const FILE_KINDS = ["image", "voice", "video"];
+    const SUBJECT_KINDS = ["person", "place", "object", "outfit", "style", "action", "pose"];
+    const KEEPS = ["identical", "partial", "attribute", "loose"], VOICE_KEEPS = ["exact", "partial", "timbre", "loose"];
+    const TEXT_KEYS = ["summary", "description", "soundscape", "music"];
+    // @name in a text (core.MENTION_RE): letters of any alphabet, digits, '_' and '-', not ending with '-'
+    const mentionRe = () => /(?<![\p{L}\p{N}_@])@([\p{L}\p{N}](?:[\p{L}\p{N}_-]*[\p{L}\p{N}_])?)/gu;
+    const SUBJECT_NAME_RE = /^[\p{L}\p{N}](?:[\p{L}\p{N}_-]*[\p{L}\p{N}_])?$/u;
     const DIALOGUE_KEYS = new Set(["speaker", "text", "language"]);
 
-    const placeholderRe = () => /\{(picture|voice):([A-Za-z0-9][A-Za-z0-9_-]*)\}/g;
-    const anyBraceRe = () => /\{(picture|voice|image|audio)\s*:[^}]*\}/gi;
 
     const isInt = (v) => typeof v === "number" && Number.isInteger(v);
     const isRun = (f) => isInt(f) && f >= 5 && (f - 5) % 17 === 0;
@@ -35,10 +41,39 @@ const H3 = (() => {
     const avContextValues = () => { const out = []; for (let n = 5; n <= 243; n += 17) if (isAvBoundary(n)) out.push(n); return out; };
     const mode = (plan) => (plan && MODES.includes(plan.mode) ? plan.mode : "music_video");
 
-    function placeholders(text) {
+    function mentions(text) {
         const out = [];
-        for (const m of String(text || "").matchAll(placeholderRe())) out.push({ kind: m[1], name: m[2] });
+        for (const m of String(text || "").matchAll(mentionRe())) if (!out.includes(m[1])) out.push(m[1]);
         return out;
+    }
+    // the files and subjects a clip sees: the plan's, with its own 'defs' on top (core.clip_definitions)
+    function definitions(plan, clip) {
+        const defs = clip && clip.defs && typeof clip.defs === "object" ? clip.defs : {};
+        return { files: { ...((plan && plan.files) || {}), ...(defs.files || {}) }, subjects: { ...((plan && plan.subjects) || {}), ...(defs.subjects || {}) } };
+    }
+    // the subjects a clip names (core.mentioned_subjects): edit instruction, summary, description, soundscape, music (or
+    // only its prompt written by hand), then the speakers of its dialogue
+    function clipSubjects(plan, clip, index) {
+        const own = clip && clip.defs && typeof clip.defs === "object" && "edit_instruction" in clip.defs ? clip.defs.edit_instruction : undefined;
+        const instruction = index && editSlice(plan, index) ? (own !== undefined ? own : instructionOf(plan)) : null;
+        let texts = [instruction || "", ...TEXT_KEYS.map((k) => String((clip || {})[k] || ""))];
+        if (typeof (clip || {}).prompt_override === "string" && clip.prompt_override.trim()) texts = [clip.prompt_override];
+        const out = [];
+        for (const t of texts) for (const n of mentions(t)) if (!out.includes(n)) out.push(n);
+        for (const d of (clip || {}).dialogue || []) if (d && typeof d.speaker === "string" && d.speaker && !out.includes(d.speaker)) out.push(d.speaker);
+        return out;
+    }
+    // the pictures (then anchors) and voices of a clip, in the order the server numbers them (core.compose_clip)
+    function clipFiles(plan, clip, index) {
+        const { subjects } = definitions(plan, clip);
+        const names = clipSubjects(plan, clip, index).filter((n) => n in subjects);
+        const pictures = [], voices = [];
+        for (const n of names) for (const p of subjects[n].pictures || []) if (p && p.file && !pictures.includes(p.file)) pictures.push(p.file);
+        const a = (clip && clip.anchors) || {};
+        const keys = [...(a.keyframes || [])].filter((k) => k && k.file).sort((x, y) => (x.at || 0) - (y.at || 0));
+        for (const f of [a.first, ...keys.map((k) => k.file), a.last]) if (f && !pictures.includes(f)) pictures.push(f);
+        if (mode(plan) === "free") for (const n of names) { const v = subjects[n].voice; if (v && !voices.includes(v)) voices.push(v); }
+        return { subjects: names, pictures, voices };
     }
 
     function squash(text) {
@@ -75,19 +110,7 @@ const H3 = (() => {
         return { ref: ev.ref, start_frame: startFrame, end_frame: startFrame + frames, frames, sound: ev.sound || "original",
             instruction: typeof ev.instruction === "string" ? ev.instruction : null };
     }
-    // core.expand_edit: {edit} replaced by the common instruction, the references it names added at the end
-    function expandEdit(prompt, refs, instruction) {
-        refs = [...(refs || [])];
-        if (instruction === null || instruction === undefined || typeof prompt !== "string" || !prompt.includes(EDIT_MARK)) return [prompt, refs];
-        for (const p of placeholders(instruction)) if (!refs.includes(p.name)) refs.push(p.name);
-        return [prompt.split(EDIT_MARK).join(instruction), refs];
-    }
     const instructionOf = (plan) => (plan && plan.edit_video && typeof plan.edit_video.instruction === "string" ? plan.edit_video.instruction : null);
-    // a clip as the plugin sees it: prompt and references with {edit} expanded
-    function expandedClip(plan, clip) {
-        const [prompt, refs] = expandEdit(clip.prompt, clip.refs, instructionOf(plan));
-        return { ...clip, prompt, refs };
-    }
     // core.edit_clip_count: the clips ending before the end of the segment edit it; the next ones continue the video
     function editClipCount(plan) {
         const ev = editVideo(plan);
@@ -186,6 +209,75 @@ const H3 = (() => {
             plan.clips.every((c) => c && isRun(c.frames) && c.frames > ctx && c.frames <= HARD_MAX_FRAMES);
     }
 
+    function checkFiles(files, err, n) {
+        if (!files || typeof files !== "object" || Array.isArray(files)) { err(_t("check.files_must_be_an_object"), n); return {}; }
+        const out = {};
+        for (const [name, item] of Object.entries(files)) {
+            if (!NAME_RE.test(name)) { err(_t("check.file_label_letters_digits", { name }), n); continue; }
+            if (!item || typeof item !== "object" || !FILE_KINDS.includes(item.kind)) { err(_t("check.file_kind", { name }), n); continue; }
+            out[name] = item;
+        }
+        return out;
+    }
+    function checkSubjects(subjects, files, err, n) {
+        if (!subjects || typeof subjects !== "object" || Array.isArray(subjects)) { err(_t("check.subjects_must_be_an_object"), n); return {}; }
+        const out = {};
+        for (const [name, item] of Object.entries(subjects)) {
+            if (!SUBJECT_NAME_RE.test(name)) { err(_t("check.subject_name_chars", { name }), n); continue; }
+            if (!item || typeof item !== "object") { err(_t("check.subject_must_be_an_object", { name }), n); continue; }
+            if (!SUBJECT_KINDS.includes(item.kind ?? "person")) err(_t("check.subject_kind", { name }), n);
+            for (const p of item.pictures || []) if (!p || (files[p.file] || {}).kind !== "image") err(_t("check.subject_picture_not_image", { name, file: String(p && p.file) }), n);
+            if (item.voice != null && (files[item.voice] || {}).kind !== "voice") err(_t("check.subject_voice_not_voice", { name, file: String(item.voice) }), n);
+            out[name] = item;
+        }
+        return out;
+    }
+    // the v7 fields of a clip; what needs the composed prompt (a prompt written by hand) is checked by the server
+    function checkClip(plan, clip, n, planFiles, planSubjects, free, err, warn) {
+        let files = planFiles, subjects = planSubjects;
+        if (clip.defs !== undefined) {
+            if (!clip.defs || typeof clip.defs !== "object") err(_t("check.defs_must_be_an_object"), n);
+            else {
+                files = { ...planFiles, ...checkFiles(clip.defs.files ?? {}, err, n) };
+                subjects = { ...planSubjects, ...checkSubjects(clip.defs.subjects ?? {}, files, err, n) };
+            }
+        }
+        for (const k of TEXT_KEYS) if (clip[k] !== undefined && typeof clip[k] !== "string") err(_t("check.text_field", { key: k }), n);
+        const override = typeof clip.prompt_override === "string" && clip.prompt_override.trim();
+        if (!override && !String(clip.summary || "").trim() && !String(clip.description || "").trim()) err(_t("check.clip_needs_a_text"), n);
+        const named = clipSubjects(plan, clip, n);
+        for (const name of named) if (!(name in subjects)) err(_t("check.unknown_subject", { name }), n);
+        const seen = new Set();
+        for (const u of Array.isArray(clip.subjects) ? clip.subjects : []) {
+            if (!u || typeof u.name !== "string") { err(_t("check.subject_setting_needs_a_name"), n); continue; }
+            if (seen.has(u.name)) err(_t("check.subject_set_twice", { name: u.name }), n);
+            seen.add(u.name);
+            if (!(u.name in subjects)) err(_t("check.unknown_subject", { name: u.name }), n);
+            else if (!named.includes(u.name)) warn(_t("check.subject_not_mentioned", { name: u.name }), n);
+            if (!KEEPS.includes(u.keep ?? "identical")) err(_t("check.subject_keep", { name: u.name }), n);
+            if (!VOICE_KEEPS.includes(u.voice_keep ?? "timbre")) err(_t("check.subject_voice_keep", { name: u.name }), n);
+        }
+        const a = clip.anchors ?? {};
+        const image = (f) => (files[f] || {}).kind === "image";
+        if (typeof a !== "object" || Array.isArray(a)) err(_t("check.anchors_must_be_an_object"), n);
+        else {
+            for (const k of ["first", "last"]) if (a[k] != null && !image(a[k])) err(_t("check.anchor_not_image", { which: _t("check.anchor_" + k) }), n);
+            const continues = !!clip.continue && (n > 1 || !!plan.start_video);
+            if (a.first && continues) err(_t("check.anchor_first_on_continue"), n);
+            const secs = isRun(clip.frames) ? clip.frames / FPS : null;
+            for (const k of a.keyframes || []) {
+                if (!k || !image(k.file)) err(_t("check.anchor_not_image", { which: _t("check.anchor_keyframe") }), n);
+                else if (!isNumber(k.at) || k.at <= 0 || (secs !== null && k.at >= secs)) err(_t("check.keyframe_inside", { v0: secs === null ? "?" : secs.toFixed(3) }), n);
+            }
+        }
+        const sub = { files, subjects };
+        const got = clipFiles({ ...plan, files: sub.files, subjects: sub.subjects }, { ...clip, defs: undefined }, n);
+        if (got.pictures.length > MAX_REFS) err(_t("check.too_many_pictures", { count: got.pictures.length, max: MAX_REFS }), n);
+        if (got.voices.length > MAX_VOICES) err(_t("check.too_many_voices", { count: got.voices.length, max: MAX_VOICES }), n);
+        if (got.pictures.length + got.voices.length + (editSlice(plan, n) ? 1 : 0) > MAX_REF_FILES) err(_t("check.too_many_files", { max: MAX_REF_FILES }), n);
+        if (!free && named.some((x) => subjects[x] && subjects[x].voice)) warn(_t("check.voices_ignored_music_video"), n);
+    }
+
     // Returns a list of {level: "error"|"warning", clip: index (1-based) or 0, text}.
     function validate(plan) {
         const out = [];
@@ -197,11 +289,9 @@ const H3 = (() => {
             if (!PLAN_KEYS.has(key) && !key.startsWith("_")) warn(_t("check.unknown_key_ignored", { key }));
         }
         const version = plan.version;
-        if (![1, 2, 3, 4, 5, 6].includes(version)) err(_t("check.version_must_be_3"));
+        if (version !== PLAN_VERSION) err(_t("check.version_must_be_7"));
         if ("mode" in plan && !MODES.includes(plan.mode)) err(_t("check.mode_must_be_music_video_or", { v0: JSON.stringify(plan.mode) }));
-        if ((version === 1 || version === 2) && plan.mode === "free") err(_t("check.the_free_mode_needs_version_3"));
         const free = mode(plan) === "free";
-        if ("refs_dir" in plan) warn(_t("check.refs_dir_is_no_longer_used"));
         if (typeof plan.project !== "string" || !NAME_RE.test(plan.project)) err(_t("check.project_a_short_name_made_of"));
         for (const key of ["width", "height"]) {
             const v = plan[key];
@@ -226,21 +316,16 @@ const H3 = (() => {
         if ("seed" in plan && (!isInt(plan.seed) || plan.seed < 0)) err(_t("check.seed_must_be_a_positive_integer"));
         if (!["match", "max", undefined].includes(plan.ref_image_size)) err(_t("check.ref_image_size_must_be_match"));
 
-        let refsMap = plan.refs ?? {};
-        if (typeof refsMap !== "object" || Array.isArray(refsMap)) { err(_t("check.refs_must_be_an_object_name")); refsMap = {}; }
-        const declared = Object.keys(refsMap);
-        for (const [name, desc] of Object.entries(refsMap)) {
-            if (!NAME_RE.test(name)) err(_t("check.reference_name_letters_digits_and_only_2", { name }));
-            if (typeof desc !== "string") err(_t("check.reference_the_description_must_be_a", { name }));
-        }
+        const filesMap = checkFiles(plan.files ?? {}, err, 0);
+        const subjectsMap = checkSubjects(plan.subjects ?? {}, filesMap, err, 0);
+        const isVideo = (ref) => typeof ref === "string" && (filesMap[ref] || {}).kind === "video";
 
         const sv = plan.start_video;
         if (sv !== undefined && sv !== null) {
             if (typeof sv !== "object" || Array.isArray(sv)) err(_t("check.start_video_must_be_an_object"));
             else {
                 for (const key of Object.keys(sv)) if (!START_VIDEO_KEYS.has(key) && !key.startsWith("_")) warn(_t("check.start_video_unknown_key", { key }));
-                if (typeof sv.ref !== "string" || !NAME_RE.test(sv.ref)) err(_t("check.start_video_ref_must_be_a_name"));
-                else if (!declared.includes(sv.ref)) err(_t("check.start_video_ref_not_declared", { ref: sv.ref }));
+                if (!isVideo(sv.ref)) err(_t("check.start_video_ref_not_declared", { ref: String(sv.ref) }));
                 const start = sv.start ?? 0;
                 if (!isNumber(start) || start < 0) err(_t("check.start_video_start_must_be"));
                 else if (!isNumber(sv.end) || sv.end <= start) err(_t("check.start_video_end_must_be"));
@@ -263,19 +348,14 @@ const H3 = (() => {
             if (typeof ev !== "object" || Array.isArray(ev)) err(_t("check.edit_video_must_be_an_object"));
             else {
                 for (const key of Object.keys(ev)) if (!EDIT_VIDEO_KEYS.has(key) && !key.startsWith("_")) warn(_t("check.edit_video_unknown_key", { key }));
-                if (typeof ev.ref !== "string" || !NAME_RE.test(ev.ref)) err(_t("check.edit_video_ref_must_be_a_name"));
-                else if (!declared.includes(ev.ref)) err(_t("check.edit_video_ref_not_declared", { ref: ev.ref }));
+                if (!isVideo(ev.ref)) err(_t("check.edit_video_ref_not_declared", { ref: String(ev.ref) }));
                 const start = ev.start ?? 0;
                 if (!isNumber(start) || start < 0) err(_t("check.edit_video_start_must_be"));
                 else if (!isNumber(ev.end) || ev.end <= start) err(_t("check.edit_video_end_must_be"));
                 else {
                     if (ev.instruction !== undefined && ev.instruction !== null) {
                         if (typeof ev.instruction !== "string") err(_t("check.edit_instruction_must_be_text"));
-                        else {
-                            if (ev.instruction.includes(EDIT_MARK)) err(_t("check.edit_instruction_no_mark"));
-                            for (const m of ev.instruction.matchAll(/\{(picture|voice|image|audio)\s*:[^}]*\}/gi)) if (!/^\{(picture|voice):[A-Za-z0-9][A-Za-z0-9_-]*\}$/.test(m[0])) err(_t("check.edit_instruction_bad_placeholder", { v0: m[0] }));
-                            for (const p of placeholders(ev.instruction)) if (declared.length && !declared.includes(p.name)) err(_t("check.edit_instruction_unknown_ref", { ref: p.name }));
-                        }
+                        else for (const n of mentions(ev.instruction)) if (!(n in subjectsMap)) err(_t("check.edit_instruction_unknown_subject", { name: n }));
                     }
                     if (!EDIT_SOUND_CHOICES.includes(ev.sound ?? "original")) err(_t("check.edit_video_sound_choices", { v0: JSON.stringify(ev.sound) }));
                     const frames = editVideo(plan).frames;
@@ -324,61 +404,7 @@ const H3 = (() => {
             if (typeof cont !== "boolean") err(_t("check.continue_must_be_true_or_false"), n);
             else if (cont && n === 1 && (sv === undefined || sv === null)) err(_t("check.clip_1_cannot_be_a_continuation"));
 
-            let refs = clip.refs ?? [];
-            if (!Array.isArray(refs) || !refs.every((r) => typeof r === "string")) { err(_t("check.refs_must_be_a_list_of"), n); refs = []; }
-            const instruction = ev !== undefined && ev !== null ? instructionOf(plan) : null;
-            if (typeof clip.prompt === "string" && clip.prompt.includes(EDIT_MARK) && instruction === null) err(_t("check.edit_mark_without_instruction"), n);
-            let expandedPrompt;
-            [expandedPrompt, refs] = expandEdit(clip.prompt, refs, instruction);
-            if (new Set(refs).size !== refs.length) err(_t("check.a_reference_is_listed_twice"), n);
-            const limit = free ? MAX_REF_FILES : MAX_REFS;
-            if (refs.length > limit) err(_t("check.at_most_references_per_clip_found", { limit, length: refs.length }), n);
-            for (const ref of refs) {
-                if (!NAME_RE.test(ref)) err(_t("check.reference_name_letters_digits_and_only", { ref }), n);
-                else if (declared.length && !declared.includes(ref)) err(_t("check.the_reference_is_not_declared_in", { ref }), n);
-            }
-            if (!refs.length) warn(_t("check.no_reference_the_clip_will_be"), n);
-
-            let prompt = expandedPrompt;
-            if (typeof prompt !== "string" || !prompt.trim()) { err(_t("check.the_prompt_is_empty"), n); prompt = ""; }
-            else {
-                let position = -1;
-                for (const section of SECTIONS) {
-                    const found = prompt.indexOf(section);
-                    if (found < 0) warn(_t("check.the_prompt_has_no_section", { section }), n);
-                    else if (found < position) warn(_t("check.the_section_is_out_of_place", { section }), n);
-                    position = Math.max(position, found);
-                }
-                const ph = placeholders(prompt);
-                const pictures = new Set(ph.filter((p) => p.kind === "picture").map((p) => p.name));
-                const voices = new Set(ph.filter((p) => p.kind === "voice").map((p) => p.name));
-                for (const m of prompt.matchAll(anyBraceRe())) {
-                    if (!/^\{(picture|voice):[A-Za-z0-9][A-Za-z0-9_-]*\}$/.test(m[0])) err(_t("check.is_not_a_valid_placeholder_write", { v0: m[0] }), n);
-                }
-                for (const ref of [...new Set([...pictures, ...voices])].sort()) {
-                    if (!refs.includes(ref)) err(_t("check.the_prompt_uses_but_the_clip", { ref }), n);
-                }
-                const numbered = [...new Set([...prompt.matchAll(/<Picture (\d+)>/g)].map((m) => +m[1]))].sort((a, b) => a - b);
-                for (const k of numbered) if (k < 1 || k > refs.length) err(_t("check.the_prompt_uses_picture_but_the", { k, length: refs.length }), n);
-                if (numbered.length && pictures.size) err(_t("check.do_not_mix_picture_n_and"), n);
-                if (pictures.size > MAX_REFS) err(_t("check.at_most_pictures_per_clip", { MAX_REFS }), n);
-                if (voices.size > MAX_VOICES) err(_t("check.at_most_voices_per_clip_found", { MAX_VOICES, size: voices.size, v2: [...voices].sort().join(", ") }), n);
-                if (pictures.size + voices.size > MAX_REF_FILES) err(_t("check.at_most_reference_files_pictures_voices", { MAX_REF_FILES }), n);
-                for (const line of prompt.split("\n")) {
-                    if (line.includes("{voice:") && (line.includes("{picture:") || line.includes("<Picture"))) {
-                        err(_t("check.each_must_be_alone_on_its"), n);
-                        break;
-                    }
-                }
-                const vids = [...new Set([...prompt.matchAll(/<Video (\d+)>/g)].map((m) => +m[1]))];
-                if (vids.length && (ev === undefined || ev === null)) err(_t("check.video_tag_without_edit"), n);
-                else if (vids.some((k) => k !== 1)) err(_t("check.video_tag_is_video_1"), n);
-                if (prompt.includes("<Audio ")) {
-                    if (free) err(_t("check.do_not_write_audio_n_write"), n);
-                    else warn(_t("check.the_prompt_mentions_audio_n_the"), n);
-                }
-                if (voices.size && !free) warn(_t("check.voices_are_ignored_in_music_video"), n);
-            }
+            checkClip(plan, clip, n, filesMap, subjectsMap, free, err, warn);
 
             if (clip.lyrics && free) warn(_t("check.lyrics_is_for_music_video_mode"), n);
             let dialogue = clip.dialogue ?? [];
@@ -389,10 +415,11 @@ const H3 = (() => {
                 const where = _t("check.line", { v0: k + 1 });
                 if (!line || typeof line !== "object") { err(_t("check.must_be_an_object_with_speaker", { where }), n); return; }
                 for (const key of Object.keys(line)) if (!DIALOGUE_KEYS.has(key) && !key.startsWith("_")) warn(_t("check.unknown_key_ignored_2", { where, key }), n);
-                if (typeof line.speaker !== "string" || !refs.includes(line.speaker)) err(_t("check.the_speaker_must_be_one_of", { where, v1: JSON.stringify(line.speaker) }), n);
+                if (typeof line.speaker !== "string" || !(line.speaker in definitions(plan, clip).subjects)) err(_t("check.the_speaker_must_be_a_subject", { where, v1: JSON.stringify(line.speaker) }), n);
                 if (typeof line.text !== "string" || !line.text.trim()) { err(_t("check.empty_text", { where }), n); return; }
                 words += line.text.trim().split(/\s+/).length;
-                if (prompt && !squash(prompt).includes(squash(line.text))) warn(_t("check.this_text_is_not_in_the", { where }), n);
+                const said = [...TEXT_KEYS.map((k) => clip[k] || ""), clip.prompt_override || ""].join(" ");
+                if (!squash(said).includes(squash(line.text))) warn(_t("check.this_text_is_not_in_the", { where }), n);
                 if ("language" in line && typeof line.language !== "string") err(_t("check.language_must_be_a_text_for", { where }), n);
             });
             if (words && isRun(frames) && frames > context) {
@@ -410,7 +437,7 @@ const H3 = (() => {
             rows.forEach((row, k) => {
                 if (row.index <= edited) {
                     if (row.frames < EDIT_MIN_FRAMES || row.frames > EDIT_MAX_FRAMES) err(_t("check.edit_clip_length", { frames: row.frames }), row.index);
-                } else if (/<Video (\d+)>/.test(expandedClip(plan, plan.clips[k]).prompt || "")) err(_t("check.edit_video_tag_after_segment"), row.index);
+                } else if (TEXT_KEYS.some((key) => /<Video \d+>/.test(plan.clips[k][key] || ""))) err(_t("check.edit_video_tag_after_segment"), row.index);
             });
             if (edited && edited < rows.length) {
                 const row = rows[edited];
@@ -433,223 +460,11 @@ const H3 = (() => {
         return out;
     }
 
-    // ------------------------------------------------------------------ prompt sections
-    function escapeRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
-
-    function parseSections(prompt) {
-        const text = String(prompt || "");
-        const starts = SECTIONS.map((s) => {
-            const m = new RegExp(`(^|\\n)${escapeRe(s)}`).exec(text);
-            return m ? m.index + m[1].length : -1;
-        });
-        if (starts.some((v) => v < 0)) return null;
-        for (let k = 1; k < starts.length; k++) if (starts[k] <= starts[k - 1]) return null;
-        const head = text.slice(0, starts[0]).trim();
-        if (head) return null;
-        return SECTIONS.map((s, k) => text.slice(starts[k] + s.length, k + 1 < starts.length ? starts[k + 1] : text.length)
-            .replace(/^[ \t]*\n/, "").replace(/^[ \t]+/, "").replace(/\s+$/, ""));
-    }
-
-    function composeSections(parts) {
-        return SECTIONS.map((s, k) => `${s}\n${(parts[k] || "").replace(/\s+$/, "")}`).join("\n\n");
-    }
-
-    function skeleton(clip, index, isFree) {
-        const refs = clip.refs || [];
-        const subjects = refs.map((r, k) => `<Subject ${k + 1}> is ... whose appearance comes from {picture:${r}}.`).join("\n");
-        let shot = "[Shot 1] ";
-        if (clip.continue) shot += CONTINUE_SENTENCE + (isFree ? FREE_CONTINUE_SUFFIX : "") + " ";
-        else if (index > 1) shot += (isFree ? HIDDEN_LEADIN_FREE : HIDDEN_LEADIN_MUSIC) + " ";
-        return composeSections([
-            subjects,
-            "[reference generation] ",
-            refs.map((r, k) => `<Subject ${k + 1}> (appears throughout [Shot 1]): fully_preserved - `).join("\n"),
-            "The target video is ...\n" + shot,
-            isFree ? "" : "",
-            isFree ? "None." : "",
-        ]);
-    }
-
     const CONTINUE_SENTENCE = "The incoming performer motion, camera trajectory, body momentum, facial state, lighting, environment and object state continue uninterrupted from the protected video context.";
     const FREE_CONTINUE_SUFFIX = " The protected sound continues too; nothing in that context is repeated.";
     const HIDDEN_LEADIN_FREE = "Hidden lead-in for the first 1.6 seconds: the scene is already fully established, nobody speaks.";
     const HIDDEN_LEADIN_MUSIC = "The first second and a half of this clip is a lead-in that overlaps the end of the previous song phrase; the scene is already fully established from the first frame.";
 
-    function renameRef(plan, oldName, newName) {
-        const re = new RegExp(`\\{(picture|voice):${escapeRe(oldName)}\\}`, "g");
-        if (plan.start_video && plan.start_video.ref === oldName) plan.start_video.ref = newName;
-        if (plan.edit_video && plan.edit_video.ref === oldName) plan.edit_video.ref = newName;
-        if (plan.edit_video && typeof plan.edit_video.instruction === "string") plan.edit_video.instruction = plan.edit_video.instruction.replace(re, (_m, kind) => `{${kind}:${newName}}`);
-        for (const clip of plan.clips || []) {
-            if (Array.isArray(clip.refs)) clip.refs = clip.refs.map((r) => (r === oldName ? newName : r));
-            if (typeof clip.prompt === "string") clip.prompt = clip.prompt.replace(re, (_m, kind) => `{${kind}:${newName}}`);
-            if (Array.isArray(clip.dialogue)) for (const d of clip.dialogue) if (d && d.speaker === oldName) d.speaker = newName;
-        }
-    }
-
-    function referenceKinds(plan, name) {
-        const kinds = new Set();
-        if ((plan.start_video && plan.start_video.ref === name) || (plan.edit_video && plan.edit_video.ref === name)) kinds.add("video");
-        for (const raw of plan.clips || []) {
-            const clip = expandedClip(plan, raw);
-            if (!(clip.refs || []).includes(name)) continue;
-            const prompt = String(clip.prompt || "");
-            const found = placeholders(prompt).filter((p) => p.name === name).map((p) => p.kind);
-            if (found.includes("picture") || (prompt.includes("<Picture") && !placeholders(prompt).length)) kinds.add("image");
-            if (found.includes("voice") && mode(plan) === "free") kinds.add("voice");
-        }
-        return [...kinds];
-    }
-
-    // ------------------------------------------------------------------ takes (port of core.py)
-    // Python's json.dumps(obj, sort_keys=True) with its default ensure_ascii=True and separators (", ", ": ").
-    function pyString(text) {
-        let out = '"';
-        for (let i = 0; i < text.length; i++) {
-            const c = text.charCodeAt(i);
-            const ch = text[i];
-            if (ch === '"') out += '\\"';
-            else if (ch === "\\") out += "\\\\";
-            else if (ch === "\n") out += "\\n";
-            else if (ch === "\r") out += "\\r";
-            else if (ch === "\t") out += "\\t";
-            else if (ch === "\b") out += "\\b";
-            else if (ch === "\f") out += "\\f";
-            else if (c < 0x20 || c > 0x7e) out += "\\u" + c.toString(16).padStart(4, "0");
-            else out += ch;
-        }
-        return out + '"';
-    }
-    function pyDumps(value) {
-        if (value === null || value === undefined) return "null";
-        if (value === true) return "true";
-        if (value === false) return "false";
-        if (typeof value === "number") return Number.isInteger(value) ? String(value) : String(value);
-        if (typeof value === "string") return pyString(value);
-        if (Array.isArray(value)) return "[" + value.map(pyDumps).join(", ") + "]";
-        const keys = Object.keys(value).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
-        return "{" + keys.map((k) => pyString(k) + ": " + pyDumps(value[k])).join(", ") + "}";
-    }
-    // SHA-256 written out: crypto.subtle only exists on https or localhost, not when Encore is opened by its
-    // address on the local network
-    const SHA_K = new Uint32Array([0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
-        0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
-        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb,
-        0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f,
-        0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2]);
-    function sha256Plain(bytes) {
-        const length = bytes.length, padded = new Uint8Array(((length + 9 + 63) >> 6) << 6);
-        padded.set(bytes);
-        padded[length] = 0x80;
-        const bits = length * 8, view = new DataView(padded.buffer);
-        view.setUint32(padded.length - 8, Math.floor(bits / 0x100000000));
-        view.setUint32(padded.length - 4, bits >>> 0);
-        const H = new Uint32Array([0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19]);
-        const W = new Uint32Array(64);
-        const rot = (x, n) => (x >>> n) | (x << (32 - n));
-        for (let off = 0; off < padded.length; off += 64) {
-            for (let i = 0; i < 16; i++) W[i] = view.getUint32(off + i * 4);
-            for (let i = 16; i < 64; i++) {
-                const s0 = rot(W[i - 15], 7) ^ rot(W[i - 15], 18) ^ (W[i - 15] >>> 3), s1 = rot(W[i - 2], 17) ^ rot(W[i - 2], 19) ^ (W[i - 2] >>> 10);
-                W[i] = (W[i - 16] + s0 + W[i - 7] + s1) >>> 0;
-            }
-            let [a, b, c, d, e, f, g, h] = H;
-            for (let i = 0; i < 64; i++) {
-                const t1 = (h + (rot(e, 6) ^ rot(e, 11) ^ rot(e, 25)) + ((e & f) ^ (~e & g)) + SHA_K[i] + W[i]) >>> 0;
-                const t2 = ((rot(a, 2) ^ rot(a, 13) ^ rot(a, 22)) + ((a & b) ^ (a & c) ^ (b & c))) >>> 0;
-                h = g; g = f; f = e; e = (d + t1) >>> 0; d = c; c = b; b = a; a = (t1 + t2) >>> 0;
-            }
-            H[0] += a; H[1] += b; H[2] += c; H[3] += d; H[4] += e; H[5] += f; H[6] += g; H[7] += h;
-        }
-        return [...H].map((x) => x.toString(16).padStart(8, "0")).join("");
-    }
-    async function sha256Hex(text) {
-        const bytes = new TextEncoder().encode(text);
-        if (typeof crypto !== "undefined" && crypto.subtle) {
-            const digest = await crypto.subtle.digest("SHA-256", bytes);
-            return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
-        }
-        return sha256Plain(bytes);
-    }
-    // Same value as core.take_fingerprint(normalize(plan), index). Needs legal frames everywhere.
-    async function takeFingerprints(plan) {
-        const rows = timeline(plan);
-        const out = {};
-        for (const row of rows) {
-            const clip = expandedClip(plan, plan.clips[row.index - 1]);
-            const payload = {
-                frames: clip.frames, continue: !!clip.continue, refs: [...(clip.refs || [])], prompt: clip.prompt,
-                raw_start: row.raw_start, context: row.context, mode: mode(plan),
-            };
-            const sv = startVideo(plan);   // same as core._start_video_payload
-            const ev = editVideo(plan);
-            if (ev) { if (editSlice(plan, row.index)) payload.edit_video = [ev.ref, ev.start_frame]; }
-            else if (sv) {
-                if (row.index === 1 && plan.clips[0].continue) payload.start_video = [sv.ref, sv.start_frame, sv.end_frame];
-                if (mode(plan) === "music_video") payload.song_offset = songOffset(plan);
-            }
-            out[row.index] = (await sha256Hex(pyDumps(payload))).slice(0, 16);
-        }
-        return out;
-    }
-
-    // Port of core.resolve_takes. takes: {index: [record]} (record.id set), fingerprints: {index: fp}.
-    function resolveTakes(plan, takes, selection, fingerprints) {
-        selection = selection || {};
-        const everything = Object.values(takes).flat();
-        const currentRefs = new Map();
-        let currentSize = null;
-        for (const r of [...everything].sort((a, b) => (a.saved_at || 0) - (b.saved_at || 0))) {
-            for (const [name, kinds] of Object.entries(r.refs || {})) {
-                for (const kind of ["image", "voice", "video"]) currentRefs.set(`${name}\u0000${kind}`, (kinds || {})[kind] ?? null);
-            }
-            currentSize = [r.width, r.height];
-        }
-        const result = {};
-        (plan.clips || []).forEach((clip, k) => {
-            const index = k + 1;
-            const previous = result[index - 1];
-            const living = new Set(previous ? Object.entries(previous.takes).filter(([, s]) => s[0] !== "stale").map(([id]) => id) : []);
-            const states = {}, kinds = {};
-            const existingParents = new Set((takes[index - 1] || []).map((r) => r.id));
-            const list = [...(takes[index] || [])].sort((a, b) => (a.saved_at || 0) - (b.saved_at || 0));
-            for (const r of list) {
-                let reason = null, kind = null;
-                if (r.frames !== clip.frames || r.fingerprint !== fingerprints[index]) { reason = _t("check.its_entry_in_the_plan_has"); kind = "plan"; }
-                else if (!currentSize || r.width !== currentSize[0] || r.height !== currentSize[1]) {
-                    reason = _t("check.made_at_x_the_latest_at", { width: r.width, height: r.height, v2: currentSize ? currentSize.join("x") : "?" });
-                    kind = "size";
-                } else {
-                    outer: for (const name of Object.keys(r.refs || {}).sort()) {
-                        for (const kind of ["image", "voice", "video"]) {
-                            const mine = (r.refs[name] || {})[kind] ?? null;
-                            if (mine !== (currentRefs.get(`${name}\u0000${kind}`) ?? null)) {
-                                reason = _t("check.of_has_changed_since", { v0: kind === "image" ? _t("check.the_picture") : _t("check.the_voice"), name });
-                                break outer;
-                            }
-                        }
-                    }
-                }
-                if (reason) { states[r.id] = ["stale", reason]; kinds[r.id] = kind || "refs"; }
-                else if (clip.continue && index > 1) {
-                    if (!living.has(r.parent)) {
-                        const exists = existingParents.has(r.parent);
-                        states[r.id] = ["stale", exists ? _t("check.the_take_of_clip_it_continues", { v0: index - 1 }) : _t("check.the_take_of_clip_it_continues_2", { v0: index - 1 })];
-                        kinds[r.id] = exists ? "parent_stale" : "parent_missing";
-                    }
-                    else if (r.parent !== previous.chosen) states[r.id] = ["other", _t("check.continues_take_of_clip", { parent: r.parent, v1: index - 1 })];
-                    else states[r.id] = ["ok", ""];
-                } else states[r.id] = ["ok", ""];
-            }
-            const usable = Object.entries(states).filter(([, s]) => s[0] === "ok").map(([id]) => id);
-            const wanted = selection[index];
-            const chosen = usable.includes(wanted) ? wanted : (usable.length ? usable[usable.length - 1] : null);
-            result[index] = { chosen, takes: states, kinds };
-        });
-        return result;
-    }
     // the branch of a take (record.studio.branch)
     function takeBranch(r, def) { return (r.studio && r.studio.branch) || def || null; }
     function usablePrefix(plan, resolved) {
@@ -661,10 +476,11 @@ const H3 = (() => {
     return {
         FPS, MAX_CLIPS, SOFT_MAX_FRAMES, DEFAULT_CONTEXT, DEFAULT_FEATHER, SECTIONS, NAME_RE, MODES,
         CONTINUE_SENTENCE, FREE_CONTINUE_SUFFIX, HIDDEN_LEADIN_FREE, HIDDEN_LEADIN_MUSIC,
-        isRun, largestRun, isAvBoundary, avContextValues, mode, placeholders, timeline, framesLegal, validate,
-        PLAN_VERSION, startVideo, startRow, finalStart, songOffset, pyRound, editVideo, editSlice, editCuts, EDIT_MAX_FRAMES, EDIT_MARK, expandEdit, expandedClip, editClipCount,
-        parseSections, composeSections, skeleton, renameRef, referenceKinds, contextOf, squash,
-        pyDumps, takeFingerprints, resolveTakes, takeBranch, usablePrefix, sha256Plain,
+        isRun, largestRun, isAvBoundary, avContextValues, mode, timeline, framesLegal, validate,
+        PLAN_VERSION, startVideo, startRow, finalStart, songOffset, pyRound, editVideo, editSlice, editCuts, EDIT_MAX_FRAMES, editClipCount,
+        contextOf, squash, mentions, mentionRe, definitions, clipSubjects, clipFiles, instructionOf,
+        FILE_KINDS, SUBJECT_KINDS, KEEPS, VOICE_KEEPS, TEXT_KEYS, SUBJECT_NAME_RE, MAX_REFS, MAX_VOICES, MAX_REF_FILES,
+        takeBranch, usablePrefix,
     };
 })();
 if (typeof module !== "undefined") module.exports = H3;

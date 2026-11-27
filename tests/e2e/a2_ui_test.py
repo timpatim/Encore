@@ -35,7 +35,6 @@ one = json.load(open(fixture("rue_test_v1.plan.json"))); one["clips"] = one["cli
 call(S, P + "/import-plan?filename=rue.json", raw=json.dumps(one).encode(), method="POST")
 for f in (fixture("fillette.png"), fixture("rue.png")):
     call(S, f"{P}/resources?kind=images&filename={os.path.basename(f)}", raw=open(f, "rb").read(), method="POST")
-call(S, P + "/branches/b1", {"refs": {"fillette": {"image": "refs/images/fillette.png"}, "rue": {"image": "refs/images/rue.png"}}}, "PUT")
 
 
 def drain():
@@ -57,15 +56,15 @@ async def main():
         check("no import button in the project bar", await page.locator(".studio-bar button:has-text('Importer un plan')").count() == 0)
 
         # clip 1, then the next clip although the master plan has only one clip
-        await page.click(".tk-placeholder >> nth=0 >> .tk-plus"); await launch_go(page); drain(); await page.wait_for_timeout(2500)
+        await page.click(".tk-cell.active >> nth=0"); await launch_go(page); drain(); await page.wait_for_timeout(2500)
         check("a « + clip suivant » box after the take", await page.locator(".tk-slot").count() == 1)
         await page.click(".tk-slot >> nth=0"); await page.wait_for_selector("#launchPanel")
         await page.wait_for_timeout(800)
         msg = " ".join(await page.locator("#launchPanel .warnline").all_text_contents())
         check("the panel offers a new clip 2", "nouveau clip" in (msg or "").lower() and await page.evaluate("H3Editor.state.plan.clips.length") == 2, msg)
         c1, c2 = await page.evaluate("[H3Editor.state.plan.clips[0], H3Editor.state.plan.clips[1]]")
-        check("…a copy of clip 1 that continues it", c2["continue"] is True and c2["name"] == "clip_002" and c2["refs"] == c1["refs"]
-              and c2.get("dialogue") == c1.get("dialogue") and c2["frames"] == c1["frames"] and c2["prompt"] != c1["prompt"], c2.get("name"))
+        check("…a copy of clip 1 that continues it", c2["continue"] is True and c2["name"] == "clip_002" and c2.get("summary") == c1.get("summary")
+              and c2.get("dialogue") == c1.get("dialogue") and c2["frames"] == c1["frames"] and "defs" not in c2, c2.get("name"))
         await launch_go(page); drain(); await page.wait_for_timeout(2500)
         sel = {c["index"]: c["selected"] for c in call(S, P + "/takes")["clips"]}
         check("clip 2 made after clip 1", bool(sel.get(2)), sel)
@@ -82,7 +81,8 @@ async def main():
             await ghost.first.click(); await page.wait_for_selector("#launchPanel")
             await page.wait_for_timeout(800)
             job = next(j for j in call(S, P + "/jobs")["jobs"] if j["kind"] == "clip" and j["status"] in ("queued", "running"))
-            check("…pre-filled with its seed", (await page.input_value("#launchPanel .launch-seed")) == str(job["seed"]))
+            check("…with a new seed (0.49.1), its own one can be put back", (await page.input_value("#launchPanel .launch-seed")) != str(job["seed"])
+                  and await page.locator("#launchPanel .launch-seed-back").count() == 1)
             await page.evaluate("H3Launch.close()")
         drain(); await page.wait_for_timeout(1500)
 
@@ -92,23 +92,22 @@ async def main():
         check("import on the master plan screen, greyed (takes)", await imp.is_visible() and await imp.is_disabled() and "prises" in (await imp.get_attribute("title")))
         await takes_screen(page)
 
-        # duplicate with the clips of the selection (1 → 2)
-        await page.click(".tk-newbranch"); await page.wait_for_selector(".br-new")
+        # duplicate with the clips of the selection (1 → 2) — 0.48: « dupliquer » in the branch header
+        await page.click(".tk-band-head.active .tk-dup"); await page.wait_for_selector(".br-new")
         await page.click(".br-new label:has-text('avec les clips')")
         await page.wait_for_timeout(300)
-        check("the window lists the references kept", await page.locator(".br-refs .br-kept").count() >= 1)
+        check("the window says the clips taken over keep their subjects", await page.locator(".br-new .hint:has-text('sujets')").count() >= 1)
         await page.click(".tk-modal button.primary:has-text('Créer')"); await page.wait_for_timeout(2000)
         reused = page.locator(".tk-card.tk-reused")
         check("the new band shows the 3 clips taken over, dimmed", await reused.count() == 3, await reused.count())
-        check("no ↻ on a clip taken over", await page.locator(".tk-card.tk-reused .tk-retake").count() == 0)
-        check("a « + clip suivant » box after the last clip taken over", await page.locator(".tk-slot").count() >= 2)
+        check("0.48.2: ↻ on a clip taken over", await page.locator(".tk-card.tk-reused .tk-retake").count() > 0)
+        check("a « + clip suivant » box after the last clip taken over (its master line is complete)", await page.locator(".tk-slot").count() >= 2)
 
-        # branch settings: size and used references greyed with the reason; generation settings free
+        # branch settings: size greyed with the reason; no references any more; generation settings free
         await page.click(".tk-brsettings >> nth=0"); await page.wait_for_selector(".br-settings")
         size = page.locator(".br-settings .br-size input").first
         check("size greyed with the reason", await size.is_disabled() and "Figé" in (await size.get_attribute("title") or ""))
-        used = page.locator(".br-settings .tk-ref select").first
-        check("a used reference greyed", await used.is_disabled())
+        check("no references in the branch settings", await page.locator(".br-settings .tk-ref select").count() == 0)
         check("LoRA still free", await page.locator(".br-settings .studio-upscale button:not([disabled])").count() >= 1)
         await page.keyboard.press("Escape"); await page.evaluate("document.querySelectorAll('.tk-modal').forEach((m) => m.remove())")
 

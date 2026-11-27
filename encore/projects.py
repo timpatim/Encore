@@ -27,7 +27,7 @@ from pathlib import Path
 
 from . import plan_core, takes
 
-STUDIO_VERSION = "0.45.1"
+STUDIO_VERSION = "0.50"
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 RESOURCE_KINDS = {
     "images": (".png", ".jpg", ".jpeg", ".webp", ".bmp"),
@@ -65,7 +65,6 @@ def default_config():
         "projects_root": str(Path.home() / "Documents" / _t("projects.encore_projects")),
         "comfy_url": "http://127.0.0.1:8188",
         "purge_comfy_copy": True,       # remove ComfyUI's copy of the takes once they are in the project
-        "assembly_engine": "ffmpeg",    # final videos made by Encore with ffmpeg ("plugin": by ComfyUI, as before 0.40)
     }
 
 
@@ -95,7 +94,7 @@ def migrate_settings(settings):
     return out
 
 
-BRANCH_SET_KEYS = ("refs", "song", "width", "height", "ref_image_size")     # what a branch holds (no longer in the project settings)
+BRANCH_SET_KEYS = ("song", "width", "height", "ref_image_size")     # what a branch holds (no longer in the project settings)
 DEFAULT_BRANCH_SIZE = (960, 544)        # 16:9, 0.5 megapixel as ComfyUI counts it (1 MP = 1024 × 1024)
 REF_SIZES = ("match", "max")             # how H3 sizes the reference pictures (a branch setting, no longer in the plan)
 DEFAULT_REF_SIZE = "max"
@@ -291,13 +290,12 @@ def safe_filename(name: str) -> str:
 
 # --------------------------------------------------------------------------- projects
 def skeleton_plan(name: str, mode: str):
-    plan = {"version": plan_core.PLAN_VERSION, "project": name, "mode": mode, "refs": {}, "context_frames": 39, "crossfade_frames": 0, "clips": []}
+    plan = {"version": plan_core.PLAN_VERSION, "project": name, "mode": mode, "files": {}, "subjects": {},
+            "context_frames": 39, "crossfade_frames": 0, "clips": []}
     if mode == "music_video":
         plan["song"] = {"file": "", "duration_seconds": 60}
-    clip = {"name": "clip_001", "frames": 209, "continue": False, "refs": [],
-            "prompt": "subject_definitions:\n\n\nsummary:\n[reference generation] \n\nretention_analysis:\n\n\n"
-                      "detailed_description:\nThe target video is ...\n[Shot 1] \n\noverall_soundscape:\n\n\n"
-                      "non_diegetic_music:\n" + ("None." if mode == "free" else "")}
+    clip = {"name": "clip_001", "frames": 209, "continue": False, "summary": "...",
+            "description": "The target video is ...\n[Shot 1] ", "soundscape": "", "music": ""}
     if mode == "free":
         clip["dialogue"] = []
     plan["clips"].append(clip)
@@ -349,6 +347,44 @@ def list_projects(root):
             item["error"] = "projet illisible"
         out.append(item)
     return out
+
+
+def project_summary(root, name):
+    """What deleting a project removes: {"takes", "exports", "size"} (bytes on the disk)."""
+    path = project_dir(root, name)
+    size = sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+    count = sum(len(v) for v in takes.list_takes(path).values())
+    exports = len([f for f in (path / "exports").glob("*.mp4")]) if (path / "exports").is_dir() else 0
+    return {"name": path.name, "takes": count, "exports": exports, "size": size}
+
+
+def delete_project(root, name, comfy_dir=None):
+    """Deletes a project for good: its folder, and what Encore put in ComfyUI's input and output folders for it
+    (when Encore knows where ComfyUI is installed). The caller checks that nothing of it is waiting or running."""
+    import shutil
+    from . import comfy_setup
+    path = project_dir(root, name)
+    summary = project_summary(root, name)
+    shutil.rmtree(path)
+    removed = []
+    base = comfy_setup.comfy_root(comfy_dir)
+    if base:
+        # what Encore sent and ComfyUI made (0.50: encore/…; before: the plugin's working copy, h3studio…)
+        for folder in [base / "input" / "encore" / path.name, base / "output" / "encore" / path.name,
+                       base / "input" / "h3studio" / path.name]:
+            if folder.is_dir():
+                shutil.rmtree(folder, ignore_errors=True)
+                removed.append(str(folder))
+        for pattern, where in ((f"encore_{path.name}_*", base / "input"), (f"h3studio_{path.name}_*", base / "input"),
+                               (f"h3studio_{path.name}__*", base / "output" / "h3_clip_plan")):
+            if where.is_dir():
+                for item in where.glob(pattern):
+                    if item.is_dir():
+                        shutil.rmtree(item, ignore_errors=True)
+                    else:
+                        item.unlink(missing_ok=True)
+                    removed.append(str(item))
+    return dict(summary, deleted=True, comfy_removed=removed)
 
 
 def read_meta(path: Path):
@@ -406,7 +442,7 @@ def apply_essence(plan, essence):
     if current != want:
         old = plan.get("start_video") or plan.get("edit_video")
         ref = (old or {}).get("ref")
-        refs = dict(plan.get("refs") or {})
+        refs = dict(plan.get("files") or {})
         if not ref:
             ref, k = "video", 2
             while ref in refs:
@@ -418,16 +454,16 @@ def apply_essence(plan, essence):
             if clips:
                 clips[0]["continue"] = False
         elif want == "continue":
-            refs[ref] = _t("plan.start_video_ref_desc")
+            refs[ref] = {"kind": "video", "note": _t("plan.start_video_ref_desc")}
             plan["start_video"] = {"ref": ref, "start": (old or {}).get("start", 0), "end": (old or {}).get("end", 4)}
             if clips:
                 clips[0]["continue"] = True
         else:
-            refs[ref] = _t("plan.edit_video_ref_desc")
+            refs[ref] = {"kind": "video", "note": _t("plan.edit_video_ref_desc")}
             plan["edit_video"] = {"ref": ref, "start": (old or {}).get("start", 0), "end": (old or {}).get("end", 10)}
             if clips:
                 clips[0]["continue"] = False
-        plan["refs"] = refs
+        plan["files"] = refs
     return plan
 
 
@@ -511,7 +547,9 @@ def read_project(root, name):
             "masters": {bid: len((m or {}).get("clips") or []) for bid, m in plans.load(path)["masters"].items()},
             "legacy_ref_image_size": meta.get("legacy_ref_image_size") or "match",
             "start_video_file": meta.get("start_video_file") or None,
-            "resources": list_resources(root, name), "validation": {"errors": errors, "warnings": warnings}}
+            "resources": list_resources(root, name), "validation": {"errors": errors, "warnings": warnings},
+            # 0.50: latents of takes still in the plugin's .pt format (converted once, latents.start_conversion)
+            "old_latents": len(takes.old_latents(path))}
 
 
 def selected_plan(path: Path, meta=None):
@@ -537,35 +575,36 @@ def branches_with_takes(path: Path, meta=None):
     """Branches having takes: their own, or clips taken over from another branch (duplication)."""
     meta = meta or read_meta(path)
     own = {takes.take_branch(r, None) for records in takes.list_takes(path).values() for r in records} - {None}
-    return own | {b["id"] for b in meta["branches"] if branch_base(b)}
+    return own | {b["id"] for b in meta["branches"] if branch_kept(b)}
 
 
 def branch_base(branch):
-    """[take id of clip 1, …, of clip k]: the clips a duplicated branch takes over from another one (by reference)."""
+    """[take id of clip 1 or None, …, of clip k]: the clips a duplicated branch takes over from another one (by
+    reference); None for a clip left free (0.49: portions, each from the start of a scene)."""
     return list(((branch or {}).get("base") or {}).get("takes") or [])
 
 
-def refs_used(path: Path, branch_id, meta=None):
-    """The reference names the takes of a branch use (its own takes and the ones it takes over): their files can
-    no longer change in this branch."""
-    meta = meta or read_meta(path)
-    branch = next((b for b in meta["branches"] if b["id"] == branch_id), None)
-    base = set(branch_base(branch))
-    used = set()
-    for records in takes.list_takes(path).values():
-        for r in records:
-            if takes.take_branch(r, None) == branch_id or r["id"] in base:
-                clip = (((r.get("studio") or {}).get("portion") or {}).get("clip") or {})
-                used.update(str(n) for n in clip.get("refs") or [])
-                used.update((r.get("studio") or {}).get("files", {}).keys())
-    return used
+def branch_kept(branch):
+    """{clip index: take id} of the clips a duplicated branch takes over."""
+    return {i: t for i, t in enumerate(branch_base(branch), start=1) if t}
+
+
+def portions_ok(clips, keep):
+    """0.49: the clips kept must keep their continuity: a clip that continues the one before (↪) is kept only with
+    it. clips: the entries of the twig (their 'continue'); keep: clip indices (1-based). Returns an error text or
+    None."""
+    keep = set(keep)
+    for i in sorted(keep):
+        if i > 1 and (clips[i - 1] or {}).get("continue") and (i - 1) not in keep:
+            return _t("projects.portion_needs_before", index=i, before=i - 1)
+    return None
 
 
 def branch_states(path: Path, meta=None):
-    """{branch id: {"has_takes", "refs_used": [names], "base": [take ids]}}: what the branch settings grey out."""
+    """{branch id: {"has_takes", "base": [take ids]}}: what the branch settings grey out."""
     meta = meta or read_meta(path)
     with_takes = branches_with_takes(path, meta)
-    return {b["id"]: {"has_takes": b["id"] in with_takes, "refs_used": sorted(refs_used(path, b["id"], meta)),
+    return {b["id"]: {"has_takes": b["id"] in with_takes,
                       "base": branch_base(b), "base_from": (b.get("base") or {}).get("from")}
             for b in meta["branches"]}
 
@@ -592,18 +631,14 @@ def set_start_video_file(root, name, rel):
 plan_video = takes.plan_video
 
 
-def effective_refs(path: Path, branch, plan):
-    """The references of a branch, with the project's video for the plan's start_video / edit_video reference."""
-    refs = dict(branch.get("refs") or {})
-    spec = plan_video(plan)
-    file = read_meta(path).get("start_video_file") if spec else None
-    if spec and spec.get("ref"):
-        refs[spec["ref"]] = {"image": None, "voice": None, "video": file or None}
-    return refs
+def video_file(path: Path, plan):
+    """The project's video file (path in the project) when the plan starts from it or edits it, else None."""
+    return (read_meta(path).get("start_video_file") or None) if plan_video(plan) else None
 
 
 # --------------------------------------------------------------------------- branches
-# A branch starts at clip 1 and holds its own set: the reference files (image, voice) and the song.
+# A branch starts at clip 1 and holds its own set: picture size, LoRA, upscale (the subjects and their files are in
+# its plans, the song and the video are the project's).
 def find_branch(branches, branch_id):
     for branch in branches:
         if branch["id"] == branch_id:
@@ -636,7 +671,7 @@ def create_branch(root, name, master=None, source=None, take_over=None, label=No
     if source:
         last = find_branch(branches, source)
     branch = {"id": f"b{number}", "name": _t("projects.branch", number=number), "color": BRANCH_COLORS[(number - 1) % len(BRANCH_COLORS)],
-              "refs": json.loads(json.dumps(last["refs"])) if last else {}, "song": last["song"] if last else "",
+              "song": last["song"] if last else "",
               "width": int(last.get("width", DEFAULT_BRANCH_SIZE[0])) if last else int((meta.get("first_branch_size") or DEFAULT_BRANCH_SIZE)[0]),
               "height": int(last.get("height", DEFAULT_BRANCH_SIZE[1])) if last else int((meta.get("first_branch_size") or DEFAULT_BRANCH_SIZE)[1]),
               "ref_image_size": (last.get("ref_image_size") if last else meta.get("first_branch_ref_size")) or DEFAULT_REF_SIZE,
@@ -645,8 +680,11 @@ def create_branch(root, name, master=None, source=None, take_over=None, label=No
               "created": time.time()}
     if label and str(label).strip():
         branch["name"] = str(label).strip()[:60]
-    if take_over:
-        branch["base"] = {"from": last["id"], "takes": list(take_over)}
+    if take_over and any(take_over):
+        take_over = list(take_over)
+        while take_over and not take_over[-1]:
+            take_over.pop()
+        branch["base"] = {"from": last["id"], "takes": take_over}
     branches.append(branch)
     _write_json(path / "project.json", meta)
     if master is None:
@@ -663,12 +701,6 @@ def update_branch(root, name, branch_id, changes):
     branch = find_branch(meta["branches"], branch_id)
     if branch_id in branches_with_takes(path, meta):
         frozen = []
-        if "refs" in changes and isinstance(changes["refs"], dict):
-            used = refs_used(path, branch_id, meta)
-            for ref, files in (branch.get("refs") or {}).items():
-                new = changes["refs"].get(ref) or {}
-                if ref in used and any((files or {}).get(k) and (new.get(k) or None) != files.get(k) for k in ("image", "voice")):
-                    frozen.append(ref)
         if any(k in changes and int(changes[k]) != int(branch.get(k) or 0) for k in ("width", "height")):
             frozen.append(_t("projects.frozen_size"))
         if frozen:
@@ -678,11 +710,6 @@ def update_branch(root, name, branch_id, changes):
         if not label:
             raise StudioError(_t("projects.empty_branch_name"))
         branch["name"] = label[:60]
-    if "refs" in changes:
-        if not isinstance(changes["refs"], dict):
-            raise StudioError(_t("projects.invalid_references"))
-        branch["refs"] = {str(k): {"image": (v or {}).get("image") or None, "voice": (v or {}).get("voice") or None}
-                          for k, v in changes["refs"].items()}
     if "ref_image_size" in changes:
         branch["ref_image_size"] = check_ref_size(changes["ref_image_size"])
     if "upscale" in changes:                 # a generation setting: no take becomes invalid
@@ -720,6 +747,23 @@ def save_plan(root, name, plan, branch_id, leaf_id=None):
     problems = plans.frozen_problems(path, branch_id, plan, branch_id in branches_with_takes(path))
     if problems:
         raise StudioError(_t("projects.plan_frozen", what=", ".join(problems)))
+    if not leaf_id or leaf_id in branch_kept(find_branch(meta["branches"], branch_id)).values():
+        # 0.48: the master plan of a branch with takes keeps its first clips and its subjects
+        problems = plans.master_frozen_problems(path, branch_id, plan)
+        if problems:
+            raise StudioError(_t("projects.master_frozen", what="; ".join(problems)))
+        # 0.49: the clips left free between portions are those of the same plan: their length stays (the portions
+        # after them keep their moment of the song)
+        holes = plans.holes_of(path, branch_id)
+        if holes:
+            old = plans.master(path, branch_id) or {}
+            oc, nc = old.get("clips") or [], plan.get("clips") or []
+            last = max(plans.kept_of(path, branch_id))
+            moved = [i for i in range(1, last + 1) if i not in plans.kept_of(path, branch_id)
+                     and (i > len(nc) or i > len(oc) or (nc[i - 1] or {}).get("frames") != (oc[i - 1] or {}).get("frames")
+                          or bool((nc[i - 1] or {}).get("continue")) != bool((oc[i - 1] or {}).get("continue")))]
+            if moved or len(nc) < last:
+                raise StudioError(_t("projects.portion_lengths_locked", clips=", ".join(map(str, moved or [last]))))
     plans.save_twig_plan(path, branch_id, leaf_id, plan)
     errors, warnings = plan_core.validate(json.loads(json.dumps(plan)))
     return {"plan": plan, "validation": {"errors": errors, "warnings": warnings}}
@@ -737,26 +781,18 @@ def save_settings(root, name, settings):
     return {"settings": settings}
 
 
-def use_twig_plan(root, name, branch_id, leaf, target="master", label=None, pending=None):
-    """« Utiliser ce plan… »: the plan of a twig (its generated clips as they were made, then what follows) becomes
-    the master plan of its branch (target "master": the master plan it had goes to the trash) or of a new branch with
-    the settings of that branch (target "new"; the current branch does not change)."""
-    from . import plans, trash
+def use_twig_plan(root, name, branch_id, leaf, label=None, pending=None):
+    """« Nouvelle branche avec ce plan… »: the plan of a twig (its generated clips as they were made, then what
+    follows) becomes the master plan of a new branch with the settings of that branch (nothing taken over). A master
+    plan is never replaced once its branch has takes (0.48)."""
+    from . import plans
     path = project_dir(root, name)
     meta = read_meta(path)
-    branch = find_branch(meta["branches"], branch_id)
+    find_branch(meta["branches"], branch_id)
     if not leaf:
         raise StudioError(_t("projects.duplicate_needs_a_selection"))
     twig = plans.plan_of(path, branch_id, leaf, pending=pending, project_name=path.name)
-    plan = strip_seeds(twig["plan"])
-    if target == "new":
-        out = create_branch(root, name, master=plan, source=branch_id, label=label)
-    else:
-        master = plans.master(path, branch_id) or {}
-        new = plans.head(master) if master else plans.head(plan)
-        new["refs"], new["clips"] = plan.get("refs") or {}, plan["clips"]
-        trash.replace_master(path, branch_id, new, _t("trash.label_master", name=branch["name"]))
-        out = {"branch": branch}
+    out = create_branch(root, name, master=strip_seeds(twig["plan"]), source=branch_id, label=label)
     out["project"] = read_project(root, name)
     return out
 
@@ -782,10 +818,11 @@ def read_plan_file(data: bytes, filename: str):
 
 
 def new_branch(root, name, how="empty", source=None, leaf=None, upto=None, data: bytes = None, filename="plan.json",
-               label=None):
+               label=None, keep=None):
     """« + nouvelle branche »: how = "empty" (settings and master plan of the last branch), "file" (data: a plan
     file as master plan), "copy" (settings and master plan of `source`, no clip), "clips" (the clips 1..upto of
-    the twig of `source` ending with `leaf` are taken over; master plan: the plan of that twig)."""
+    the twig of `source` ending with `leaf` are taken over; master plan: the plan of that twig). keep (0.49): the
+    clip indices taken over instead of 1..upto, portions that each start a scene (the other clips are left free)."""
     from . import plans
     path = project_dir(root, name)
     if how == "file":
@@ -798,12 +835,26 @@ def new_branch(root, name, how="empty", source=None, leaf=None, upto=None, data:
         if not leaf:
             raise StudioError(_t("projects.duplicate_needs_a_selection"))
         twig = plans.plan_of(path, source, leaf, project_name=path.name)
-        upto = int(upto or len(twig["chain"]))
-        if not 1 <= upto <= len(twig["chain"]):
-            raise StudioError(_t("projects.duplicate_upto_invalid", n=len(twig["chain"])))
+        n = len(twig["chain"])
+        if keep is not None:
+            try:
+                keep = sorted({int(i) for i in keep})
+            except (TypeError, ValueError):
+                raise StudioError(_t("projects.duplicate_keep_invalid", n=n)) from None
+            if not keep or keep[0] < 1 or keep[-1] > n:
+                raise StudioError(_t("projects.duplicate_keep_invalid", n=n))
+        else:
+            upto = int(upto or n)
+            if not 1 <= upto <= n:
+                raise StudioError(_t("projects.duplicate_upto_invalid", n=n))
+            keep = list(range(1, upto + 1))
         master = twig["plan"]
         master["clips"] = [dict(c) for c in master["clips"]]
-        return create_branch(root, name, master=master, source=source, take_over=twig["chain"][:upto], label=label)
+        problem = portions_ok(master["clips"], keep)
+        if problem:
+            raise StudioError(problem)
+        take_over = [twig["chain"][i - 1] if i in keep else None for i in range(1, keep[-1] + 1)]
+        return create_branch(root, name, master=master, source=source, take_over=take_over, label=label)
     return create_branch(root, name, label=label)
 
 

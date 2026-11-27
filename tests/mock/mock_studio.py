@@ -1,38 +1,21 @@
-"""Fake ComfyUI for Encore's tests: the real plugin code (numpy torch shim), fake models, websocket.
+"""Fake ComfyUI for Encore's tests (0.50): fake models and nodes (ComfyUI's own, MultiRef, VHS), a websocket.
 
-    H3_PLUGIN=/path/to/ComfyUI-H3-ClipPlan PYTHONPATH=tests/mock/shim MOCK_PORT=8771 python tests/mock/mock_studio.py
+    MOCK_PORT=8771 python tests/mock/mock_studio.py
+Each node of a workflow is checked like ComfyUI would (class known, files present) and its fake output computed; what
+the nodes received is kept for the tests (POST /test/cap).
 Test hooks: POST /test/run (finish the job running), /test/start, /test/foreign, /test/interrupts.
 """
-import random, json, os, sys, shutil, subprocess, threading, uuid, glob, time, base64, hashlib, struct
+import random, json, os, sys, shutil, subprocess, threading, uuid, glob, time, base64, hashlib, struct, tempfile
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from email.parser import BytesParser
 from email.policy import default as email_default
 from urllib.parse import urlparse, parse_qs
 HERE = os.path.dirname(os.path.abspath(__file__))
-exec(open(os.path.join(HERE, "fake_env.py")).read())   # sets pkg, inp, outp, fake modules
 VIDEOS = sorted(glob.glob(os.path.join(HERE, "..", "fixtures", "clips", "*.mp4")))
-for n in ("fillette.png", "rue.png"):
-    os.makedirs(os.path.join(inp, "refs", "rue_test_v1"), exist_ok=True)
-    shutil.copy(os.path.join(inp, n), os.path.join(inp, "refs", "rue_test_v1", n))
-Image.new("RGB", (64, 64), (200, 30, 30)).save(os.path.join(inp, "refs", "rue_test_v1", "fillette_rouge.png"))
-os.makedirs(os.path.join(inp, "voices", "rue_test_v1"), exist_ok=True)
-for n in ("fillette.wav", "homme.wav"):
-    open(os.path.join(inp, "voices", "rue_test_v1", n), "wb").write(b"x")
-import hashlib as _h
-na.load = lambda path: (torch.full((1, 32000 * 6), float(int(_h.md5(path.encode()).hexdigest()[:4], 16))), 32000)
-class AVAE:
-    audio_sample_rate = 32000; audio_sample_rate_output = 44100
-    def decode(self, z): return torch.ones(1, int(z.shape[-1] * 44100 / 40), 2)
-    def encode(self, w):   # [1, samples, 2] -> [1, 32, 2, steps at 40 Hz]
-        CAP.setdefault("audio_encoded", []).append(int(w.shape[1]))
-        return torch.zeros(1, 32, 2, int(round(w.shape[1] / 32000 * 40)))
-class VVAE:
-    def decode(self, latent):    # small pictures: only the plugin's fallback (no preview) uses it
-        n = int(latent.shape[2]); return torch.zeros(1, 1 + 8 * max(0, n - 1), 16, 16, 3)
-    def encode(self, images):   # [frames, h, w, 3] -> [1, 24, steps, h/16, w/16]
-        n = int(images.shape[0])
-        CAP.setdefault("video_encoded", []).append(tuple(images.shape))
-        return torch.zeros(1, 24, 2 + 5 * ((n - 5) // 17), int(images.shape[1]) // 16, int(images.shape[2]) // 16)
+root = tempfile.mkdtemp()
+inp, outp = os.path.join(root, "input"), os.path.join(root, "output")
+os.makedirs(inp); os.makedirs(outp)
+CAP = {}
 HISTORY, PROMPTS, QUEUE = {}, {}, []
 STREAM, LAST_ASSEMBLY = {}, {}
 RUNNING = []
@@ -69,27 +52,28 @@ def object_info():
         "KSamplerSelect": {"sampler_name": combo(["euler", "res_multistep"])},
         "BasicScheduler": {"model": ["MODEL"], "scheduler": combo(["simple", "karras"]), "steps": ["INT", {}], "denoise": ["FLOAT", {}]},
         "LoadAudio": {"audio": combo(["song.wav"])},
+        "LoadImage": {"image": combo(["fillette.png", "rue.png"])},
         "ModelPreviewOverrideKJ": {"model": ["MODEL"], "max_resolution": ["INT", {"default": 1024, "min": 0, "max": 8192}], "jpeg_quality": ["INT", {"min": 30, "max": 100}],
             "suppress_default_preview": ["BOOLEAN", {}], "preview_frames": ["INT", {"default": 1, "min": 1, "max": 1024}], "preview_fps": ["INT", {"min": 1, "max": 60}],
             "tiny_vae": ["COMBO", {"options": ["none", "taeh3.safetensors"]}]},
-    }
-    for k, v in simple.items(): info[k] = {"input": {"required": v}}
-    simple2 = {
         "MinimaxH3LatentUpscaler3D": {"latent": ["*"], "model_name": combo(["minimax_h3_latent_upscaler_3d_fp16.safetensors"])},
         "MinimaxH3LatentUpscalerNode2D": {"latent": ["*"], "model_name": combo(["minimax_h3_latent_upscaler_2d_conv_v1_fp16.safetensors"])},
         "LatentUpscaleModelLoader": {"model_name": combo(["h3_official_upscaler.safetensors"])},
     }
-    for k, v in simple2.items(): info[k] = {"input": {"required": v}}
+    for k, v in simple.items(): info[k] = {"input": {"required": v}}
+    # MiniMax H3 Reference to Video: its growing inputs as ComfyUI's workflows name them (numbered from 0)
+    opt = {}
+    for group, count in (("ref_image", 9), ("ref_video", 3), ("ref_video_audio", 3), ("ref_audio", 3)):
+        for k in range(count): opt[f"{group}s.{group}_{k}"] = ["IMAGE" if group in ("ref_image", "ref_video") else "AUDIO"]
+    info["MiniMaxH3ReferenceToVideo"] = {"input": {"required": {"clip": ["CLIP"], "prompt": ["STRING", {}], "width": ["INT", {}], "height": ["INT", {}],
+                                                                "length": ["INT", {}], "ref_image_size": combo(["match", "max"])},
+                                                   "optional": dict(opt, vae=["VAE"], audio_vae=["VAE"])}}
     for k in ["LTXVSeparateAVLatent", "LTXVConcatAVLatent", "LatentUpscale", "LatentCut", "ReplaceVideoLatentFrames", "SplitSigmas",
-              "ManualSigmas", "MiniMaxH3LatentUpscaleWithModel"]:
+              "ManualSigmas", "MiniMaxH3LatentUpscaleWithModel", "MiniMaxH3SigmaShift", "MiniMaxH3AudioVAECompatibility", "RandomNoise",
+              "BasicGuider", "SamplerCustomAdvanced", "VAEDecode", "VAEDecodeAudio", "VHS_VideoCombine", "VHS_LoadVideo",
+              "MiniMaxH3SongMaskedAVContext", "MiniMaxH3GeneratedAVMaskedContext", "MiniMaxH3ExistingVideoMaskedContext",
+              "MiniMaxH3MotionContextSaveLatent", "MiniMaxH3MotionContextLoadLatent", "MiniMaxH3StreamLiveMusicVideoToVHS"]:
         info[k] = {"input": {"required": {}}}
-    for k in ["MiniMaxH3SigmaShift", "MiniMaxH3AudioVAECompatibility", "RandomNoise", "BasicGuider", "SamplerCustomAdvanced", "VAEDecode", "VHS_VideoCombine",
-              "MiniMaxH3ReferenceToVideo", "MiniMaxH3SongMaskedAVContext", "MiniMaxH3GeneratedAVMaskedContext", "MiniMaxH3StreamLiveMusicVideoToVHS"]:
-        info[k] = {"input": {"required": {}}}
-    for name, cls in pkg.NODE_CLASS_MAPPINGS.items():
-        it = cls.INPUT_TYPES()
-        conv = lambda d: {k: ([v[0]] + ([v[1]] if len(v) > 1 else []) if not isinstance(v[0], list) else [v[0], v[1] if len(v) > 1 else {}]) for k, v in d.items()}
-        info[name] = {"input": {"required": conv(it.get("required", {})), "optional": conv(it.get("optional", {}))}}
     for k in list(info):
         if k in HIDDEN: del info[k]
     return info
@@ -98,7 +82,7 @@ def screenshot_video(nodes):
     scene is the first one whose name is in a reference image of the prompt, a video of it is taken at random."""
     folder = os.environ.get("MOCK_VIDEOS")
     if not folder: return None
-    images = " ".join(str(n["inputs"].get("image", "")) for n in nodes.values() if n["class_type"] == "H3PlanReference")
+    images = " ".join(str(n["inputs"].get("image", "")) for n in nodes.values() if n["class_type"] == "LoadImage")
     videos = sorted(glob.glob(os.path.join(folder, "*.mp4")))
     scenes = sorted({os.path.basename(v).rsplit("_", 1)[0] for v in videos})
     scene = next((sc for sc in scenes if sc in images), scenes[0] if scenes else None)
@@ -106,70 +90,141 @@ def screenshot_video(nodes):
     return random.choice(pick) if pick else None
 
 
-def execute(pid, prompt):
+class NodeError(Exception):
+    def __init__(self, node_type, message):
+        super().__init__(message); self.node_type = node_type
+
+
+def video_shape(path):
+    """[frames, height, width, 3] of a video file, and whether it has sound (ffprobe)."""
+    out = subprocess.run(["ffprobe", "-v", "error", "-count_frames", "-select_streams", "v:0", "-show_entries",
+                          "stream=nb_read_frames,width,height", "-of", "json", path], capture_output=True, text=True)
+    st = (json.loads(out.stdout or "{}").get("streams") or [{}])[0]
+    snd = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream=index", "-of", "csv=p=0", path],
+                         capture_output=True, text=True).stdout.strip() != ""
+    return [int(st.get("nb_read_frames") or 0), int(st.get("height") or 0), int(st.get("width") or 0), 3], snd
+
+
+def write_latent(path, frames):
+    """A small fake latent in MultiRef's format (video and audio side by side; the shapes say how long it is)."""
+    steps = 2 + 5 * ((int(frames) - 5) // 17) if frames >= 5 else 1
+    tensors = {"audio": ("F32", [1, 1, 1, max(1, round(frames / 24 * 40))]), "video": ("F32", [1, 1, steps, 1, 1])}
+    header, off, blobs = {"__metadata__": {"format": "h3_motion_context_av_v1"}}, 0, []
+    for name in sorted(tensors):
+        dtype, shape = tensors[name]; n = 4
+        for d in shape: n *= d
+        header[name] = {"dtype": dtype, "shape": shape, "data_offsets": [off, off + n]}; off += n; blobs.append(b"\0" * n)
+    text = json.dumps(header).encode(); text += b" " * (-len(text) % 8)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as f: f.write(struct.pack("<Q", len(text)) + text + b"".join(blobs))
+
+
+def run_graph(nodes):
+    """Computes the nodes in order of their links (like ComfyUI): {node id: outputs}; raises NodeError."""
+    done = {}
+    def val(v):
+        if isinstance(v, list) and len(v) == 2 and isinstance(v[0], str) and v[0] in nodes:
+            return out(v[0])[v[1]]
+        return v
+    def out(nid):
+        if nid in done: return done[nid]
+        node = nodes[nid]; ct = node["class_type"]; i = {k: val(v) for k, v in node["inputs"].items()}
+        done[nid] = NODES.get(ct, lambda i, ct=ct: [ct] * 4)(i)
+        return done[nid]
+    for nid in nodes: out(nid)
+    return done
+def _input_file(ct, name):
+    path = os.path.join(inp, name)
+    if not os.path.isfile(path): raise NodeError(ct, f"Invalid file: {name}")
+    return path
+def n_load_image(i):
+    _input_file("LoadImage", i["image"]); return [{"image": i["image"]}, "MASK"]
+def n_load_audio(i):
+    _input_file("LoadAudio", i["audio"]); return [{"audio": i["audio"]}]
+def n_load_video(i):
+    path = _input_file("VHS_LoadVideo", i["video"]); shape, snd = video_shape(path)
+    return [{"video": i["video"], "shape": shape}, shape[0], {"sound": snd} if snd else None, {}]
+def n_r2v(i):
+    groups = {g: [v for k, v in sorted(i.items()) if k.startswith(g + "s.")] for g in ("ref_image", "ref_video", "ref_video_audio", "ref_audio")}
+    CAP["r2v"] = {"prompt": i["prompt"], "length": i["length"], "images": [x["image"] for x in groups["ref_image"]],
+                  "videos": [x["shape"] for x in groups["ref_video"]], "video_audios": len([x for x in groups["ref_video_audio"] if x]),
+                  "audios": [x["audio"] for x in groups["ref_audio"]], "ref_image_size": i["ref_image_size"]}
+    return ["COND", {"frames": int(i["length"]), "width": int(i["width"]), "height": int(i["height"])}]
+def n_free_ctx(i):
+    src = i["source_latent"]
+    if not isinstance(src, dict) or not src.get("loaded"): raise NodeError("MiniMaxH3GeneratedAVMaskedContext", "source_latent is not a loaded H3 latent")
+    CAP["ctx"] = [int(i["context_length"]), int(i["audio_feather_ticks"]), src["file"]]
+    return [dict(i["latent"], context=int(i["context_length"])), int(i["context_length"])]
+def n_video_ctx(i):
+    CAP.setdefault("video_encoded", []).append(i["source_frames"]["shape"])
+    CAP["ctx"] = [int(i["context_length"]), int(i["audio_feather_ticks"]), i["source_frames"]["shape"]]
+    return [dict(i["latent"], context=int(i["context_length"])), int(i["context_length"]), 0, int(i["context_length"])]
+def n_song_ctx(i):
+    CAP["song_ctx"] = [float(i["clip_start_seconds"]), int(i["context_length"])]
+    if i.get("source_frames"): CAP.setdefault("video_encoded", []).append(i["source_frames"]["shape"])
+    if i.get("source_latent") is not None and not (i["source_latent"] or {}).get("loaded"):
+        raise NodeError("MiniMaxH3SongMaskedAVContext", "source_latent is not a loaded H3 latent")
+    if i.get("source_frames") or i.get("source_latent"):
+        CAP["ctx"] = [int(i["context_length"]), 8, (i.get("source_frames") or {}).get("shape") or i["source_latent"]["file"]]
+    frames = i["latent"]["frames"]
+    return [dict(i["latent"], context=int(i["context_length"])), int(i["context_length"]), {"song": i["master_audio"]["audio"], "frames": frames}]
+def n_load_latent(i):
+    p = i["latent_path"]; path = p if os.path.isabs(p) else os.path.join(outp, p)
+    if not os.path.isfile(path): raise NodeError("MiniMaxH3MotionContextLoadLatent", f"no saved latent at {p}")
+    return [{"loaded": True, "file": os.path.relpath(path, outp)}]
+def n_sampler(i):
+    lat = i["latent_image"]
+    return [dict(lat) if isinstance(lat, dict) else lat, dict(lat) if isinstance(lat, dict) else lat]
+def n_save_latent(i):
+    prefix = i["filename_prefix"]; slot = int(i.get("clip_index") or 0)
+    path = os.path.join(outp, f"{prefix}_{slot:05d}.safetensors" if slot else f"{prefix}_00001_.safetensors")
+    write_latent(path, (i["latent"] or {}).get("frames", 0) if isinstance(i["latent"], dict) else 0)
+    CAP["saved"] = os.path.relpath(path, outp)
+    return [path]
+def n_decode(i):
+    return [{"frames": (i["samples"] or {}).get("frames", 0) if isinstance(i["samples"], dict) else 0}]
+NODES = {"LoadImage": n_load_image, "LoadAudio": n_load_audio, "VHS_LoadVideo": n_load_video, "MiniMaxH3ReferenceToVideo": n_r2v,
+         "MiniMaxH3GeneratedAVMaskedContext": n_free_ctx, "MiniMaxH3ExistingVideoMaskedContext": n_video_ctx,
+         "MiniMaxH3SongMaskedAVContext": n_song_ctx, "MiniMaxH3MotionContextLoadLatent": n_load_latent,
+         "SamplerCustomAdvanced": n_sampler, "MiniMaxH3MotionContextSaveLatent": n_save_latent, "VAEDecode": n_decode}
+
+
+def clip_of(pid):
+    """The clip a prompt makes (Encore's extra data), for the tone of its fake preview: 300 Hz for clip 1, 400 for 2…"""
     try:
-        bank = None
-        nodes = prompt
-        def refs_of(link):
-            nonlocal bank
-            if not link: return None
-            node = nodes[link[0]]; i = node["inputs"]
-            prev = refs_of(i.get("references"))
-            if node["class_type"] == "H3PlanReference": return pkg.H3PlanReference().add(i["name"], i["image"], prev)[0]
-            if node["class_type"] == "H3PlanVideo": return pkg.H3PlanVideo().add(i["name"], i["video_file"], prev)[0]
-            return pkg.H3PlanVoice().add(i["name"], i["voice_file"], prev)[0]
-        clipn = next(n for n in nodes.values() if n["class_type"] == "H3PlanClip")["inputs"]
-        refs = refs_of(clipn.get("references"))
-        song = {"waveform": torch.zeros((1, 2, 8000 * 60)), "sample_rate": 8000} if clipn.get("master_audio") else None   # music_video: a silent song
-        o = pkg.H3PlanClip().prepare("CLIP", VVAE(), AVAE(), clipn["plan_file"], clipn["clip_index"], clipn["seed_mode"], references=refs, master_audio=song,
-                                     width=clipn["width"], height=clipn["height"], take_token=clipn["take_token"], parent_token=clipn["parent_token"], seed_override=clipn["seed_override"])
-        CAP["clip_info"] = o[6]          # the clip node's report, for the tests
-        sl = next(n for n in nodes.values() if n["class_type"] == "H3PlanSaveLatent")["inputs"]
-        pkg.H3PlanSaveLatent().save(o[1], o[5], sl["delete_stale"], AVAE())
-        dst = os.path.join(outp, o[4] + "_00001.mp4"); os.makedirs(os.path.dirname(dst), exist_ok=True)
-        shot = screenshot_video(nodes)
-        if shot: shutil.copy(shot, dst)
-        else:      # a preview as long as the take (an edit clip that continues it reads its last frames)
-            metas = glob.glob(os.path.join(outp, "h3_clip_plan", "*", "latents", f"clip_{int(clipn['clip_index']):03d}", o[5]["take_id"] + ".json"))
-            frames = json.load(open(metas[0])).get("frames", 0) if metas else 0
-            made = frames and subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=320x180:rate=24", "-f", "lavfi", "-i",
-                                              f"sine=frequency={200 + 100 * int(clipn['clip_index'])}:sample_rate=48000", "-frames:v", str(frames),
-                                              "-shortest", "-c:a", "aac", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", dst]).returncode == 0
-            if not made: shutil.copy(VIDEOS[clipn["clip_index"] % len(VIDEOS)], dst)
-        HISTORY[pid] = {"status": {"status_str": "success", "completed": True, "messages": []}, "outputs": {}}
+        return int(((PROMPTS.get(pid) or (None, {}))[1].get("h3studio") or {}).get("clip") or 1)
+    except (TypeError, ValueError):
+        return 1
+def execute(pid, prompt):
+    nodes = prompt
+    try:
+        done = run_graph(nodes)
+        CAP["clip_info"] = {"r2v": CAP.get("r2v"), "ctx": CAP.get("ctx"), "song_ctx": CAP.get("song_ctx")}
+        combine = next((k for k, n in nodes.items() if n["class_type"] == "VHS_VideoCombine"), None)
+        outputs = {}
+        if combine:
+            prefix = nodes[combine]["inputs"]["filename_prefix"]
+            frames = int((done.get("20") or [None, {}])[1].get("frames") or 0)
+            dst = os.path.join(outp, prefix + "_00001.mp4"); os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shot = screenshot_video(nodes)
+            if shot: shutil.copy(shot, dst)
+            else:      # a preview as long as the take (an edit clip that continues it reads its last frames)
+                made = frames and subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=320x180:rate=24", "-f", "lavfi", "-i",
+                                                  f"sine=frequency={200 + 100 * clip_of(pid)}:sample_rate=48000",
+                                                  "-frames:v", str(frames), "-shortest", "-c:a", "aac", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", dst]).returncode == 0
+                if not made: shutil.copy(VIDEOS[0], dst)
+            outputs[combine] = {"gifs": [{"filename": os.path.basename(dst), "subfolder": os.path.dirname(prefix), "type": "output", "format": "video/h264-mp4"}]}
+        HISTORY[pid] = {"status": {"status_str": "success", "completed": True, "messages": []}, "outputs": outputs}
         try:
             with open("/tmp/mock_last_prompt.json", "w") as fh: json.dump(prompt, fh, indent=1)
         except Exception: pass
         ws_send({"type": "execution_success", "data": {"prompt_id": pid}})
+    except NodeError as e:
+        HISTORY[pid] = {"status": {"status_str": "error", "completed": False, "messages": [["execution_error", {"node_type": e.node_type, "exception_message": str(e)}]]}, "outputs": {}}
+        ws_send({"type": "execution_error", "data": {"prompt_id": pid, "node_type": e.node_type, "exception_message": str(e)}})
     except Exception as e:
-        HISTORY[pid] = {"status": {"status_str": "error", "completed": False, "messages": [["execution_error", {"node_type": "H3PlanClip", "exception_message": str(e)}]]}, "outputs": {}}
-        ws_send({"type": "execution_error", "data": {"prompt_id": pid, "node_type": "H3PlanClip", "exception_message": str(e)}})
-def execute_assemble(pid, prompt):
-    a = prompt["10"]["inputs"]
-    class Stream:
-        def stream_to_vhs(self, **kw):
-            STREAM.clear(); STREAM.update(input_count=kw["input_count"], audio_samples=int(kw["master_audio"]["waveform"].shape[-1]),
-                                          audio_rate=int(kw["master_audio"]["sample_rate"]),
-                                          audio_level=float(abs(kw["master_audio"]["waveform"]).mean()))
-            dst = os.path.join(outp, kw["filename_prefix"] + "_00001.mp4"); os.makedirs(os.path.dirname(dst), exist_ok=True); shutil.copy(screenshot_video({}) or VIDEOS[0], dst)
-            return {"ui": {"gifs": [{"filename": os.path.basename(dst), "subfolder": os.path.dirname(kw["filename_prefix"]), "type": "output"}]}, "result": ([dst],)}
-    nodes_mod.NODE_CLASS_MAPPINGS["MiniMaxH3StreamLiveMusicVideoToVHS"] = Stream
-    pkg._decode_audio = lambda vae, z: (torch.zeros((1, 2, int(z.shape[-1] * 44100 / 40))), 44100)
-    try:
-        song = {"waveform": torch.zeros((1, 2, 8000 * 60)), "sample_rate": 8000} if a.get("master_audio") else None
-        def refs_of(link):
-            if not link: return None
-            node = prompt[link[0]]; i = node["inputs"]
-            prev = refs_of(i.get("references"))
-            if node["class_type"] == "H3PlanVideo": return pkg.H3PlanVideo().add(i["name"], i["video_file"], prev)[0]
-            if node["class_type"] == "H3PlanReference": return pkg.H3PlanReference().add(i["name"], i["image"], prev)[0]
-            return pkg.H3PlanVoice().add(i["name"], i["voice_file"], prev)[0]
-        r = pkg.H3PlanAssemble().assemble(VVAE(), a["plan_file"], 0, 19, master_audio=song, audio_vae=AVAE(),
-                                          references=refs_of(a.get("references")), width=a.get("width"), height=a.get("height"))
-        LAST_ASSEMBLY.clear(); LAST_ASSEMBLY.update(STREAM)
-        HISTORY[pid] = {"status": {"status_str": "success", "messages": []}, "outputs": {"10": {**r["ui"], "text": [r["result"][1]]}}}
-    except Exception as e:
-        HISTORY[pid] = {"status": {"status_str": "error", "messages": [["execution_error", {"node_type": "H3PlanAssemble", "exception_message": str(e)}]]}, "outputs": {}}
+        HISTORY[pid] = {"status": {"status_str": "error", "completed": False, "messages": [["execution_error", {"node_type": "?", "exception_message": repr(e)}]]}, "outputs": {}}
+        ws_send({"type": "execution_error", "data": {"prompt_id": pid, "node_type": "?", "exception_message": repr(e)}})
 import itertools
 NUM, COUNTER, FOREIGN, INTERRUPTS = {}, itertools.count(1), set(), []
 class H(BaseHTTPRequestHandler):
@@ -202,7 +257,6 @@ class H(BaseHTTPRequestHandler):
             self.close_connection = True
             return
         if u.path == "/system_stats": return self.send({"system": {"comfyui_version": "mock"}, "devices": [{"name": "MockGPU"}]})
-        if u.path == "/h3clipplan/ping": return self.send({"app": "h3clipplan", "version": "3.5"})
         if u.path == "/object_info": return self.send(object_info())
         if u.path.startswith("/object_info/"): n = u.path.split("/")[-1]; return self.send({n: object_info()[n]})
         if u.path == "/view":
@@ -213,10 +267,6 @@ class H(BaseHTTPRequestHandler):
             return self.send(open(path, "rb").read(), ctype=ct)
         if u.path == "/queue": return self.send({"queue_running": [[NUM.get(pid, 0), pid, PROMPTS[pid][0], PROMPTS[pid][1]] for pid in RUNNING], "queue_pending": [[NUM.get(pid, 0), pid, PROMPTS[pid][0], PROMPTS[pid][1]] for pid in QUEUE]})
         if u.path.startswith("/history/"): pid = u.path.split("/")[-1]; return self.send({pid: HISTORY[pid]} if pid in HISTORY else {})
-        if u.path == "/h3clipplan/takes":
-            try: return self.send(pkg._takes_listing(q["plan"]))
-            except Exception as e: return self.send({"error": str(e)}, 400)
-        if u.path == "/h3clipplan/settings": return self.send(pkg._read_settings(q["project"]))
         self.send({"error": "nf " + u.path}, 404)
     def do_POST(self):
         u = urlparse(self.path); n = int(self.headers.get("Content-Length", 0)); raw = self.rfile.read(n)
@@ -239,10 +289,6 @@ class H(BaseHTTPRequestHandler):
             missing = [n["class_type"] for n in body["prompt"].values() if n["class_type"] not in object_info()]
             if missing: QUEUE.remove(pid); return self.send({"error": {"message": "missing node"}, "node_errors": {"1": {"class_type": missing[0], "errors": [{"message": "not installed"}]}}}, 400)
             return self.send({"prompt_id": pid, "number": len(QUEUE)})
-        if u.path == "/h3clipplan/selection": return self.send(pkg._save_selection(body["plan"], body["selection"]))
-        if u.path == "/h3clipplan/digest": return self.send(pkg._ref_digests(body.get("images"), body.get("voices")))
-        if u.path == "/h3clipplan/delete_takes": return self.send(pkg._delete_takes(body["plan"], body["takes"]))
-        if u.path == "/h3clipplan/settings": return self.send(pkg._write_settings(body["project"], body["settings"]))
         if u.path == "/interrupt":
             INTERRUPTS.append(body.get("prompt_id"))
             for pid in list(RUNNING):
@@ -288,8 +334,8 @@ class H(BaseHTTPRequestHandler):
             return self.send({"prompt_id": pid})
         if u.path == "/test/fail":  # test hook: the oldest queued prompt fails
             pid = RUNNING.pop(0) if RUNNING else QUEUE.pop(0)
-            HISTORY[pid] = {"status": {"status_str": "error", "completed": False, "messages": [["execution_error", {"node_type": "H3PlanClip", "exception_message": "panne simulée"}]]}, "outputs": {}}
-            ws_send({"type": "execution_error", "data": {"prompt_id": pid, "node_type": "H3PlanClip", "exception_message": "panne simulée"}})
+            HISTORY[pid] = {"status": {"status_str": "error", "completed": False, "messages": [["execution_error", {"node_type": "MiniMaxH3ReferenceToVideo", "exception_message": "panne simulée"}]]}, "outputs": {}}
+            ws_send({"type": "execution_error", "data": {"prompt_id": pid, "node_type": "MiniMaxH3ReferenceToVideo", "exception_message": "panne simulée"}})
             return self.send({"prompt_id": pid})
         if u.path == "/test/foreign":   # test hook: a prompt queued by someone else (running if asked)
             pid = "foreign-" + uuid.uuid4().hex[:6]; PROMPTS[pid] = ({}, {}); NUM[pid] = next(COUNTER)
@@ -302,14 +348,11 @@ class H(BaseHTTPRequestHandler):
             return self.send({"root": os.path.dirname(inp), "uploads": [list(u_) for u_ in UPLOADS]})
         if u.path == "/test/interrupts": return self.send({"interrupts": INTERRUPTS})
         if u.path == "/test/cap":   # test hook: what the plugin gave the fake nodes (video encodes, contexts, last assembly)
-            return self.send({"video_encoded": CAP.get("video_encoded", []), "song_ctx": list(CAP.get("song_ctx", ())),
-                              "ctx": [CAP["ctx"][0], CAP["ctx"][1], list(CAP["ctx"][2])] if "ctx" in CAP else None,
-                              "assembly": LAST_ASSEMBLY,
-                              "clip_info": CAP.get("clip_info"),
-                              "r2v": {"prompt": CAP.get("prompt"), "videos": [list(v.shape) for v in (CAP.get("ref_videos") or {}).values()],
-                                      "video_audios": len(CAP.get("ref_video_audios") or {})}})
+            return self.send({"video_encoded": CAP.get("video_encoded", []), "song_ctx": CAP.get("song_ctx") or [],
+                              "ctx": CAP.get("ctx"), "assembly": LAST_ASSEMBLY, "clip_info": CAP.get("clip_info"), "saved": CAP.get("saved"),
+                              "r2v": CAP.get("r2v") or {"prompt": None, "videos": [], "video_audios": 0, "images": [], "audios": []}})
         if u.path == "/test/cap_reset":
-            CAP.pop("video_encoded", None); CAP.pop("audio_encoded", None); CAP.pop("song_ctx", None); CAP.pop("ctx", None)
+            for k in ("video_encoded", "song_ctx", "ctx", "r2v", "saved"): CAP.pop(k, None)
             return self.send({})
         if u.path == "/test/run":   # test hook: execute the oldest queued prompt
             if RUNNING: ws_send({"type": "executing", "data": {"prompt_id": RUNNING[0], "node": "26"}}); time.sleep(0.3)
@@ -320,7 +363,7 @@ class H(BaseHTTPRequestHandler):
                 return self.send({"prompt_id": pid, "status": "success", "messages": []})
             RUNNING.insert(0, pid)          # still in the queue (running) until its history is written
             try:
-                (execute_assemble if "10" in prompt else execute)(pid, prompt)
+                execute(pid, prompt)
             finally:
                 if pid in RUNNING: RUNNING.remove(pid)
             return self.send({"prompt_id": pid, "status": HISTORY[pid]["status"]["status_str"], "messages": HISTORY[pid]["status"]["messages"]})

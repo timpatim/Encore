@@ -1,7 +1,7 @@
 """Encore - the ComfyUI workflows (API format) of a generation and of an assembly.
 
 Pure functions, no state: the clip workflow (models, LoRA, sampler, preview), the latent upscale in two passes,
-the assembly workflow (plugin fallback), what a clip needs from the project and which ComfyUI nodes are missing.
+what a clip needs from the project and which ComfyUI nodes are missing.
 Used by the engine (generation, dispatch).
 """
 from __future__ import annotations
@@ -14,7 +14,32 @@ from .projects import StudioError
 
 NEEDED_NODES = ["UNETLoader", "CLIPLoader", "VAELoader", "MiniMaxH3SigmaShift", "MiniMaxH3AudioVAECompatibility",
                 "RandomNoise", "BasicGuider", "KSamplerSelect", "BasicScheduler", "SamplerCustomAdvanced", "VAEDecode",
-                "VHS_VideoCombine", "H3PlanClip", "H3PlanSaveLatent", "H3PlanReference", "H3PlanVoice"]
+                "VHS_VideoCombine", "MiniMaxH3ReferenceToVideo", "MiniMaxH3MotionContextSaveLatent", "LoadImage"]
+# 0.50: ComfyUI does all the inference with its own nodes and those of ComfyUI-H3-Motion-Context-MultiRef and
+# VideoHelperSuite; Encore composes the prompt and prepares the files (prepare.py)
+LOAD_LATENT = "MiniMaxH3MotionContextLoadLatent"
+FREE_CONTEXT = "MiniMaxH3GeneratedAVMaskedContext"
+SONG_CONTEXT = "MiniMaxH3SongMaskedAVContext"
+VIDEO_CONTEXT = "MiniMaxH3ExistingVideoMaskedContext"
+REF_GROUPS = ("ref_image", "ref_video", "ref_video_audio", "ref_audio")
+
+
+def ref_inputs(info):
+    """How MiniMaxH3ReferenceToVideo names its growing inputs, read in /object_info: {group: (pattern, first
+    number)}; a pattern takes the number (« ref_images.ref_image_{} »). Default: the form of ComfyUI's workflows,
+    numbered from 0."""
+    spec = ((info or {}).get("MiniMaxH3ReferenceToVideo") or {}).get("input") or {}
+    keys = set((spec.get("required") or {}).keys()) | set((spec.get("optional") or {}).keys())
+    out = {}
+    for group in REF_GROUPS:
+        found = None
+        for form in (group + "s." + group + "_{}", group + "_{}"):
+            numbers = sorted(int(k[len(form) - 2:]) for k in keys if k.startswith(form[:-2]) and k[len(form) - 2:].isdigit())
+            if numbers:
+                found = (form, numbers[0])
+                break
+        out[group] = found or (group + "s." + group + "_{}", 0)
+    return out
 
 
 # --------------------------------------------------------------------------- workflow (API format)
@@ -43,8 +68,15 @@ def _model_chain(p, s):
 
 
 def clip_workflow(job):
-    """job: plan_file, clip_index, mode, refs [{name, image, voice}] (ComfyUI paths), song (ComfyUI path),
-    take_token, parent_token, seed, settings."""
+    """The workflow of one take (0.50: native nodes, MultiRef and VHS only). job:
+    settings, mode, prompt (composed by Encore), length (frames), ref_image_size, seed,
+    images / voices: [ComfyUI input path] in the order of <Picture i> / <Audio j>,
+    song: input path (music video, already shifted on the plan's timeline), clip_start: seconds in it,
+    context: frames continued, feather: audio feather ticks,
+    source: None | {"latent": path from ComfyUI's output folder} | {"video": input path} (the take or the video it
+    continues), edit: None | {"video": input path, "sound": bool} (the slice of the edited video),
+    save_prefix / preview_prefix: names in ComfyUI's output folder, names: ref_inputs(object_info),
+    upscale, context_latent."""
     s = job["settings"]
     p = {}
     model = _model_chain(p, s)
@@ -53,109 +85,112 @@ def clip_workflow(job):
     p["7"] = {"class_type": "VAELoader", "inputs": {"vae_name": s["audio_vae"]}}
     p["8"] = {"class_type": "MiniMaxH3AudioVAECompatibility", "inputs": {"audio_vae": ["7", 0]}}
     free = job["mode"] == "free"
+    names = job.get("names") or ref_inputs(None)
+    ref_name = lambda group, k: names[group][0].format(names[group][1] + k)  # noqa: E731
+    r2v = {"clip": ["5", 0], "vae": ["6", 0], "audio_vae": ["8", 0], "prompt": job["prompt"], "width": int(s["width"]),
+           "height": int(s["height"]), "length": int(job["length"]), "ref_image_size": job.get("ref_image_size") or "match"}
+    for k, image in enumerate(job.get("images") or []):
+        node = str(30 + k)
+        p[node] = {"class_type": "LoadImage", "inputs": {"image": image}}
+        r2v[ref_name("ref_image", k)] = [node, 0]
+    for k, voice in enumerate(job.get("voices") or []):
+        node = str(50 + k)
+        p[node] = {"class_type": "LoadAudio", "inputs": {"audio": voice}}
+        r2v[ref_name("ref_audio", k)] = [node, 0]
+    edit = job.get("edit")
+    if edit:
+        p["11"] = _load_video(edit["video"])
+        r2v[ref_name("ref_video", 0)] = ["11", 0]
+        if edit.get("sound"):
+            r2v[ref_name("ref_video_audio", 0)] = ["11", 2]
+    p["20"] = {"class_type": "MiniMaxH3ReferenceToVideo", "inputs": r2v}
+    # the latent to sample: the empty one, or with the end of the take (or video) it continues and the song protected
+    source, latent, sound = job.get("source") or {}, ["20", 1], None
+    if source.get("latent"):
+        p["18"] = {"class_type": LOAD_LATENT, "inputs": {"latent_path": source["latent"], "clip_index": 0}}
+    if source.get("video"):
+        p["12"] = _load_video(source["video"])
     if not free:
         p["9"] = {"class_type": "LoadAudio", "inputs": {"audio": job["song"]}}
-    refs, node = None, 30
-    for ref in job["refs"]:
-        if ref.get("image"):
-            inputs = {"name": ref["name"], "image": ref["image"]}
-            if refs:
-                inputs["references"] = refs
-            p[str(node)] = {"class_type": "H3PlanReference", "inputs": inputs}
-            refs, node = [str(node), 0], node + 1
-        if ref.get("voice") and free:
-            inputs = {"name": ref["name"], "voice_file": ref["voice"]}
-            if refs:
-                inputs["references"] = refs
-            p[str(node)] = {"class_type": "H3PlanVoice", "inputs": inputs}
-            refs, node = [str(node), 0], node + 1
-        if ref.get("video"):
-            refs, node = _video_node(p, node, ref, refs)
-    clip = {"clip": ["5", 0], "vae": ["6", 0], "audio_vae": ["8", 0], "plan_file": job["plan_file"],
-            "clip_index": int(job["clip_index"]), "seed_mode": "plan", "width": int(s["width"]), "height": int(s["height"]),
-            "take_token": job["take_token"], "parent_token": job.get("parent_token") or "", "seed_override": int(job["seed"])}
-    if not free:
-        clip["master_audio"] = ["9", 0]
-    if refs:
-        clip["references"] = refs
-    p["20"] = {"class_type": "H3PlanClip", "inputs": clip}
-    p["21"] = {"class_type": "RandomNoise", "inputs": {"noise_seed": ["20", 3]}}
+        ctx = {"latent": ["20", 1], "audio_vae": ["8", 0], "master_audio": ["9", 0], "clip_start_seconds": round(float(job["clip_start"]), 6),
+               "context_length": int(job["context"]) if source else 0, "source_fps": 24.0, "crop": "disabled"}
+        if source.get("latent"):
+            ctx["source_latent"] = ["18", 0]
+        elif source.get("video"):
+            ctx.update(vae=["6", 0], source_frames=["12", 0])
+        p["19"] = {"class_type": SONG_CONTEXT, "inputs": ctx}
+        latent, sound = ["19", 0], ["19", 2]
+    elif source.get("latent"):
+        p["19"] = {"class_type": FREE_CONTEXT, "inputs": {"latent": ["20", 1], "source_latent": ["18", 0],
+                                                          "context_length": int(job["context"]), "audio_feather_ticks": int(job.get("feather", 8))}}
+        latent = ["19", 0]
+    elif source.get("video"):
+        p["19"] = {"class_type": VIDEO_CONTEXT, "inputs": {"latent": ["20", 1], "vae": ["6", 0], "audio_vae": ["8", 0],
+                                                           "source_frames": ["12", 0], "source_audio": ["12", 2], "source_fps": 24.0,
+                                                           "context_length": int(job["context"]), "crop": "disabled",
+                                                           "audio_feather_ticks": int(job.get("feather", 8))}}
+        latent = ["19", 0]
+    job["latent_link"] = latent
+    p["21"] = {"class_type": "RandomNoise", "inputs": {"noise_seed": int(job["seed"])}}
     p["22"] = {"class_type": "BasicGuider", "inputs": {"model": model, "conditioning": ["20", 0]}}
     p["23"] = {"class_type": "KSamplerSelect", "inputs": {"sampler_name": s["sampler_name"]}}
     p["24"] = {"class_type": "BasicScheduler", "inputs": {"model": model, "scheduler": s["scheduler"], "steps": int(s["steps"]), "denoise": 1.0}}
     p["25"] = {"class_type": "SamplerCustomAdvanced", "inputs": {"noise": ["21", 0], "guider": ["22", 0], "sampler": ["23", 0],
-                                                                 "sigmas": ["24", 0], "latent_image": ["20", 1]}}
-    p["26"] = {"class_type": "H3PlanSaveLatent", "inputs": {"latent": ["25", 0], "plan_clip": ["20", 5], "delete_stale": False,
-                                                            "audio_vae": ["8", 0]}}
-    p["27"] = {"class_type": "VAEDecode", "inputs": {"samples": ["26", 0], "vae": ["6", 0]}}
+                                                                 "sigmas": ["24", 0], "latent_image": latent}}
+    p["26"] = {"class_type": "MiniMaxH3MotionContextSaveLatent", "inputs": {"latent": ["25", 0], "filename_prefix": job["save_prefix"],
+                                                                           "clip_index": 1}}
+    p["27"] = {"class_type": "VAEDecode", "inputs": {"samples": ["25", 0], "vae": ["6", 0]}}
+    if free:
+        p["29"] = {"class_type": "VAEDecodeAudio", "inputs": {"samples": ["25", 0], "vae": ["8", 0]}}
+        sound = ["29", 0]
     p["28"] = {"class_type": "VHS_VideoCombine", "inputs": {
-        "images": ["27", 0], "audio": ["26", 1] if free else ["20", 2], "frame_rate": 24, "loop_count": 0,
-        "filename_prefix": ["20", 4], "format": "video/h264-mp4", "pix_fmt": "yuv420p", "crf": int(s["crf"]),
+        "images": ["27", 0], "audio": sound, "frame_rate": 24, "loop_count": 0,
+        "filename_prefix": job["preview_prefix"], "format": "video/h264-mp4", "pix_fmt": "yuv420p", "crf": int(s["crf"]),
         "save_metadata": False, "trim_to_audio": False, "pingpong": False, "save_output": True}}
     if job.get("upscale"):
         add_upscale(p, job, model)
     return p
 
 
-def _video_node(p, node, ref, refs):
-    """An « H3 Plan - Video » node (the start video) in the chain of references."""
-    inputs = {"name": ref["name"], "video_file": ref["video"]}
-    if refs:
-        inputs["references"] = refs
-    p[str(node)] = {"class_type": "H3PlanVideo", "inputs": inputs}
-    return [str(node), 0], node + 1
+def _load_video(path):
+    """A prepared piece of video (prepare.video_piece: already at the size, 24 fps), with its sound."""
+    return {"class_type": "VHS_LoadVideo", "inputs": {"video": path, "force_rate": 24, "custom_width": 0, "custom_height": 0,
+                                                      "frame_load_cap": 0, "skip_first_frames": 0, "select_every_nth": 1}}
 
 
-def assemble_workflow(plan_file, mode, last_clip, settings, song=None, start_video=None, size=None, edit_video=None):
-    """The plugin's assembly node: the selection of ComfyUI's working copy, clips 1 to last_clip.
-    start_video: {"name", "video"} (ComfyUI path) when the segment opens the video;
-    edit_video: the same for the edited video, when the final video keeps its original sound."""
-    p = {"1": {"class_type": "VAELoader", "inputs": {"vae_name": settings["video_vae"]}}}
-    inputs = {"video_vae": ["1", 0], "plan_file": plan_file, "last_clip": int(last_clip), "crf": int(settings["crf"])}
-    if mode == "free" or start_video:
-        p["2"] = {"class_type": "VAELoader", "inputs": {"vae_name": settings["audio_vae"]}}
-        p["4"] = {"class_type": "MiniMaxH3AudioVAECompatibility", "inputs": {"audio_vae": ["2", 0]}}
-        inputs["audio_vae"] = ["4", 0] if start_video else ["2", 0]
-    if start_video:
-        refs, _node = _video_node(p, 30, start_video, None)
-        inputs.update(references=refs, width=int(size[0]), height=int(size[1]))
-    if edit_video:
-        refs, _node = _video_node(p, 30, edit_video, None)
-        inputs["references"] = refs
-    if mode != "free":
-        p["3"] = {"class_type": "LoadAudio", "inputs": {"audio": song}}
-        inputs["master_audio"] = ["3", 0]
-    p["10"] = {"class_type": "H3PlanAssemble", "inputs": inputs}
-    return p
+def saved_latent_name(save_prefix):
+    """(subfolder, file name) in ComfyUI's output folder of the latent node 26 saves (MultiRef's fixed slot 1)."""
+    sub, _, stem = save_prefix.rpartition("/")
+    return sub, f"{stem}_00001.safetensors"
 
 
 def clip_needs(plan, index, settings):
-    """References of a clip with the project files chosen for them, and what is missing."""
+    """The files a clip uses (normalized plan v7: its subjects' pictures and voices, its anchors, the video it
+    continues or edits) with their paths in the project, and what is missing. settings: {"video": the project's
+    video file, "song": the song}."""
     clip = plan["clips"][index - 1]
     free = plan["mode"] == "free"
-    used = plan_core.PLACEHOLDER_RE.findall(clip["prompt"])
-    numbered = "<Picture " in clip["prompt"] and not used
     problems, refs = [], []
+    files = (clip.get("compose") or {}).get("files") or {}
     for name in clip["refs"]:
-        chosen = (settings.get("refs") or {}).get(name) or {}
-        wants_image = any(kind == "picture" and n == name for kind, n in used) or numbered
-        if wants_image and not chosen.get("image"):
-            problems.append(_t("engine.picture_of_not_chosen", name=name))
-        refs.append({"name": name, "image": chosen.get("image") or None, "voice": (chosen.get("voice") or None) if free else None})
+        entry = files.get(name) or plan_core.file_of(plan, name)
+        rel = entry.get("file") or None
+        kind = entry.get("kind")
+        if not rel and kind != "voice":            # a voice without its file: H3 chooses one (its lines are removed)
+            problems.append(_t("engine.file_not_chosen", name=name))
+        refs.append({"name": name, "image": rel if kind == "image" else None, "voice": rel if kind == "voice" and free else None})
     if not free and not settings.get("song"):
         problems.append(_t("engine.song_not_chosen"))
     spec = plan.get("start_video")
     if index == 1 and clip["continue"] and spec:      # clip 1 continues the start video
-        chosen = (settings.get("refs") or {}).get(spec["ref"]) or {}
-        if not chosen.get("video"):
+        if not settings.get("video"):
             problems.append(_t("engine.start_video_not_chosen"))
-        refs.append({"name": spec["ref"], "image": None, "voice": None, "video": chosen.get("video") or None})
+        refs.append({"name": spec["ref"], "image": None, "voice": None, "video": settings.get("video") or None})
     edit = plan.get("edit_video")
     if edit and plan_core.edit_slice(plan, index):    # the clips inside the segment edit their slice of the video
-        chosen = (settings.get("refs") or {}).get(edit["ref"]) or {}
-        if not chosen.get("video"):
+        if not settings.get("video"):
             problems.append(_t("engine.edit_video_not_chosen"))
-        refs.append({"name": edit["ref"], "image": None, "voice": None, "video": chosen.get("video") or None})
+        refs.append({"name": edit["ref"], "image": None, "voice": None, "video": settings.get("video") or None})
     return refs, problems
 
 
@@ -253,12 +288,12 @@ def _pass2_model(p, s, loras):
 
 def add_upscale(p, job, model):
     """Turn the single sampling of clip_workflow into: first pass at the start size, latent upscale, second pass
-    at the branch size. The latent prepared by H3PlanClip at the branch size (continuation frames, song and their
-    noise masks) is split and recombined with ComfyUI's own nodes, so the plugin is unchanged."""
+    at the branch size. The latent prepared at the branch size (continuation frames, song and their noise masks)
+    is split and recombined with ComfyUI's own nodes."""
     s, up = job["settings"], job["upscale"]
     width, height = int(s["width"]), int(s["height"])
     music = job["mode"] != "free"
-    p["60"] = {"class_type": "LTXVSeparateAVLatent", "inputs": {"av_latent": ["20", 1]}}
+    p["60"] = {"class_type": "LTXVSeparateAVLatent", "inputs": {"av_latent": job.get("latent_link") or ["20", 1]}}
     # first pass: the prepared video shrunk to the start size (LatentUpscale counts latents in eighths, H3 in sixteenths)
     p["61"] = {"class_type": "LatentUpscale", "inputs": {"samples": ["60", 0], "upscale_method": "bilinear",
                                                          "width": up["w0"] // 2, "height": up["h0"] // 2, "crop": "disabled"}}
@@ -313,14 +348,25 @@ def add_upscale(p, job, model):
         sigmas2 = ["65", 0]
     p["75"] = {"class_type": "SamplerCustomAdvanced", "inputs": {"noise": ["21", 0], "guider": guider2, "sampler": sampler2,
                                                                  "sigmas": sigmas2, "latent_image": ["72", 0]}}
-    p["26"]["inputs"]["latent"] = ["75", 0]
+    for node in ("26", "27", "29"):          # the latent saved and decoded: the one of the second pass
+        if node in p:
+            p[node]["inputs"]["latent" if node == "26" else "samples"] = ["75", 0]
     return p
 
 
-def missing_nodes(info, settings, music=False, upscale=None, video=False):
+def missing_nodes(info, settings, music=False, upscale=None, video=False, voices=False, continues=False):
+    """The nodes a generation needs that ComfyUI does not have (0.50: native, MultiRef and VHS nodes)."""
     need = list(NEEDED_NODES)
     if video:
-        need.append("H3PlanVideo")
+        need += ["VHS_LoadVideo", VIDEO_CONTEXT]
+    if music:
+        need += ["LoadAudio", SONG_CONTEXT]
+    else:
+        need.append("VAEDecodeAudio")
+    if voices:
+        need.append("LoadAudio")
+    if continues:
+        need += [LOAD_LATENT, FREE_CONTEXT if not music else SONG_CONTEXT]
     if upscale:
         need += UPSCALE_NODES + UPSCALER_NODES[upscale["upscaler"]]
         if upscale.get("pass2_loras"):
@@ -329,14 +375,10 @@ def missing_nodes(info, settings, music=False, upscale=None, video=False):
         need.append("ModelAttentionBackend")
     if projects.active_loras(settings):
         need.append("LoraLoaderModelOnly")
-    if music:
-        need.append("LoadAudio")
     if settings.get("preview_mode") == "kj":
         need.append("ModelPreviewOverrideKJ")
-    missing = [n for n in need if n not in info]
-    clip = info.get("H3PlanClip")
-    if clip and "take_token" not in ((clip.get("input") or {}).get("optional") or {}):
-        missing.append(_t("engine.h3planclip_up_to_date_plugin_comfyui"))
-    elif clip and "H3PlanVideo" not in info and "H3PlanVideo" not in missing:
-        missing.append(_t("engine.plugin_too_old_plan_v4"))     # plans are version 4 since Encore 0.30
-    return missing
+    out = []
+    for n in need:
+        if n not in info and n not in out:
+            out.append(n)
+    return out

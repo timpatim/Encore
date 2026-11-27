@@ -1,6 +1,6 @@
 """v0.40: the final video made by Encore with ffmpeg from the takes' previews (no assembly in ComfyUI):
-length on the timeline, the sound of each take where it shows, the original sound over an edited part; the plugin
-still assembles when a take has no preview."""
+length on the timeline, the sound of each take where it shows, the original sound over an edited part; 0.50: a take
+without its preview is not assembled."""
 import json, os, shutil, subprocess, sys, time, urllib.request, urllib.error
 import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from common import ENCORE, fixture, plan_screen, takes_screen, launch_go  # noqa: E402
@@ -60,8 +60,7 @@ try:
     call(S, P + "/import-plan?filename=rue.json", raw=open(fixture("rue_test_v1.plan.json"), "rb").read(), method="POST")
     for f in (fixture("fillette.png"), fixture("rue.png")):
         call(S, f"{P}/resources?kind=images&filename={os.path.basename(f)}", raw=open(f, "rb").read(), method="POST")
-    call(S, P + "/branches/b1", {"refs": {"fillette": {"image": "refs/images/fillette.png"}, "rue": {"image": "refs/images/rue.png"}},
-                                 "width": 1024, "height": 576}, "PUT")
+    call(S, P + "/branches/b1", {"width": 1024, "height": 576}, "PUT")
     for k in (1, 2, 3):
         job = gen(P, {"clip": k, "branch": "b1"})
         check(f"clip {k} generated", job["status"] == "done", (job["status"], job.get("error")))
@@ -83,16 +82,15 @@ try:
     check("infos written", os.path.isfile(f"{root}/projets/rue/exports/{ex['name']}.txt") or any(n.startswith(ex["name"]) and n.endswith((".md", ".txt", ".html"))
           for n in os.listdir(f"{root}/projets/rue/exports")), os.listdir(f"{root}/projets/rue/exports"))
 
-    # ---------------- a take without preview: the plugin assembles
+    # ---------------- 0.50: a take without preview is not assembled (the plugin no longer does it)
     take2 = call(S, P + "/takes")["clips"][1]["takes"][-1]["id"]
     import glob
     for f in glob.glob(f"{root}/projets/rue/**/{take2}.mp4", recursive=True): os.remove(f)
     call(M, "/test/cap_reset", {})
     call(S, P + "/assemble", {"clip": 3, "take": leaf}); job = wait_last(P)
-    check("without a preview: assembly done", job["status"] == "done", (job["status"], job.get("error")))
-    check("…by the plugin in ComfyUI", bool(call(M, "/test/cap", {}).get("assembly")))
-    ex2 = sorted(call(S, P + "/exports")["exports"], key=lambda e: e["created"])[-1]
-    check("…and the export says so", json.load(open(f"{root}/projets/rue/exports/{ex2['name']}.json")).get("assembled_by") == "plugin")
+    check("without a preview: the assembly is refused, make the take again", job["status"] == "error" and "no preview" in (job.get("error") or ""),
+          (job["status"], job.get("error")))
+    check("…and nothing is sent to ComfyUI", not call(M, "/test/cap", {}).get("assembly"))
 
     # ---------------- an edited video (0-21 s) then a clip that continues it: original sound, then the generated one
     P = "/api/projects/ed"
@@ -101,16 +99,14 @@ try:
     for f in (fixture("fillette.png"), fixture("rue.png")):
         call(S, f"{P}/resources?kind=images&filename={os.path.basename(f)}", raw=open(f, "rb").read(), method="POST")
     call(S, f"{P}/resources?kind=videos&filename=source.mp4", raw=open(SRC, "rb").read(), method="POST")
-    call(S, P + "/branches/b1", {"refs": {"fillette": {"image": "refs/images/fillette.png"}, "rue": {"image": "refs/images/rue.png"}},
-                                 "width": 1024, "height": 576}, "PUT")
+    call(S, P + "/branches/b1", {"width": 1024, "height": 576}, "PUT")
     raw = call(S, P)["plan"]
     c = raw["clips"]
-    raw["refs"]["source"] = "edited video"
+    raw["files"]["source"] = {"kind": "video"}
     raw["edit_video"] = {"ref": "source", "start": 0, "end": 21.0, "instruction": "the footage becomes a cartoon"}
     clips = []
     for n, (src, frames, cont) in enumerate(((0, 209, False), (4, 192, False), (1, 175, True), (2, 175, True)), start=1):
         clip = dict(c[src], frames=frames, name=f"e{n}"); clip["continue"] = cont
-        clip["prompt"] = clip["prompt"].replace("summary:\n", "summary:\n{edit} ", 1)
         clips.append(clip)
     raw["clips"] = clips
     saved = call(S, P + "/plan", raw, "PUT")

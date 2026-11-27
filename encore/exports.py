@@ -43,6 +43,22 @@ def _md(text):
     return str(text if text is not None else "").replace("|", "\\|").replace("\n", " ")
 
 
+def _h3_prompt(plan, clip):
+    """The composed prompt of a clip with H3's numbers, as the plugin sends it (the sound of an edited video counted
+    as <Audio 1>)."""
+    if not clip or not plan:
+        return None
+    files = (clip.get("compose") or {}).get("files") or {}
+    images = {n for n, f in files.items() if f.get("kind") == "image"}
+    voices = {n for n, f in files.items() if f.get("kind") == "voice"}
+    edit = 1 if (clip.get("compose") or {}).get("legend", {}).get("video") else 0
+    try:
+        return plan_core.resolve_prompt(clip["prompt"], clip["refs"], images, voices, use_voices=plan["mode"] == "free",
+                                        audio_offset=edit)[0]
+    except plan_core.PlanError:
+        return clip.get("prompt")
+
+
 def build_infos(project_dir: Path, job, report=""):
     """Everything about how an assembled video was made: the plan at assembly time, and for each clip its place
     in the video, the take used, its seed and the settings it was really generated with. Returns (json, markdown)."""
@@ -81,7 +97,7 @@ def build_infos(project_dir: Path, job, report=""):
                            "references": {n: {"image": f.get("image"), "voice": f.get("voice"),
                                               "sha": (studio.get("refs") or {}).get(n)} for n, f in (studio.get("files") or {}).items()}},
             "refs": clip.get("refs"),
-            "prompt": clip.get("prompt"),
+            "prompt": _h3_prompt(plan, clip),
         })
     size = job.get("size") or [None, None]
     end = (rows.get(int(job.get("clips") or 0), {}).get("end") or 0) - first

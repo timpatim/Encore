@@ -161,10 +161,6 @@ def pack_states(root: Path | None, info: dict | None):
         else:
             state = "missing"
         note = ""
-        if pack["id"] == "h3clipplan" and loaded:
-            clip = info.get("H3PlanClip") or {}
-            if "take_token" not in ((clip.get("input") or {}).get("optional") or {}):
-                state, note = "outdated", _t("comfy_setup.version_too_old_update_the_folder")
         if state == "installed" and info is not None:
             note = _t("comfy_setup.folder_present_but_nodes_not_loaded")
         out.append({**{k: pack[k] for k in ("id", "name", "url", "required", "why", "nodes")},
@@ -265,4 +261,17 @@ def status(config, info, comfy_ok):
             "comfy_dir_ok": root is not None, "python": python, "python_kind": kind, "python_note": note,
             "python_check": config.get("comfy_python_check"), "git": find_git(), "packs": packs,
             "core_missing": core_missing, "comfy_ok": bool(comfy_ok), "required_ok": required_ok,
-            "setup_done": bool(config.get("setup_done")), "platform": sys.platform}
+            "setup_done": bool(config.get("setup_done")), "platform": sys.platform,
+            "ffmpeg": _ffmpeg(config), "old_plugin": bool(root and (root / "custom_nodes" / OLD_PLUGIN).is_dir())}
+
+
+OLD_PLUGIN = "ComfyUI-H3-ClipPlan"      # used by Encore up to 0.49, no longer since 0.50 (it still works on its own in ComfyUI)
+
+
+def _ffmpeg(config):
+    """The ffmpeg Encore uses (voices and pieces of video it sends, assemblies), or "" when there is none."""
+    from . import previews
+    try:
+        return previews.find_ffmpeg(config) or ""
+    except Exception:  # noqa: BLE001 - only shown on the installation screen
+        return ""

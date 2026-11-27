@@ -25,8 +25,21 @@ def run_mock():
 def gen(body):
     call(S, P + "/generate", body); time.sleep(1.5); run_mock(); time.sleep(2.5)
 
+def frames_of(path):
+    out = subprocess.run(["ffprobe", "-v", "error", "-count_frames", "-select_streams", "v:0", "-show_entries", "stream=nb_read_frames",
+                          "-of", "csv=p=0", path], capture_output=True, text=True).stdout.strip()
+    return int(out or 0)
+def seconds_of_sound(path):
+    out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=duration", "-of", "csv=p=0", path],
+                         capture_output=True, text=True).stdout.strip()
+    try: return float(out)
+    except ValueError: return 0.0
+def last_export():
+    folder = f"{root}/projets/rue/exports"
+    return max((os.path.join(folder, n) for n in os.listdir(folder) if n.endswith(".mp4")), key=os.path.getmtime)
+
 root = "/tmp/h3s_v30"; shutil.rmtree(root, ignore_errors=True); os.makedirs(root)
-cfg = root + "/config.json"; json.dump({"projects_root": root + "/projets", "comfy_url": M, "configured": True, "setup_done": True, "assembly_engine": "plugin", "language": "en"}, open(cfg, "w"))
+cfg = root + "/config.json"; json.dump({"projects_root": root + "/projets", "comfy_url": M, "configured": True, "setup_done": True, "language": "en"}, open(cfg, "w"))
 srv = subprocess.Popen([sys.executable, "-m", "encore", "--port", "8241", "--no-browser", "--config", cfg], cwd=ENCORE, stdout=subprocess.DEVNULL, stderr=open("v30_srv.log", "w"))
 time.sleep(1.5)
 P = "/api/projects/rue"
@@ -49,7 +62,7 @@ try:
     check("the video is listed with its SHA", [v["name"] for v in listing.get("videos", [])] == ["intro.mp4"] and listing["videos"][0]["sha"], listing.get("videos"))
 
     plan = call(S, P)["plan"]
-    plan["refs"]["intro"] = "start video"
+    plan["files"]["intro"] = {"kind": "video"}
     plan["start_video"] = {"ref": "intro", "start": 0.5, "end": 6.0}
     plan["clips"][0]["continue"] = True
     saved = call(S, P + "/plan", plan, "PUT")
@@ -67,9 +80,11 @@ try:
     jobs = call(S, P + "/jobs")["jobs"]
     check("clip 1 continuing the video: generated", jobs and jobs[-1]["status"] == "done", [(j["status"], j.get("error")) for j in jobs])
     wf = json.load(open("/tmp/mock_last_prompt.json"))
-    vnode = [n for n in wf.values() if n["class_type"] == "H3PlanVideo"]
-    check("the workflow has an « H3 Plan - Video » node in the references", len(vnode) == 1 and vnode[0]["inputs"]["name"] == "intro"
-          and vnode[0]["inputs"]["video_file"].endswith(".mp4"), vnode)
+    # 0.50: the end of the start video, cut by Encore, read by VHS and given to MultiRef's video context
+    vnode = [n for n in wf.values() if n["class_type"] == "VHS_LoadVideo"]
+    ctx = [n for n in wf.values() if n["class_type"] == "MiniMaxH3ExistingVideoMaskedContext"]
+    check("the workflow loads the piece of the start video and continues it (MultiRef)", len(vnode) == 1 and vnode[0]["inputs"]["video"].endswith(".mkv")
+          and len(ctx) == 1, (vnode, ctx))
     cap = call(M, "/test/cap", {})
     check("the end of the segment was read and encoded (90 frames at the branch size)",
           cap["video_encoded"] and cap["video_encoded"][-1] == [90, 544, 960, 3], cap["video_encoded"])
@@ -99,22 +114,22 @@ try:
     call(S, P + "/assemble", {"clip": 2, "take": t2}); time.sleep(1.5); run_mock(); time.sleep(3)
     a = [j for j in call(S, P + "/jobs")["jobs"] if j["kind"] == "assemble"]
     check("assembly with the segment done", a and a[-1]["status"] == "done", [(j["status"], j.get("error")) for j in a])
-    asm = call(M, "/test/cap", {})["assembly"]
     normal = plan_core.normalize(json.loads(json.dumps(call(S, P)["plan"])))
     end2 = plan_core.timeline(normal)[1]["end"]
-    check("assembled: 1 piece of video + 2 clips", asm.get("input_count") == 3, asm)
-    check("sound from the start of the segment to the end of clip 2",
-          abs(asm.get("audio_samples", 0) / asm.get("audio_rate", 1) - end2 / 24) < 0.05, (asm, end2 / 24))
+    # 0.50: assembled by Encore (ffmpeg): the video opens with the segment, then the 2 clips
+    mp4 = last_export()
+    check("assembled: the segment then the 2 clips (frames)", frames_of(mp4) == end2, (frames_of(mp4), end2))
+    check("sound from the start of the segment to the end of clip 2", abs(seconds_of_sound(mp4) - end2 / 24) < 0.1, (seconds_of_sound(mp4), end2 / 24))
 
     # springboard only: same takes, assembly without the segment
     plan = call(S, P)["plan"]; plan["start_video"]["in_assembly"] = False
     saved = call(S, P + "/plan", plan, "PUT")
     check("« not in the video »: an assembly setting, free to change", "error" not in saved and saved["plan"]["start_video"]["in_assembly"] is False, saved.get("error"))
     call(S, P + "/assemble", {"clip": 2, "take": t2}); time.sleep(1.5); run_mock(); time.sleep(3)
-    asm = call(M, "/test/cap", {})["assembly"]
     first = plan_core.timeline(plan_core.normalize(json.loads(json.dumps(plan))))[0]["raw_start"]
+    mp4 = last_export()
     check("assembled without the segment: 2 clips, sound from clip 1's start",
-          asm.get("input_count") == 2 and abs(asm["audio_samples"] / asm["audio_rate"] - (end2 - first) / 24) < 0.05, (asm, first))
+          frames_of(mp4) == end2 - first and abs(seconds_of_sound(mp4) - (end2 - first) / 24) < 0.1, (frames_of(mp4), seconds_of_sound(mp4), first))
 
     # 0.42: with takes, the start video and its segment are fixed (another branch is made to change them)
     shutil.copy(fixture("v30_intro.mp4"), "/tmp/intro_b.mp4"); open("/tmp/intro_b.mp4", "ab").write(b"\0" * 64)

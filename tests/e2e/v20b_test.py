@@ -15,8 +15,11 @@ call(S, "/api/projects", {"name": "rue", "mode": "free"})
 call(S, P + "/import-plan?filename=rue.json", raw=open(fixture("rue_test_v1.plan.json"), "rb").read(), method="POST")
 for kind, f in (("images", fixture("fillette.png")), ("images", fixture("rue.png")), ("voices", fixture("v20_song.wav"))):
     call(S, f"{P}/resources?kind={kind}&filename={os.path.basename(f)}", raw=open(f, "rb").read(), method="POST")
-call(S, P + "/branches/b1", {"refs": {"fillette": {"image": "refs/images/fillette.png", "voice": "refs/voices/v20_song.wav"}, "rue": {"image": "refs/images/rue.png"}}}, "PUT")
-orig = [c["prompt"] for c in call(S, P)["plan"]["clips"]]
+master = call(S, P + "/plan?branch=b1")["plan"]          # (B) the girl gets a voice in the plan
+master["files"]["fillette_voice"] = {"kind": "voice", "file": "refs/voices/v20_song.wav"}
+master["subjects"]["fillette"]["voice"] = "fillette_voice"
+call(S, P + "/plan", {"branch": "b1", "plan": master}, "PUT")
+orig = [json.dumps(c, sort_keys=True) for c in call(S, P + "/plan?branch=b1")["plan"]["clips"]]
 # the whole branch, then a second take of clip 5 made with an extra LoRA and no upscale (0.42: set for the take)
 def drain():
     for _ in range(40):
@@ -28,6 +31,7 @@ def drain():
 call(S, P + "/branches/b1/fill", {"dry_run": False, "assemble": False}); drain()
 t4 = call(S, P)["plan_takes"]["4"]
 call(S, P + "/generate", {"clip": 5, "after": t4, "loras": [{"name": "perso/style_07.safetensors", "strength": 0.6}], "upscale_settings": {"enabled": False}}); drain()
+call(S, P + "/branches", {"how": "copy", "source": "b1", "name": "Copy"})   # 0.48: b1's master plan is frozen, its copy is free
 print("takes", {k: len(v) for k, v in call(S, P + "/takes")["takes"].items()} if isinstance(call(S, P + "/takes").get("takes"), dict) else "?")
 async def main():
     async with async_playwright() as pw:
@@ -35,19 +39,22 @@ async def main():
         page = await b.new_page(viewport={"width": 1500, "height": 950}); errs = []
         page.on("pageerror", lambda e: errs.append(str(e)))
         await page.goto(S + "/"); await page.evaluate("localStorage.setItem('h3studio.project','rue')"); await page.reload(); await page.wait_for_timeout(1500)
-        await plan_screen(page, master=True)          # the master plan: every clip can be edited
+        await page.wait_for_selector(".tk-master"); await page.locator(".tk-master").nth(1).click(); await page.wait_for_timeout(1200)   # the master plan of the copy: every clip can be edited
         same = []
         for i in range(5):
             await page.locator(".clipitem").nth(i).click(); await page.wait_for_timeout(250)
-            same.append(await page.evaluate(f"H3Editor.state.plan.clips[{i}].prompt") == orig[i])
-        print("prompts untouched by viewing", same)
-        await page.locator(".clipitem").nth(1).click(); await page.wait_for_timeout(300)
-        print("subject chips", await page.eval_on_selector_all("#side .sx-chipS", "e => e.map(x => x.textContent)"))
-        print("extra lines shown", await page.locator("text=Autres lignes").count(), "| retention raw", await page.locator(".sx-box").nth(2).locator(".sx-ret").count() == 0)
-        print("custom opening note", await page.locator("text=rédigée à la main").count())
-        print("voice buttons", await page.locator("#side button:has-text('voix')").count(), "| dialogue chips", await page.eval_on_selector_all("#side .sx-chipD", "e => e.map(x => x.textContent)"))
-        # @ menu shows the replies; pick one in shot 1
-        shot = page.locator(".sx-shot textarea").first
+            same.append(json.dumps(json.loads(await page.evaluate(f"JSON.stringify(H3Editor.state.plan.clips[{i}])")), sort_keys=True) == orig[i])
+        print("clips untouched by viewing", same)
+        await page.locator(".clipitem").nth(1).click(); await page.wait_for_timeout(1200)
+        print("clip subjects", await page.eval_on_selector_all("#sxUses .sx-use", "e => e.map(x => x.dataset.subject)"))
+        print("voice retention of the girl", await page.locator('.sx-use[data-subject="fillette"] .sx-voicekeep').count())
+        print("dialogue chips", await page.eval_on_selector_all("#side .sx-chipD", "e => e.map(x => x.textContent)"))
+        await page.click(".sx-tab-h3"); await page.wait_for_timeout(600)
+        h3 = await page.input_value("textarea.sx-h3")
+        print("voice line", [l for l in h3.splitlines() if "voice-timbre" in l])
+        await page.click("button:has-text('Champs')"); await page.wait_for_timeout(300)
+        # @ menu shows the lines; pick one in the shots
+        shot = page.locator('textarea[data-sec="description"]')
         await shot.click(); await page.keyboard.press("Control+End"); await page.keyboard.type(" @répl")
         await page.wait_for_timeout(200)
         items = await page.eval_on_selector_all(".sx-ac-item", "e => e.map(x => x.textContent)")

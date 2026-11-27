@@ -1,6 +1,6 @@
-"""Fake takes for the README screenshots: the robot of the plugin examples (examples/robot.png, cut out) moving
+"""Fake takes for the README screenshots: the robot of the examples (examples/robot.png, cut out) moving
 on the beach or in the workshop (examples/beach.png, workshop.png). Writes out/videos/<scene>_<n>.mp4.
-Needs H3_PLUGIN (the ComfyUI-H3-ClipPlan folder), Pillow and ffmpeg."""
+Needs Pillow and ffmpeg (the examples are in Encore's examples folder)."""
 import math, os, random, subprocess, sys
 from PIL import Image, ImageDraw
 
@@ -24,7 +24,7 @@ def cut_robot(path):
 
 
 def main():
-    examples = os.path.join(os.environ.get("H3_PLUGIN") or sys.exit("set H3_PLUGIN"), "examples")
+    examples = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "examples")
     robot = cut_robot(os.path.join(examples, "robot.png"))
     os.makedirs(os.path.join(OUT, "videos"), exist_ok=True)
     for scene in ("beach", "workshop"):

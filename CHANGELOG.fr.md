@@ -1,8 +1,190 @@
 # Historique des versions
 
 Versions d'Encore (appelé H3 Studio jusqu'à la 0.16). Chaque version est livrée sous la forme
-`Encore_vX.Y.zip`. Encore a besoin du plugin ComfyUI
-[ComfyUI-H3-ClipPlan](https://github.com/timpatim/ComfyUI-H3-ClipPlan) 3.11 ou plus récent.
+`Encore_vX.Y.zip`. Depuis la 0.50, Encore n'a plus besoin du plugin ComfyUI ComfyUI-H3-ClipPlan (jusqu'à la
+0.49 : 4.0 ou plus récent).
+
+## 0.50
+
+**Encore sans ComfyUI-H3-ClipPlan.** ComfyUI fait toujours toute l'inférence ; Encore compose, prépare les
+fichiers et envoie à ComfyUI des workflows faits de ses nœuds natifs et de ceux de MultiRef et VideoHelperSuite.
+
+- **Le workflow d'un clip** : MiniMax H3 Reference to Video (natif) reçoit le prompt composé par Encore (celui
+  de l'onglet « Prompt H3 »), ses images (Load Image) et ses voix (Load Audio) ; le latent à échantillonner est
+  préparé par les nœuds de MultiRef : la fin de la prise continuée (Load Latent + contexte AV généré), la
+  chanson (contexte de chanson), la fin de la vidéo de départ (contexte de vidéo existante) ; un clip édité
+  donne sa tranche de vidéo comme vidéo de référence (VHS Load Video), avec son son. La prise est enregistrée
+  par MultiRef (Save Latent, un fichier `.safetensors`), son aperçu par VHS. Les noms des entrées multiples du
+  nœud de référence sont lus dans `/object_info` de ComfyUI. Le latent upscale ne change pas.
+- **Fichiers préparés par Encore avec ffmpeg** (gardés dans `cache/comfy/` du projet) : les voix coupées aux
+  limites de H3 (2 à 15 s chacune, 15 s en tout), la chanson précédée de silence quand elle commence après le
+  plan, la fin de la vidéo de départ et la tranche d'un clip édité à la taille de la branche.
+- **La fiche d'une prise** est écrite par Encore ; le latent et l'aperçu sont récupérés dans ComfyUI à la fin.
+  Côté ComfyUI, tout est sous `input/encore/…` et `output/encore/<projet>/` ; c'est vidé quand plus aucune
+  génération n'attend, seulement si le dossier de ComfyUI est connu (ComfyUI ne sait pas supprimer de fichiers
+  par son API : avec un ComfyUI sur une autre machine, ils restent, les réglages le disent).
+- **Prises faites avant la 0.50** : leur latent `.pt` (écrit par le plugin) est réécrit une fois au format de
+  MultiRef à l'ouverture du projet, avec une fenêtre de progression (simple réécriture de fichiers, sans
+  torch). Une prise qui ne peut pas être convertie reste visible et assemblable, mais ne peut pas être
+  continuée.
+- **Assemblage** : par Encore avec ffmpeg uniquement, à partir des aperçus des prises ; une prise sans aperçu
+  n'est pas assemblée (il faut la refaire). Le nœud d'assemblage du plugin ne sert plus.
+- **Écran d'installation** : ComfyUI-H3-ClipPlan n'est plus dans la liste ; MultiRef et VideoHelperSuite restent
+  obligatoires (avec les nœuds désormais utilisés) ; le ffmpeg trouvé par Encore est affiché ; un dossier
+  ComfyUI-H3-ClipPlan encore dans `custom_nodes` est signalé (plus utilisé ; à garder si vous vous en servez
+  dans ComfyUI).
+- **Le format de plan est celui d'Encore** : `docs/PLAN_SPEC.md`, `docs/plan.schema.json`, et le prompt système
+  pour faire écrire un plan par un modèle de langage, `docs/LLM_SYSTEM_PROMPT.md` (avec sa règle 12 sur la
+  continuité : un mouvement qui quitte quelque chose puis y revient reste dans un même clip). Les exemples du
+  robot sont dans `examples/`.
+- Tests : le faux ComfyUI a de faux nœuds natifs, MultiRef et VHS (il ne fait plus tourner le plugin).
+
+
+## 0.49.1
+
+- **↻ nouvelle prise part d'une nouvelle graine** (tirée au hasard, 🎲 pour une autre). « ↺ graine de la prise
+  refaite » remet sa graine ; avec le même prompt, Encore prévient toujours que la prise sera identique.
+
+## 0.49
+
+**Portions reprises dans une duplication.** « dupliquer » avec des clips ne reprend plus seulement les clips 1 à k :
+
+- La fenêtre montre la sélection en petites vignettes, scène par scène (✂ entre elles). Un clic reprend un clip
+  avec sa scène depuis son début, ou le laisse libre avec la suite de sa scène : les portions gardent toujours
+  leur continuité (un clip qui en continue un autre n'est repris qu'avec lui). « Tout reprendre » par défaut.
+- La nouvelle bande montre les clips repris et une case vide pour chaque clip laissé libre ; les clips repris
+  après elle s'y accrochent. ▶▶ compléter ne fait que les clips laissés libres ; l'assemblage de la ligne passe
+  par les clips repris après eux.
+- Les clips laissés libres partent du plan de la sélection et restent modifiables dans le plan maître, comme
+  les clips après k jusqu'ici : la ligne du plan maître les fige en les générant. Seuls leur durée et leur lien
+  (↪/✂) sont verrouillés, dans le plan maître et dans le panneau de lancement, pour que les portions d'après
+  restent à leur moment de la chanson ; le serveur refuse une autre durée.
+- Un clip repris après un clip laissé libre suit la prise de ce clip faite dans la branche (celle de la
+  sélection, sinon celle de sa ligne du plan maître) ; tant qu'elle n'existe pas, ses ↻ et + sont grisés.
+
+## 0.48.2
+
+- **Images à fournir** : une image qu'un plan importé déclare sans fichier s'affiche en cadre pointillé avec son
+  label et sa note, au lieu d'une image cassée. Choisir une image du projet ou en importer une de l'ordinateur
+  (ou la déposer) : le label reçoit le fichier, garde son nom, sa note et son rôle, et les clips qui l'utilisent
+  restent justes. Un clic sur la vignette d'une image la remplace, rôle conservé. La bibliothèque a une section
+  « Images à fournir ».
+- **Import par glisser-déposer** depuis l'ordinateur : sur la fenêtre Ressources (un fichier audio va dans la
+  section où on le dépose, sinon Encore demande voix ou chanson), sur « Fichiers du projet », sur la fenêtre du
+  sujet (images, voix) et sur « Images à fournir ». Le choix d'image importe directement, sans passer par
+  Ressources.
+- **↻ nouvelle prise et + clip suivant sur un clip repris** d'une autre branche : la nouvelle prise est une
+  variante de la branche dupliquée ; la branche d'origine ne change pas.
+- **Panneau de lancement, « Plan des clips suivants »** : un choix par plan distinct (et non par brindille),
+  avec les prises de la brindille en vignettes (la nouvelle prise en pointillé) et une étiquette jaune de ce qui
+  change (« clip 3 modifié »). Masqué quand toutes les brindilles gardent le même plan.
+- **File d'attente** : un groupe se déplace par sa poignée ≡, une ligne montre où il arrive, la liste défile à
+  ses bords ; « Voir les n tâches » s'ouvre de nouveau.
+- La minimap dessine le graphe depuis le haut ; l'étiquette du panneau replié des vidéos assemblées ne
+  clignote plus.
+- Corrigé : déposer un fichier sur Encore ne propose plus de l'ouvrir comme plan (« les modifications non
+  enregistrées seront perdues »).
+
+## 0.48.1
+
+- Corrigé : après « Enregistrer le plan », le plan affiché sur l'écran de plan disait version 3, et ses
+  contrôles affichaient « 'version' must be 7 » (le plan enregistré sur le disque était correct).
+
+## 0.48
+
+**Le plan maître comme patron de départ, la ligne du plan maître.** Une branche a un plan maître et une ligne du
+plan maître ; les brindilles sont libres d'évoluer.
+
+- **Ligne du plan maître** : les prises faites à partir du plan maître lui-même, une par clip, en ligne en haut
+  de la bande (étiquette « plan maître »), suivies de cases vides pour les clips pas encore générés. La première
+  case vide (▶) ouvre le panneau de lancement de ce clip (en lecture seule ; graine, LoRA, upscale se règlent) ;
+  une case se génère une seule fois, dans l'ordre. Un changement passe par
+  « ↻ nouvelle prise… », qui fait une variante. Après une prise de la ligne vient le plan maître lui-même.
+- **▶▶ compléter** (en-tête de branche) remplit la ligne du plan maître. **▶▶ compléter la sélection** (barre
+  de sélection) génère la suite du plan de la brindille sélectionnée.
+- **Le plan maître est figé dès que la branche a une prise** (ou une génération en attente) : ses clips et ses
+  sujets (avec les fichiers qu'ils utilisent) sont en lecture seule — 🔒 sur les clips et dans la bibliothèque ;
+  la fenêtre d'un sujet figé n'a pas « Enregistrer ». On peut ajouter des clips à la fin (libres tant que la
+  ligne ne les a pas générés) et de nouveaux sujets. Le serveur refuse tout autre changement.
+- **dupliquer** dans l'en-tête de branche : sans les clips (le plan maître de la copie redevient libre) ou avec
+  les clips 1 à k de la sélection. **+ nouvelle branche** garde « Vide » et « À partir d'un fichier de plan… ».
+- **« Utiliser ce plan… » devient « Nouvelle branche avec ce plan… »** : un plan maître n'est jamais remplacé
+  quand sa branche a des prises.
+- Écran des prises : les arbres sont alignés en haut (le premier enfant d'une prise est sur sa ligne), la ligne
+  du plan maître est donc droite.
+- Écran de plan : l'onglet « Prompt H3 » d'un clip généré ou figé se lit.
+- Projets d'avant : leurs branches avec des prises ont leur plan maître figé tel qu'il est ; leur ligne du plan
+  maître est vide (ses cases peuvent être générées).
+- Tests : nouveaux `d1_api_test`, `d2_ui_test` ; `a2_ui_test` et `a3_api_test` suivent les changements.
+
+## 0.47
+
+L'écran des prises et l'écran de plan, remis en ordre.
+
+- **Branche repliée** : plus de ▶▶ dessus ; replier la branche de la sélection fait passer la sélection à
+  la première brindille (ligne du haut de l'arbre) de la première branche dépliée.
+- **◎ Génération en cours** (barre du haut de l'écran des prises) : amène la prise en cours de génération
+  au milieu de la vue, en dépliant sa branche.
+- **Le nom d'une branche est un champ** : taper le nouveau nom, Entrée ou un clic ailleurs l'enregistre,
+  Échap remet l'ancien. Plus de bouton « renommer ».
+- **Vue d'ensemble** : le graphe seul la remplit, centré, comme dans ComfyUI ; le cadre de la vue est coupé
+  à ses bords quand la vue dépasse le graphe. La sélection est dessinée en bleu, liens compris, sur toute
+  la brindille.
+- **Le défilement vers le bas s'arrête** quand la prise la plus basse arrive en haut de la vue.
+- **Les vidéos assemblées s'ouvrent au double-clic**, comme les prises. **Toute vidéo ouverte en grand
+  tourne en boucle.**
+- **Mode colonnes retiré** : les prises sont toujours affichées en arbre.
+- **Barre du haut de l'écran des prises** : le libellé « 1 en cours · n en attente » et le bouton Arrêter
+  disparaissent (l'indicateur de la file dit tout). **Tout annuler** dans le gestionnaire de la file
+  (toutes les tâches de tous les projets, après confirmation).
+- **Assemblage avec le volet des vidéos replié** : un message dit qu'il est ajouté à la file, et l'onglet
+  replié montre les assemblages en attente ou en cours.
+- **Indicateur de la file** : largeur fixe ; un texte trop long finit par « … », le texte entier est dans
+  l'infobulle.
+- **Barre de progression d'une génération** : en bas de sa vignette, plus sous « nouvelle prise » et
+  « annuler ».
+- **Écran de plan** : une ligne à lui sous celle du projet : « ← Prises », le titre (● tant que des
+  modifications ne sont pas enregistrées), ⚙ Réglages du plan, Importer / Utiliser ce plan, puis
+  ↶ Annuler, ↷ Rétablir et Enregistrer le plan, avec leur nom. Les boutons du projet restent sur la ligne
+  du dessus. Le titre ne montre plus la chaîne des identifiants de prises (elle apparaissait deux fois).
+- Tests : nouveau `c1_ui_test` ; `v29_test` suit les nouvelles règles de repliement.
+
+## 0.46
+
+**Sujets, fichiers et ancres** (chantier B). L'écran de plan ne demande plus d'écrire dans la forme propre à
+MiniMax : Encore la compose. **Les plans des versions précédentes sont refusés** (plans version 7 seulement) ;
+nécessite ComfyUI-H3-ClipPlan **4.0**.
+
+- **Les sujets** (personnage, lieu, objet, tenue, style, action, pose) sont gérés dans le plan, avec une
+  description, autant d'images que nécessaire (chacune avec ce qu'elle apporte) et, en mode libre, une voix.
+  On les nomme `@nom` dans des champs simples : Résumé, Plans, Son, Musique. **Les fichiers** sont ceux du
+  projet : le plan les nomme par une étiquette faite automatiquement. Les branches n'ont plus de références
+  à elles : leurs plans maîtres portent les sujets et leurs images.
+- **Ancres** d'un clip : première image, images clés à une seconde donnée, dernière image.
+- **Sujets du clip** : la fidélité de chacun (images, voix) et une note pour ce clip seulement. Un compteur
+  par rapport aux limites de H3 (9 images, 3 voix, 12 fichiers).
+- **Onglet « Prompt H3 »** : le prompt que reçoit MiniMax H3, composé par Encore (numéros des sujets, images
+  et voix, définitions, rétention, préfixe de tâche, phrase d'ouverture d'une continuation ou d'une nouvelle
+  scène), avec des pastilles qui donnent chaque numéro. Il peut être **écrit à la main** (`@nom` reçoit
+  toujours son numéro) ; « Revenir au prompt composé » l'annule.
+- **Locuteurs des répliques trouvés tout seuls** : le sujet nommé dans la phrase d'une réplique, ou celui du
+  dialogue dont le texte correspond ; numérotés S1, S2… dans l'ordre où ils parlent. `@nom (S)` seulement
+  pour choisir un autre locuteur.
+- **« / » pour la caméra** : le vocabulaire de MiniMax pour les mouvements (avec amplitude et vitesse), les
+  coupes et les cadrages, écrit en anglais à l'endroit du curseur.
+- **Un clip généré garde ses sujets et fichiers** tels qu'ils étaient à sa génération, même si le plan les
+  change ensuite (fenêtres ≡, plan de la sélection, branches qui reprennent des clips).
+- **Consigne commune d'une édition** : les sujets nommés avec `@` ; elle ouvre le résumé des clips édités.
+- **Ressources** : chaque fichier dit s'il est utilisé, utilisé seulement par des prises, ou inutilisé ;
+  **Supprimer les inutilisés** les supprime d'un coup.
+- **Supprimer un projet** (🗑 sur sa carte, ☰ Projets) : définitivement, après une confirmation qui compte
+  ses prises, ses vidéos assemblées et sa taille ; ses copies dans ComfyUI partent aussi. Refusé tant
+  qu'une de ses générations ou assemblages attend ou tourne.
+- **▶▶ compléter** n'est plus grisé pendant une génération.
+- Corrigé : un clip ajouté après le segment d'une vidéo éditée gardait `<Video 1>` dans ses textes.
+- Développement : `plan_core.compose_clip` (identique dans le plugin), `snapshot_defs`, `preview`
+  (`POST /plan/compose`), `resources.usages` et `delete_unused`, `projects.delete_project` ; nouveaux tests
+  `b1_api_test`, `b2_ui_test` ; `sha_test` et `roundtrip_test` retirés.
 
 ## 0.45.1
 

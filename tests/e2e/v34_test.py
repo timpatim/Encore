@@ -72,7 +72,7 @@ try:
     # 0.42: a start video is fixed once a branch has takes: a fresh branch for this part
     call(S, P + "/branches/b1?confirm=1", method="DELETE"); call(S, P + "/branches", {})
     plan = call(S, P)["plan"]
-    plan["refs"]["intro"] = "start video"; plan["start_video"] = {"ref": "intro", "start": 0, "end": 4}; plan["clips"][0]["continue"] = True
+    plan["files"]["intro"] = {"kind": "video"}; plan["start_video"] = {"ref": "intro", "start": 0, "end": 4}; plan["clips"][0]["continue"] = True
     call(S, P + "/plan", plan, "PUT")
     call(S, P + "/start-video", {"file": "refs/videos/clip.avi"}, "PUT")
 

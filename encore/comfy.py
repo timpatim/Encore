@@ -164,16 +164,6 @@ class ComfyClient:
         os.replace(tmp, target)
         return target
 
-    # plugin routes (ComfyUI-H3-ClipPlan)
-    def takes(self, plan_file):
-        return self.get(f"/h3clipplan/takes?plan={urllib.parse.quote(plan_file)}")
-
-    def save_selection(self, plan_file, selection):
-        return self.post("/h3clipplan/selection", {"plan": plan_file, "selection": {str(k): v for k, v in selection.items()}})
-
-    def delete_takes(self, plan_file, items):
-        return self.post("/h3clipplan/delete_takes", {"plan": plan_file, "takes": items})
-
 
 # --------------------------------------------------------------------------- websocket
 class EventSocket(threading.Thread):

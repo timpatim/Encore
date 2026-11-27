@@ -49,7 +49,6 @@ try:
     upload(P + "/import-plan?filename=rue.json", open(fixture("rue_test_v1.plan.json"), "rb").read())
     for f in (fixture("fillette.png"), fixture("rue.png")):
         upload(f"{P}/resources?kind=images&filename={os.path.basename(f)}", open(f, "rb").read())
-    print("branch", call(P + "/branches/b1", {"refs": {"fillette": {"image": "refs/images/fillette.png"}, "rue": {"image": "refs/images/rue.png"}}}, "PUT"))
 
     # ---- 1. ComfyUI unreachable at dispatch (English messages): the job waits, it does not fail
     call("/api/queue/pause", {})
@@ -82,20 +81,20 @@ try:
     j2 = next((x for x in jobs() if x["id"] == job["id"]), {"status": "done"})
     check("requeued job finished", j2["status"] == "done", (j2["status"], j2.get("error")))
 
-    # ---- 7. the mirror follows the ComfyUI address
+    # ---- 7. (0.50) what was sent is known per ComfyUI address: another address gets the files again
     from encore import server as srvmod
     from pathlib import Path
     st = srvmod.Studio(Path(cfg))
     eng = st.engine
-    eng._mirror("rue", "b1").add((1, "x"))
+    eng.uploaded[(st.config["comfy_url"], "encore/rue/latents", "x")] = True
     st.config["comfy_url"] = "http://127.0.0.1:9999"
-    check("mirror forgotten when the ComfyUI address changes", eng._mirror("rue", "b1") == set())
+    check("files sent are known per ComfyUI address", not any(k[0] == st.config["comfy_url"] for k in eng.uploaded))
 
-    # ---- 4. fill busy: a code, not a French text
+    # ---- 4. (B1) fill while a generation of the branch runs: allowed
     t2 = takes()[2][-1]
     call(P + "/generate", {"clip": 1, "branch": "b1", "random": True})
     code, data = raw_req(P + "/branches/b1/fill", {"dry_run": True}, headers={"Content-Type": "application/json", "X-Encore": "1"})
-    check("fill while generating: error code busy", data.get("code") == "busy", data)
+    check("fill while generating: allowed", code == 200 and "items" in data, (code, data))
     for _ in range(2):
         time.sleep(2); run_mock()
     time.sleep(3)

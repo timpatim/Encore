@@ -1,154 +1,78 @@
 // ---------------------------------------------------------------------------------------------
-// H3Sections: the "Sections" editor of a clip prompt (Plan tab).
-// The prompt stays the reference (it is what H3 receives and what takes are checked against).
-// In the editor, <Subject N> is shown as @name: the names live in clip._subjects (ignored by the
-// nodes) and the numbers are recomputed when the prompt is written back.
+// H3Sections (plan v7, chantier B): the editor of a clip (anchors, texts with @subjects, the settings of the subjects
+// it uses, the H3 prompt composed by the server or written by hand) and the library of the plan screen (subjects of the
+// plan, files of the project). The H3 wording itself (numbers, sections, retention markers) is the server's
+// (POST /plan/compose); this module never writes it.
 // ---------------------------------------------------------------------------------------------
 const H3Sections = (() => {
     const _t = typeof H3I18n !== "undefined" ? H3I18n.t : (id) => id;
-    const NAME_CHARS = "[A-Za-z0-9][A-Za-z0-9_-]*";
-    const NAME_OK = new RegExp(`^${NAME_CHARS}$`);
-    const PREFIX = "[reference generation]";
-    const MODES = ["fully_preserved", "partially_preserved", "attribute_transfer"];
-    const RET_RE = new RegExp(`^@(${NAME_CHARS})\\s*(\\([^)]*\\))?\\s*:\\s*(${MODES.join("|")})\\s*(?:-\\s?)?(.*)$`);
+    const KIND_ICON = { person: "👤", place: "🏞", object: "📦", outfit: "👗", style: "🎨", action: "🏃", pose: "🧍" };
+    const view = { tab: "fields", files: "images" };       // the tab of the prompt card, the tab of the library's files
 
     // ------------------------------------------------------------------ pure helpers (tested in node)
-    function cleanName(s) {
-        const v = String(s || "").replace(/[^A-Za-z0-9_-]/g, "_").replace(/^[_-]+/, "");
-        return v || "subject";
+    // the label of a project file in plan.files (made from its name the first time it is used)
+    function fileLabel(plan, rel, kind) {
+        plan.files = plan.files || {};
+        for (const [label, item] of Object.entries(plan.files)) if (item && item.file === rel && item.kind === kind) return label;
+        const stem = String(rel || "").split("/").pop().replace(/\.[^.]*$/, "");
+        let base = stem.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^A-Za-z0-9_-]+/g, "_").replace(/^[_-]+|_+$/g, "") || kind;
+        if (!/^[A-Za-z0-9]/.test(base)) base = kind + "_" + base;
+        if (kind === "voice" && !/voice$/.test(base)) base += "_voice";
+        let label = base, k = 2;
+        while (label in plan.files) label = `${base}_${k++}`;
+        plan.files[label] = { kind, file: rel };
+        return label;
     }
-    function maxSubject(text) {
-        let m = 0;
-        for (const x of String(text || "").matchAll(/<Subject (\d+)>/g)) m = Math.max(m, +x[1]);
-        return m;
-    }
-    // names of <Subject 1..N>: clip._subjects first, then a name taken from the subject's line
-    function subjectNames(clip, parts) {
-        const given = Array.isArray(clip._subjects) ? clip._subjects.map(cleanName) : [];
-        const n = Math.max(given.length, maxSubject(clip.prompt));
-        const sec0 = parts ? parts[0] : String(clip.prompt || "");
-        const names = [];
-        for (let k = 1; k <= n; k++) {
-            let name = given[k - 1];
-            if (!name) {
-                const lines = sec0.split("\n").filter((l) => l.trim().startsWith(`<Subject ${k}>`)).join("\n");
-                const m = new RegExp(`\\{(?:picture|voice):(${NAME_CHARS})\\}`).exec(lines);
-                name = m ? m[1] : `s${k}`;
-            }
-            let unique = name, j = 2;
-            while (names.includes(unique)) unique = `${name}_${j++}`;
-            names.push(unique);
+    // files no subject, anchor or video of the plan names any more (the 'defs' of generated clips keep their own)
+    function pruneFiles(plan) {
+        const used = new Set();
+        for (const s of Object.values(plan.subjects || {})) {
+            for (const p of (s && s.pictures) || []) if (p && p.file) used.add(p.file);
+            if (s && s.voice) used.add(s.voice);
         }
-        return names;
-    }
-    const toDisplay = (text, names) => String(text || "").replace(/<Subject (\d+)>/g, (m, k) => (names[k - 1] ? "@" + names[k - 1] : m));
-    const toPrompt = (text, names) => String(text || "").replace(new RegExp(`@(${NAME_CHARS})`, "g"), (m, n) => {
-        const i = names.indexOf(n);
-        return i < 0 ? m : `<Subject ${i + 1}>`;
-    });
-    const unknownMentions = (display, names) => [...new Set([...String(display || "").matchAll(new RegExp(`@(${NAME_CHARS})`, "g"))]
-        .map((m) => m[1]).filter((n) => !names.includes(n)))];
-
-    // subject_definitions (display form): the lines of each subject, and the lines of nobody
-    function parseSubjects(display, names) {
-        const rows = names.map((name) => ({ name, lines: [] }));
-        const extra = [];
-        for (const line of String(display || "").split("\n")) {
-            const t = line.trim();
-            if (!t) continue;
-            const m = new RegExp(`^@(${NAME_CHARS})(?:\\s+([\\s\\S]*))?$`).exec(t);
-            const i = m ? names.indexOf(m[1]) : -1;
-            if (i >= 0) rows[i].lines.push(m[2] || "");
-            else extra.push(t);
+        for (const c of plan.clips || []) {
+            const a = (c && c.anchors) || {};
+            for (const f of [a.first, a.last, ...(a.keyframes || []).map((k) => k && k.file)]) if (f) used.add(f);
         }
-        return { rows: rows.map((r) => ({ name: r.name, text: r.lines.join("\n") })), extra: extra.join("\n") };
+        for (const v of [plan.start_video, plan.edit_video]) if (v && v.ref) used.add(v.ref);
+        for (const label of Object.keys(plan.files || {})) if (!used.has(label)) delete plan.files[label];
     }
-    function composeSubjects(rows, extra) {
-        const out = [];
-        for (const r of rows) for (const l of String(r.text || "").split("\n").map((s) => s.trim()).filter(Boolean)) out.push(`@${r.name} ${l}`);
-        if (String(extra || "").trim()) out.push(String(extra).trim());
-        return out.join("\n");
-    }
-    // retention_analysis (display form): one row per line, or null when a line has another shape
-    function parseRetention(display) {
-        const rows = [];
-        for (const line of String(display || "").split("\n")) {
-            const t = line.trim();
-            if (!t) continue;
-            const m = RET_RE.exec(t);
-            if (!m) return null;
-            rows.push({ name: m[1], scope: m[2] || "", mode: m[3], why: m[4] || "" });
+    function escapeRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
+    // @old -> @new in the texts of the clips from `from` on (the generated ones keep theirs), the edit instruction,
+    // the dialogue speakers and the subject settings
+    function renameSubject(plan, oldName, newName, from = 0) {
+        const re = new RegExp(`(?<![\\p{L}\\p{N}_@])@${escapeRe(oldName)}(?![\\p{L}\\p{N}_-])`, "gu");
+        const swap = (t) => (typeof t === "string" ? t.replace(re, "@" + newName) : t);
+        if (plan.subjects && oldName in plan.subjects) {
+            plan.subjects = Object.fromEntries(Object.entries(plan.subjects).map(([k, v]) => [k === oldName ? newName : k, v]));
         }
-        return rows;
-    }
-    const composeRetention = (rows) => rows.map((r) => `@${r.name}${r.scope ? " " + r.scope : ""}: ${r.mode} - ${String(r.why || "").trim()}`.replace(/\s+$/, "")).join("\n");
-    const retentionLine = (name) => ({ name, scope: "(appears throughout [Shot 1])", mode: "fully_preserved", why: "" });
-
-    function splitSummary(display) {
-        const m = /^\[reference generation\]\s*/.exec(String(display || ""));
-        return m ? { had: true, text: display.slice(m[0].length) } : { had: false, text: String(display || "") };
-    }
-    const composeSummary = (text) => `${PREFIX} ${String(text || "").trim()}`.trim();
-
-    function sentences() {
-        return [H3.CONTINUE_SENTENCE + H3.FREE_CONTINUE_SUFFIX, H3.CONTINUE_SENTENCE, H3.HIDDEN_LEADIN_FREE, H3.HIDDEN_LEADIN_MUSIC];
-    }
-    // the sentence a clip must open with: continuation, hidden lead-in of a new scene, or none (first clip)
-    // afterVideo: the plan starts from a video, so clip 1 follows it like any other clip
-    function expectedSentence(clip, index, free, afterVideo = false) {
-        if (clip.continue) return H3.CONTINUE_SENTENCE + (free ? H3.FREE_CONTINUE_SUFFIX : "");
-        if (index > 1 || afterVideo) return free ? H3.HIDDEN_LEADIN_FREE : H3.HIDDEN_LEADIN_MUSIC;
-        return "";
-    }
-    function parseDetailed(display) {
-        const pieces = String(display || "").split(/\[Shot \d+\]/);
-        const style = pieces[0].trim();
-        const shots = pieces.slice(1).map((s) => s.trim());
-        let found = "";
-        if (shots.length) {
-            for (const s of sentences()) if (shots[0].startsWith(s)) { found = s; shots[0] = shots[0].slice(s.length).trim(); break; }
-        }
-        return { style, shots, found };
-    }
-    // an opening sentence written by hand (an LLM plan often words it its own way): kept as it is
-    function customOpening(det) {
-        if (det.found || !det.shots.length) return false;
-        const first = det.shots[0].split(/(?<=[.;])\s/)[0] || "";
-        return /continues? uninterrupted|lead-in|already fully established/i.test(first);
-    }
-    // the sentence written back before [Shot 1] after an ordinary edit: the one already there, as it is. Only the
-    // « use the right sentence » button puts the expected one: changing it would change the prompt, so invalidate
-    // the takes, on an edit somewhere else in the section.
-    const openingFor = (det) => (customOpening(det) ? "" : det.found);
-    function composeDetailed(style, shots, auto) {
-        const list = shots.length ? shots : auto ? [""] : [];
-        let out = String(style || "").trim();
-        list.forEach((b, i) => {
-            const body = String(b || "").trim();
-            const text = i === 0 && auto ? auto + (body ? " " + body : "") : body;
-            out += (out ? "\n" : "") + `[Shot ${i + 1}] ` + text;
+        if (plan.edit_video && typeof plan.edit_video.instruction === "string") plan.edit_video.instruction = swap(plan.edit_video.instruction);
+        (plan.clips || []).forEach((c, i) => {
+            if ((typeof from === "function" ? from(i) : i < from) || !c) return;   // from: a locked clip (0.49: a function)
+            for (const k of [...H3.TEXT_KEYS, "prompt_override"]) if (typeof c[k] === "string") c[k] = swap(c[k]);
+            for (const d of c.dialogue || []) if (d && d.speaker === oldName) d.speaker = newName;
+            for (const u of c.subjects || []) if (u && u.name === oldName) u.name = newName;
         });
-        return out.replace(/\s+$/, "");
     }
-    // <Subject k> → map(k) everywhere (a number, or a string put instead)
-    const remapSubjects = (text, map) => String(text || "").replace(/<Subject (\d+)>/g, (m, k) => {
-        const r = map(+k);
-        return typeof r === "number" ? `<Subject ${r}>` : r == null ? m : r;
-    });
-
-    // the prompt of a new clip that follows `prev`: same subjects, retention, style and soundscape
-    function inheritedPrompt(prev, clip, index, free) {
-        const parts = H3.parseSections(prev.prompt);
-        if (!parts) return null;
-        const style = parseDetailed(parts[3]).style;
-        return H3.composeSections([
-            parts[0],
-            PREFIX + " ",
-            parts[2],
-            composeDetailed(style, [""], expectedSentence(clip, index, free)) + " ",
-            parts[4],
-            free ? parts[5] : "",
-        ]);
+    // the settings of a subject in a clip (created when first changed; removed when back to the defaults)
+    function useOf(clip, name) { return (clip.subjects || []).find((u) => u && u.name === name) || { name }; }
+    function setUse(clip, name, key, value, def) {
+        clip.subjects = (clip.subjects || []).filter((u) => u && u.name);
+        let u = clip.subjects.find((x) => x.name === name);
+        if (!u) { u = { name }; clip.subjects.push(u); }
+        if (value === def || value === "" || value == null) delete u[key]; else u[key] = value;
+        clip.subjects = clip.subjects.filter((x) => Object.keys(x).length > 1);
+        if (!clip.subjects.length) delete clip.subjects;
+    }
+    // a next clip: the subjects, settings, style and soundscape of the one before, without what was its own
+    function inheritedClip(prev, clip) {
+        for (const k of ["subjects"]) if (prev[k]) clip[k] = JSON.parse(JSON.stringify(prev[k]));
+        const style = String(prev.description || "").split(/\[Shot \d+\]/)[0].trim();
+        clip.description = (style ? style + "\n" : "") + "[Shot 1] ";
+        clip.summary = "";
+        if (prev.soundscape) clip.soundscape = prev.soundscape;
+        if (prev.music) clip.music = prev.music;
+        return clip;
     }
 
     // ------------------------------------------------------------------ DOM helpers
@@ -170,7 +94,6 @@ const H3Sections = (() => {
         ta.style.height = "auto";
         ta.style.height = Math.max(ta.scrollHeight + 2, ta.classList.contains("sx-one") ? 30 : 44) + "px";
     }
-    const PICTURE_RE = new RegExp(`\\{(picture|voice):(${NAME_CHARS})\\}`, "g");
 
     // ------------------------------------------------------------------ "@" completion
     let ac = null;    // {ta, start, items, active, node}
@@ -194,7 +117,7 @@ const H3Sections = (() => {
     function insertAt(ta, start, end, text) {
         const v = ta.value;
         const after = v.slice(end);
-        const glue = after && !/^[\s.,;:!?)]/.test(after) ? " " : (after ? "" : " ");
+        const glue = /\s$/.test(text) ? "" : after && !/^[\s.,;:!?)]/.test(after) ? " " : (after ? "" : " ");
         ta.value = v.slice(0, start) + text + glue + after;
         const pos = start + text.length + glue.length;
         ta.focus();
@@ -207,11 +130,13 @@ const H3Sections = (() => {
             if (pos !== ta.selectionEnd) { closeAc(); return; }
             const before = ta.value.slice(0, pos);
             const m = /(^|[^\p{L}\p{N}_@{-])@([\p{L}\p{N}_-]*)$/u.exec(before);
-            if (!m) { if (ac && ac.ta === ta) closeAc(); return; }
-            const q = m[2].toLowerCase();
-            const items = getItems().filter((it) => !q || (it.label + " " + (it.hint || "")).toLowerCase().includes(q)).slice(0, 10);
+            const cam = m ? null : /(^|\s)\/([\p{L}\p{N}_ -]*)$/u.exec(before);      // « / »: camera moves, cuts, framing
+            if (!m && !cam) { if (ac && ac.ta === ta) closeAc(); return; }
+            const q = (m || cam)[2].toLowerCase();
+            const pool = m ? getItems() : cameraItems(ta, cam.index + cam[1].length);
+            const items = pool.filter((it) => !q || (it.label + " " + (it.hint || "")).toLowerCase().includes(q)).slice(0, cam ? 30 : 10);
             if (!items.length) { closeAc(); return; }
-            const start = pos - m[2].length - 1;
+            const start = pos - (m || cam)[2].length - 1;
             if (!ac || ac.ta !== ta) {
                 closeAc();
                 ac = { ta, node: h("div", { class: "sx-ac", role: "listbox" }) };
@@ -237,9 +162,62 @@ const H3Sections = (() => {
     }
     function pick(item) {
         if (!ac || !item) return;
+        if (item.more) {          // a camera move: then its amplitude and speed
+            ac.items = item.more();
+            ac.active = 0;
+            drawAc();
+            return;
+        }
         const { ta, start, end } = ac;
         closeAc();
         insertAt(ta, start, end, item.ins);
+        if (item.select) {        // a value to type at once (the time of a cut)
+            const at = ta.value.indexOf(item.select, start);
+            if (at >= 0) ta.setSelectionRange(at, at + item.select.length);
+        }
+    }
+    // ---- « / » in a text: the camera vocabulary of MiniMax's guide (moves with their amplitude and speed), cuts to a
+    // new shot, framings. What is inserted is plain English text, ready to finish.
+    const MOVES = [
+        ["push_in", "The camera pushes in{a}{s} toward "], ["pull_out", "The camera pulls out{a}{s}, revealing "],
+        ["zoom_in", "The camera zooms in{a}{s} on "], ["zoom_out", "The camera zooms out{a}{s}, revealing "],
+        ["pan_left", "The camera pans left{a}{s}, "], ["pan_right", "The camera pans right{a}{s}, "],
+        ["truck_left", "The camera trucks left{a}{s}, following "], ["truck_right", "The camera trucks right{a}{s}, following "],
+        ["tilt_up", "The camera tilts up{a}{s} to "], ["tilt_down", "The camera tilts down{a}{s} to "],
+        ["pedestal_up", "The camera pedestals up{a}{s}, "], ["pedestal_down", "The camera pedestals down{a}{s}, "],
+        ["arc", "The camera moves in an arc shot{a}{s} around "], ["tracking", "The camera follows in a tracking shot{s} as "],
+        ["roll_cw", "The camera rolls clockwise{a}{s}, "], ["roll_ccw", "The camera rolls counterclockwise{a}{s}, "],
+    ];
+    const FIXED = [
+        ["static", "The camera holds a static shot as "], ["shake_slightly", "The camera shakes slightly. "],
+        ["shake_strongly", "The camera shakes strongly. "], ["pov", "Point-of-view shot: "],
+    ];
+    const FRAMINGS = [["extreme_close_up", "Extreme close-up on "], ["close_up", "Close-up on "], ["medium_shot", "Medium shot of "],
+        ["medium_wide_shot", "Medium-wide shot of "], ["wide_shot", "Wide shot of "], ["over_shoulder", "Over-the-shoulder shot of "]];
+    const AMPS = [["", "amp_medium"], [" with small amplitude", "amp_small"], [" with large amplitude", "amp_large"]];
+    const SPEEDS = [["", "speed_normal"], [" at slow speed", "speed_slow"], [" at fast speed", "speed_fast"]];
+    function cameraItems(ta, slash) {
+        const out = [];
+        const shots = (ta.value.slice(0, slash).match(/\[Shot \d+\]/g) || []).length;
+        if (ta.dataset.sec === "description" || ta.id === "rawPrompt") {
+            const time = "00:00.000";
+            out.push({ kind: "C", label: _t("sx.cam_cut"), hint: `[Shot ${shots + 1}] At ${time}, the shot cuts to …`,
+                ins: `${slash > 0 && ta.value[slash - 1] !== "\n" ? "\n" : ""}[Shot ${shots + 1}] At ${time}, the shot cuts to `, select: time });
+        }
+        for (const [key, text] of MOVES) {
+            const label = _t("sx.cam_" + key);
+            out.push({ kind: "C", label, hint: text.replace("{a}", "").replace("{s}", "").trim() + " …", more: () => {
+                const list = [];
+                for (const [a, al] of key === "tracking" ? [AMPS[0]] : AMPS) for (const [sp, sl] of SPEEDS) {
+                    const ins = text.replace("{a}", a).replace("{s}", sp);
+                    list.push({ kind: "C", label: `${label} · ${_t("sx.cam_" + al)} · ${_t("sx.cam_" + sl)}`, hint: ins.trim() + " …", ins });
+                }
+                return list;
+            } });
+        }
+        for (const [key, ins] of FIXED) out.push({ kind: "C", label: _t("sx.cam_" + key), hint: ins.trim(), ins });
+        for (const [key, ins] of FRAMINGS) out.push({ kind: "F", label: _t("sx.cam_" + key), hint: ins.trim() + " …", ins });
+        return out;
     }
     function drawAc() {
         ac.node.replaceChildren(...ac.items.map((it, i) => h("div", { class: `sx-ac-item${i === ac.active ? " on" : ""}`, role: "option",
@@ -251,71 +229,56 @@ const H3Sections = (() => {
             it.hint ? h("span", { class: "sx-ac-hint" }, it.hint) : null)));
     }
 
+
     // ------------------------------------------------------------------ what can be inserted
-    function speakerSubject(c, names, speaker) {
-        const parts = H3.parseSections(c.prompt);
-        const text = parts ? parts[0] : String(c.prompt || "");
-        for (const line of text.split("\n")) {
-            const m = /^<Subject (\d+)>/.exec(line.trim());
-            if (m && line.includes(`{picture:${speaker}}`)) return names[+m[1] - 1] ? "@" + names[+m[1] - 1] : `<Subject ${m[1]}>`;
-        }
-        return names.includes(speaker) ? "@" + speaker : (names[0] ? "@" + names[0] : "<Subject 1>");
+    const subjectsOf = (ctx) => H3.definitions(ctx.plan, ctx.clip).subjects;
+    function fileUrl(ctx, label) {
+        const item = H3.definitions(ctx.plan, ctx.clip).files[label];
+        return item && item.file && ctx.media && ctx.media.fileUrl ? ctx.media.fileUrl(item.file) : null;
     }
-    function snippets(ctx, names) {
-        const first = names[0] ? "@" + names[0] : "<Subject 1>";
+    function subjectThumb(ctx, name, subjects) {
+        const s = (subjects || subjectsOf(ctx))[name];
+        const pic = s && (s.pictures || [])[0];
+        return pic ? fileUrl(ctx, pic.file) : null;
+    }
+    function snippets(ctx, first) {
+        const who = first ? "@" + first : "";
         const lang = ctx.lastLanguage();
         const list = [];
         if (ctx.free) {
-            list.push({ label: _t("sections.silent_character"), ins: `${first} never speaks and keeps its mouth closed.` });
+            list.push({ label: _t("sections.silent_character"), ins: `${who} never speaks and keeps its mouth closed.` });
             list.push({ label: _t("sections.silent_ending"), ins: "End with a quiet half second without speech." });
         } else {
-            list.push({ label: _t("sections.silent_character"), ins: `${first} never sings and keeps its mouth closed.` });
+            list.push({ label: _t("sections.silent_character"), ins: `${who} never sings and keeps its mouth closed.` });
             list.push({ label: _t("sections.off_screen_singer"), ins: "Nobody sings on screen; the song is performed by an off-screen singer." });
-            list.push({ label: _t("sections.ending_in_motion"), ins: "End with the motion still in progress, so the next clip continues the same shot." });
             list.push({ label: _t("sections.music_sync"), ins: "The visible performance stays synchronized to it." });
         }
+        list.push({ label: _t("sections.ending_in_motion"), ins: "End with the motion still in progress, so the next clip continues the same shot." });
         list.push({ label: "<d>…</d>", ins: `<d>[${lang}] </d>` });
         return list;
     }
-    function dialogueItems(ctx, names) {
+    function dialogueItems(ctx) {
         const c = ctx.clip, out = [];
         if (ctx.free) {
             for (const d of c.dialogue || []) {
                 if (!String(d.text || "").trim()) continue;
-                const who = speakerSubject(c, names, d.speaker);
-                out.push({ label: _t("sections.line_of", { v0: d.speaker || "?" }), hint: d.text, ins: `${who} (S${ctx.speakerNumber(d.speaker)}) says: <d>[${d.language || ctx.lastLanguage()}] ${String(d.text).trim()}</d>` });
+                out.push({ label: _t("sections.line_of", { v0: d.speaker || "?" }), hint: d.text,
+                    ins: `@${d.speaker} says: <d>[${d.language || ctx.lastLanguage()}] ${String(d.text).trim()}</d>` });
             }
         } else if (String(c.lyrics || "").trim()) {
-            const who = names[0] ? "@" + names[0] : "<Subject 1>";
-            out.push({ label: _t("sections.clip_lyrics"), hint: c.lyrics, ins: `${who} (S1) sings with clearly readable mouth and jaw articulation: <d>[${ctx.lastLanguage()}] ${String(c.lyrics).trim()}</d>` });
+            const first = H3.clipSubjects(ctx.plan, c, ctx.index)[0];
+            out.push({ label: _t("sections.clip_lyrics"), hint: c.lyrics,
+                ins: `${first ? "@" + first + " " : ""}sings with clearly readable mouth and jaw articulation: <d>[${ctx.lastLanguage()}] ${String(c.lyrics).trim()}</d>` });
         }
         return out;
     }
-    function refItems(ctx) {
-        const c = ctx.clip, out = [];
-        (c.refs || []).forEach((r, k) => {
-            const desc = (ctx.plan.refs || {})[r] || "";
-            out.push({ kind: "R", label: `{picture:${r}}`, hint: _t("sections.ref", { v0: k + 1, v1: desc ? " · " + desc : "" }), ins: `{picture:${r}}`, img: ctx.media ? ctx.media.image(r) : null });
-            if (ctx.free) out.push({ kind: "R", label: `{voice:${r}}`, hint: _t("sections.voice"), ins: `{voice:${r}}` });
-        });
+    function items(ctx) {
+        const subjects = subjectsOf(ctx);
+        const out = Object.entries(subjects).map(([n, s]) => ({ kind: "S", label: "@" + n, hint: `${KIND_ICON[s.kind || "person"] || ""} ${s.description || ""}`,
+            ins: "@" + n, img: subjectThumb(ctx, n, subjects) }));
+        dialogueItems(ctx).forEach((d) => out.push({ kind: "D", ...d }));
+        snippets(ctx, H3.clipSubjects(ctx.plan, ctx.clip, ctx.index)[0]).forEach((p) => out.push({ kind: "P", label: p.label, hint: p.ins, ins: p.ins }));
         return out;
-    }
-    function items(ctx, names) {
-        const out = [];
-        names.forEach((n, i) => out.push({ kind: "S", label: "@" + n, hint: `Subject ${i + 1}`, ins: "@" + n, img: subjectImage(ctx, n) }));
-        out.push(...refItems(ctx));
-        dialogueItems(ctx, names).forEach((d) => out.push({ kind: "D", ...d }));
-        snippets(ctx, names).forEach((p) => out.push({ kind: "P", label: p.label, hint: p.ins, ins: p.ins }));
-        return out;
-    }
-    function subjectImage(ctx, name) {
-        if (!ctx.media) return null;
-        const parts = H3.parseSections(ctx.clip.prompt);
-        if (!parts) return null;
-        const names = subjectNames(ctx.clip, parts);
-        const row = parseSubjects(toDisplay(parts[0], names), names).rows.find((r) => r.name === name);
-        const m = row && new RegExp(`\\{picture:(${NAME_CHARS})\\}`).exec(row.text);
-        return m ? ctx.media.image(m[1]) : null;
     }
     const dragText = (text) => (e) => { e.dataTransfer.setData("text/x-h3", text); e.dataTransfer.setData("text/plain", text); e.dataTransfer.effectAllowed = "copy"; };
     // character index under a point of a textarea (mirror element, one span per character)
@@ -351,266 +314,414 @@ const H3Sections = (() => {
         });
     }
 
-    // ------------------------------------------------------------------ the editor
-    function render(card, ctx) {
-        const c = ctx.clip, free = ctx.free;
-        const parts = H3.parseSections(c.prompt);
-        const names = subjectNames(c, parts);
-        const disp = parts.map((p) => toDisplay(p, names));
-        const getItems = () => items(ctx, names);
-        const prev = ctx.prevClip;
-        const prevParts = prev ? H3.parseSections(prev.prompt) : null;
-        const prevDisplay = (k) => {
-            if (!prevParts) return null;
-            const pn = subjectNames(prev, prevParts);
-            return toDisplay(prevParts[k], pn);
-        };
 
-        // write one section back (display form → prompt form)
-        const commit = (k, display, structural = false) => {
-            const now = H3.parseSections(c.prompt) || parts;
-            now[k] = toPrompt(display, names);
-            c.prompt = H3.composeSections(now);
-            ctx.changed(structural);
-        };
-        const setNames = (list) => { c._subjects = list.slice(); };
-        const ta = (value, oninput, { one = false, placeholder = "" } = {}) => {
-            const t = h("textarea", { class: `sx-ta${one ? " sx-one" : ""}`, spellcheck: "false", placeholder, value });
-            t.addEventListener("input", () => { oninput(t.value); autosize(t); });
+    // a project file dragged from the library (onto an anchor or a subject): {rel, kind}
+    const dragFile = (rel, kind) => (e) => { e.dataTransfer.setData("text/x-h3-file", JSON.stringify({ rel, kind })); e.dataTransfer.effectAllowed = "copy"; };
+    // 0.48.2: files dragged from the computer (Explorer, Finder) are imported into the project first; single: only the
+    // first one (a place that takes one file: a missing picture, a picture to replace, an anchor)
+    const isOsDrag = (e) => [...e.dataTransfer.types].includes("Files");
+    const FOLDER_OF_KIND = { image: "images", voice: "voices" };
+    const fitsKind = (file, kind) => (file.type || "").startsWith(kind === "image" ? "image/" : "audio/")
+        || (kind === "image" ? /\.(png|jpe?g|webp|gif|bmp)$/i : /\.(wav|mp3|flac|ogg|m4a|aac)$/i).test(file.name);
+    async function importDropped(e, kind, single) {
+        const media = (window.H3Editor && window.H3Editor.media) || {};
+        const files = [...e.dataTransfer.files];
+        const ok = files.filter((f) => fitsKind(f, kind));
+        if (!ok.length) { alert(_t(kind === "image" ? "sx.drop_an_image" : "sx.drop_a_voice")); return []; }
+        if (!media.importDropped) return [];
+        return media.importDropped(FOLDER_OF_KIND[kind], single ? ok.slice(0, 1) : ok);
+    }
+    function dropFile(node, kind, onFile, { single = false } = {}) {
+        node.addEventListener("dragover", (e) => {
+            if ([...e.dataTransfer.types].includes("text/x-h3-file") || isOsDrag(e)) { e.preventDefault(); e.stopPropagation(); node.classList.add("sx-over"); }
+        });
+        node.addEventListener("dragleave", () => node.classList.remove("sx-over"));
+        node.addEventListener("drop", async (e) => {
+            node.classList.remove("sx-over");
+            if (isOsDrag(e) && e.dataTransfer.files.length) {
+                e.preventDefault(); e.stopPropagation();
+                for (const rel of await importDropped(e, kind, single)) onFile(rel);
+                return;
+            }
+            const raw = e.dataTransfer.getData("text/x-h3-file");
+            if (!raw) return;
+            e.preventDefault(); e.stopPropagation();
+            const f = JSON.parse(raw);
+            if (f.kind !== kind) { alert(_t(kind === "image" ? "sx.drop_an_image" : "sx.drop_a_voice")); return; }
+            onFile(f.rel);
+        });
+    }
+    const KIND_OF_FOLDER = { images: "image", voices: "voice" };
+    // a picture chosen among the project's images, or imported from the computer: a small window of thumbnails
+    function pickImage() {
+        const media = (window.H3Editor && window.H3Editor.media) || {};
+        const res = media.resources ? media.resources() : { images: [] };
+        return new Promise((resolve) => {
+            const overlay = h("div", { class: "tk-modal sx-picker", style: "z-index:80" });
+            const done = (rel) => { overlay.remove(); document.removeEventListener("keydown", onKey, true); resolve(rel || null); };
+            const onKey = (e) => { if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); done(null); } };
+            const grid = h("div", { class: "sx-picker-grid" }, res.images.map((f) => h("button", { class: "sx-picker-item", title: f.name, onclick: () => done(f.path) },
+                h("img", { src: media.fileUrl(f.path), alt: "", class: "sx-thumb" }), h("div", { class: "sx-file-name" }, f.name))));
+            const box = h("div", { class: "tk-box tk-form wide" },
+                h("div", { class: "tk-box-head" }, h("b", {}, _t("sx.pick_image")), h("span", { style: "flex:1" }),
+                    media.importFiles ? h("button", { class: "primary sx-picker-import", onclick: async () => { const [p] = await media.importFiles("images"); if (p) done(p); } }, _t("sx.import_from_computer")) : null,
+                    h("button", { onclick: () => done(null) }, _t("plan.close"))),
+                h("div", { class: "hint" }, _t("sx.pick_image_hint")),
+                res.images.length ? grid : h("div", { class: "hint" }, _t("sx.no_file")));
+            dropFile(box, "image", (rel) => done(rel), { single: true });
+            overlay.append(box);
+            overlay.addEventListener("click", (e) => { if (e.target === overlay) done(null); });
+            document.addEventListener("keydown", onKey, true);
+            document.body.append(overlay);
+        });
+    }
+
+    // ------------------------------------------------------------------ the editor of a clip
+    // ctx: plan, clip, index, free, prevClip, changed(structural), toast, media, messages, compose (the server's result
+    // for this clip, or null), lastLanguage(), locked (a generated clip, read-only)
+    function render(card, ctx) {
+        const c = ctx.clip;
+        const override = typeof c.prompt_override === "string" && c.prompt_override.trim() !== "";
+        const tabs = h("span", { class: "tabs sx-tabs" },
+            h("button", { class: view.tab === "fields" ? "on" : "", onclick: () => { view.tab = "fields"; ctx.redraw(); } }, _t("sx.tab_fields")),
+            h("button", { class: `sx-tab-h3 ${view.tab === "h3" ? "on" : ""}`, onclick: () => { view.tab = "h3"; ctx.redraw(); } },
+                _t("sx.tab_h3") + (override ? " ✎" : "")));
+        card.append(h("h2", {}, h("span", { class: "grow" }, _t("plan.prompt")), tabs));
+        if (override) card.append(h("div", { class: "sx-warn sx-override" }, h("span", {}, _t(view.tab === "fields" ? "sx.override_fields" : "sx.override_h3")),
+            h("button", { class: "small", onclick: () => { delete c.prompt_override; ctx.changed(true); } }, _t("sx.back_to_composed"))));
+        if (view.tab === "h3") { renderH3(card, ctx); return; }
+        card.append(anchorsRow(ctx));
+        const getItems = () => items(ctx);
+        const area = (key, label, hint, { one = false } = {}) => {
+            const t = h("textarea", { class: `sx-ta${one ? " sx-one" : ""}`, "data-sec": key, spellcheck: "false", placeholder: hint, value: c[key] ?? "" });
+            t.addEventListener("input", () => { if (t.value) c[key] = t.value; else delete c[key]; autosize(t); ctx.changed(false); });
             attachAc(t, getItems);
             acceptDrops(t);
             requestAnimationFrame(() => autosize(t));
-            return t;
+            return h("div", { class: "sx-box", "data-field": key }, h("div", { class: "sx-head" }, h("span", { class: "sx-code" }, label), h("span", { class: "sx-hint" }, hint)), t);
         };
-        const box = (code, hint, ...tools) => {
-            const head = h("div", { class: "sx-head" }, h("span", { class: "sx-code" }, code), h("span", { class: "sx-hint" }, hint), h("span", { class: "grow" }), ...tools);
-            const b = h("div", { class: "sx-box" }, head);
-            card.append(b);
-            return b;
+        card.append(area("summary", _t("sx.summary"), _t("sx.summary_hint"), { one: true }));
+        card.append(area("description", _t("sx.description"), _t("sx.description_hint")));
+        card.append(area("soundscape", _t("sx.soundscape"), ctx.free ? _t("sx.soundscape_hint_free") : _t("sx.soundscape_hint_music"), { one: true }));
+        card.append(area("music", _t("sx.music"), ctx.free ? _t("sx.music_hint_free") : _t("sx.music_hint_music"), { one: true }));
+        const uses = h("div", { class: "sx-box", id: "sxUses" });
+        card.append(uses);
+        drawUses(ctx, uses);
+    }
+    // ---- anchors: first frame, keyframes, last frame (pictures of the project dropped or chosen)
+    function anchorsRow(ctx) {
+        const c = ctx.clip;
+        const continues = !!c.continue && (ctx.index > 1 || !!ctx.plan.start_video);
+        const a = c.anchors || {};
+        const set = (mut) => { c.anchors = { ...(c.anchors || {}) }; mut(c.anchors); for (const k of ["first", "last"]) if (!c.anchors[k]) delete c.anchors[k];
+            if (c.anchors.keyframes && !c.anchors.keyframes.length) delete c.anchors.keyframes; if (!Object.keys(c.anchors).length) delete c.anchors;
+            pruneFiles(ctx.plan); ctx.changed(true); };
+        const images = (ctx.media && ctx.media.resources ? ctx.media.resources().images : null) || [];
+        const slot = (title, label, onSet, onClear, disabledWhy) => {
+            const url = label ? fileUrl(ctx, label) : null;
+            const choose = h("select", { class: "sx-anchor-pick", disabled: !!disabledWhy || null, title: disabledWhy || _t("sx.anchor_choose"),
+                onchange: (e) => { if (e.target.value) onSet(fileLabel(ctx.plan, e.target.value, "image")); } },
+                h("option", { value: "" }, label ? "…" : "+"), images.map((f) => h("option", { value: f.path }, f.name)));
+            const node = h("div", { class: `sx-anchor${disabledWhy ? " off" : ""}`, title: disabledWhy || "" },
+                h("div", { class: "sx-anchor-t" }, title),
+                url ? h("img", { src: url, alt: "", class: "sx-thumb" }) : h("div", { class: "sx-thumb sx-thumb-empty" }, disabledWhy ? "🔒" : "—"),
+                h("div", { class: "sx-row" }, choose, label ? h("button", { class: "small", title: _t("sx.anchor_remove"), onclick: onClear }, "✕") : null));
+            if (!disabledWhy) dropFile(node, "image", (rel) => onSet(fileLabel(ctx.plan, rel, "image")));
+            return node;
         };
-        const fromPrev = (label, get) => prev ? h("button", { class: "small", title: _t("sections.take_the_text_of_clip", { v0: ctx.index - 1 }), onclick: get }, label) : null;
-
-        // ---- subject_definitions
-        const subj = parseSubjects(disp[0], names);
-        const commitSubjects = (structural) => commit(0, composeSubjects(subj.rows, subj.extra), structural);
-        const s0 = box("subject_definitions:", _t("sections.one_subject_per_reused_element_drag"));
-        subj.rows.forEach((row, i) => {
-            const tokens = [...row.text.matchAll(PICTURE_RE)].map((m) => ({ kind: m[1], name: m[2] }));
-            const preview = h("div", { class: "sx-gen" });
-            const showGen = () => { preview.textContent = toPrompt(composeSubjects([row], ""), names) || _t("sections.subject_no_definition_yet", { v0: i + 1 }); };
-            showGen();
-            const refChoices = (c.refs || []).flatMap((r) => [["picture", r], ...(free ? [["voice", r]] : [])]);
-            const addRef = h("select", { class: "sx-addref", onchange: (e) => {
-                const [kind, r] = e.target.value.split(":");
-                if (!r) return;
-                if (kind === "voice") row.text = (row.text ? row.text + "\n" : "") + `speaks with the voice from {voice:${r}}.`;
-                else if (!row.text.trim()) row.text = `is ... whose appearance comes from {picture:${r}}.`;
-                else row.text = row.text.replace(/\s*$/, "") + ` {picture:${r}}`;
-                commitSubjects(true);
-            } }, h("option", { value: "" }, _t("sections.reference")), refChoices.map(([k, r]) => h("option", { value: `${k}:${r}` }, k === "voice" ? _t("sections.voice_4", { r }) : r)));
-            const nameInput = h("input", { class: "sx-name", value: row.name, title: _t("sections.working_name_letters_digits_and"),
-                onchange: (e) => {
-                    const v = e.target.value.trim();
-                    if (v === row.name) return;
-                    if (!NAME_OK.test(v)) { alert(_t("sections.invalid_name_letters_digits_and_only")); e.target.value = row.name; return; }
-                    if (names.includes(v)) { alert(_t("sections.the_name_is_already_used_in", { v })); e.target.value = row.name; return; }
-                    const list = names.slice(); list[i] = v; setNames(list);
-                    ctx.changed(true);
-                } });
-            const textarea = ta(row.text, (v) => { row.text = v; showGen(); commitSubjects(false); }, { one: true, placeholder: "is the … whose face, hair and clothing come from {picture:…}." });
-            s0.append(h("div", { class: "sx-subject" },
-                h("div", { class: "sx-row" },
-                    h("span", { class: "sx-chip sx-chipS", draggable: "true", title: _t("sections.drag_into_a_section"), ondragstart: dragText("@" + row.name) },
-                        subjectImage(ctx, row.name) ? h("img", { src: subjectImage(ctx, row.name), alt: "" }) : null, `@${row.name} · S${i + 1}`),
-                    h("label", { class: "sx-hint" }, _t("sections.name"), nameInput),
-                    tokens.length ? h("span", { class: "sx-hint" }, _t("sections.references")) : null,
-                    tokens.map((t) => h("span", { class: "sx-chip sx-chipR", title: t.kind === "voice" ? _t("sections.voice") : "image" },
-                        t.kind === "picture" && ctx.media && ctx.media.image(t.name) ? h("img", { src: ctx.media.image(t.name), alt: "" }) : null,
-                        t.kind === "voice" ? `🎙 ${t.name}` : t.name)),
-                    refChoices.length ? addRef : null,
-                    h("span", { class: "grow" }),
-                    h("button", { class: "small", title: _t("sections.move_up_renumbers_everywhere"), disabled: i === 0 || null, onclick: () => moveSubject(i, -1) }, "↑"),
-                    h("button", { class: "small", title: _t("sections.move_down_renumbers_everywhere"), disabled: i === subj.rows.length - 1 || null, onclick: () => moveSubject(i, 1) }, "↓"),
-                    h("button", { class: "small danger", title: _t("sections.delete_this_subject"), onclick: () => deleteSubject(i) }, "✕")),
-                textarea, preview));
+        const keys = (a.keyframes || []).map((k, i) => {
+            const at = h("input", { type: "number", class: "sx-at", step: "0.1", min: 0, value: k.at ?? "", title: _t("sx.keyframe_at_hint"),
+                onchange: (e) => set((x) => { x.keyframes = [...x.keyframes]; x.keyframes[i] = { ...x.keyframes[i], at: Math.round((+e.target.value || 0) * 1000) / 1000 }; }) });
+            const s = slot(_t("sx.anchor_keyframe"), k.file, (label) => set((x) => { x.keyframes = [...x.keyframes]; x.keyframes[i] = { ...x.keyframes[i], file: label }; }),
+                () => set((x) => { x.keyframes = x.keyframes.filter((_y, j) => j !== i); }));
+            s.append(h("div", { class: "sx-row sx-hint" }, _t("sx.keyframe_at"), at, "s"));
+            return s;
         });
-        if (subj.extra) {
-            s0.append(h("div", { class: "sx-hint", style: "margin-top:6px" }, _t("sections.other_lines_no_subject_at_the")),
-                ta(subj.extra, (v) => { subj.extra = v; commitSubjects(false); }, { one: true }));
-        }
-        s0.append(h("button", { class: "small", onclick: addSubject }, "+ subject"));
-
-        function moveSubject(i, d) {
-            const j = i + d;
-            const list = names.slice();
-            [list[i], list[j]] = [list[j], list[i]];
-            c.prompt = remapSubjects(c.prompt, (k) => (k === i + 1 ? j + 1 : k === j + 1 ? i + 1 : k));
-            setNames(list);
-            // regroup the definitions in the new order
-            const p2 = H3.parseSections(c.prompt);
-            const d0 = toDisplay(p2[0], list);
-            const s = parseSubjects(d0, list);
-            p2[0] = toPrompt(composeSubjects(s.rows, s.extra), list);
-            const rows = parseRetention(toDisplay(p2[2], list));
-            if (rows) { rows.sort((a, b) => list.indexOf(a.name) - list.indexOf(b.name)); p2[2] = toPrompt(composeRetention(rows), list); }
-            c.prompt = H3.composeSections(p2);
-            ctx.changed(true);
-        }
-        async function deleteSubject(i) {
-            const name = names[i];
-            const p2 = H3.parseSections(c.prompt);
-            const elsewhere = [1, 3, 4, 5].reduce((a, k) => a + [...p2[k].matchAll(new RegExp(`<Subject ${i + 1}>`, "g"))].length, 0);
-            const ok = await H3Dialog.confirm(_t("sections.delete_its_definition_and_its_retention", { name })
-                + (elsewhere ? _t("sections.it_is_mentioned_times_elsewhere_those", { elsewhere, name }) : ""), { ok: _t("sections.delete"), danger: true });
-            if (!ok) return;
-            const list = names.filter((_, k) => k !== i);
-            const d = p2.map((p) => toDisplay(p, names));
-            const s = parseSubjects(d[0], names);
-            s.rows.splice(i, 1);
-            d[0] = composeSubjects(s.rows, s.extra);
-            const rows = parseRetention(d[2]);
-            if (rows) d[2] = composeRetention(rows.filter((r) => r.name !== name));
-            setNames(list);
-            c.prompt = H3.composeSections(d.map((t) => toPrompt(t, list)));
-            ctx.changed(true);
-        }
-        function addSubject() {
-            const d = H3.parseSections(c.prompt).map((p) => toDisplay(p, names));
-            const s = parseSubjects(d[0], names);
-            const used = new Set(s.rows.flatMap((r) => [...r.text.matchAll(PICTURE_RE)].map((m) => m[2])));
-            const ref = (c.refs || []).find((r) => !used.has(r));
-            let base = ref || "subject", name = base, j = 2;
-            while (names.includes(name)) name = `${base}_${j++}`;
-            const list = [...names, name];
-            d[0] = composeSubjects([...s.rows, { name, text: ref ? `is ... whose appearance comes from {picture:${ref}}.` : "is ..." }], s.extra);
-            const rows = parseRetention(d[2]);
-            if (rows) d[2] = composeRetention([...rows, retentionLine(name)]);
-            setNames(list);
-            c.prompt = H3.composeSections(d.map((t) => toPrompt(t, list)));
-            ctx.changed(true);
-        }
-
-        // ---- summary
-        const sum = splitSummary(disp[1]);
-        box("summary:", _t("sections.one_paragraph_the_prefix_is_added")).append(...[
-            h("div", { class: "sx-lock" }, PREFIX),
-            sum.had ? null : h("div", { class: "sx-warn" }, _t("sections.the_prefix_was_missing_it_will")),
-            ta(sum.text, (v) => commit(1, composeSummary(v)), { placeholder: _t("sections.subject_what_the_clip_shows") })].filter(Boolean));
-
-        // ---- retention_analysis
-        const ret = parseRetention(disp[2]);
-        const s2 = box("retention_analysis:", ret ? _t("sections.one_line_per_subject") : _t("sections.free_form_edited_as_text"));
-        if (ret) {
-            const commitRet = (structural) => commit(2, composeRetention(ret), structural);
-            ret.forEach((r, i) => {
-                const known = names.includes(r.name);
-                s2.append(h("div", { class: "sx-row sx-ret" },
-                    h("span", { class: `sx-chip ${known ? "sx-chipS" : "sx-chipX"}`, title: known ? r.scope : _t("sections.unknown_subject") }, "@" + r.name),
-                    h("select", { onchange: (e) => { r.mode = e.target.value; commitRet(false); } }, MODES.map((m) => h("option", { value: m, selected: m === r.mode || null }, m))),
-                    ta(r.why, (v) => { r.why = v; commitRet(false); }, { one: true, placeholder: _t("sections.why") }),
-                    h("button", { class: "small danger", title: _t("sections.remove_this_line"), onclick: () => { ret.splice(i, 1); commitRet(true); } }, "✕")));
-            });
-            const missing = names.filter((n) => !ret.some((r) => r.name === n));
-            if (missing.length) s2.append(h("div", { class: "sx-row" }, missing.map((n) =>
-                h("button", { class: "small", onclick: () => { ret.push(retentionLine(n)); ret.sort((a, b) => names.indexOf(a.name) - names.indexOf(b.name)); commitRet(true); } }, _t("sections.line_for", { n })))));
-        } else {
-            s2.append(ta(disp[2], (v) => commit(2, v)));
-        }
-
-        // ---- detailed_description
-        const det = parseDetailed(disp[3]);
-        const custom = customOpening(det);
-        const auto = custom ? "" : expectedSentence(c, ctx.index, free, !!(ctx.plan && ctx.plan.start_video));
-        const commitDet = (structural, fix) => commit(3, composeDetailed(det.style, det.shots, fix ? auto : openingFor(det)), structural);
-        const s3 = box("detailed_description:", _t("sections.style_then_one_block_per_shot"),
-            fromPrev(_t("sections.style_of_the_previous_clip"), () => { const p = prevDisplay(3); if (p == null) return; det.style = toDisplay(toPrompt(parseDetailed(p).style, subjectNames(prev, prevParts)), names); commitDet(true); }));
-        s3.append(h("div", { class: "sx-hint" }, "style"), ta(det.style, (v) => { det.style = v; commitDet(false); }, { one: true, placeholder: "The target video is …" }));
-        if (custom) {
-            s3.append(h("div", { class: "sx-hint", style: "margin:4px 0" }, _t("sections.shot_1_starts_with_an_opening")));
-        } else if (det.found !== auto) {
-            s3.append(h("div", { class: "sx-warn" },
-                auto ? (det.found ? _t("sections.the_opening_sentence_does_not_match") : _t("sections.the_required_opening_sentence_is_missing"))
-                    : _t("sections.the_first_clip_has_no_required"),
-                h("button", { class: "small", onclick: () => commitDet(true, true) }, auto ? _t("sections.use_the_right_sentence") : _t("sections.remove_it"))));
-        }
-        if (!det.shots.length) det.shots.push("");
-        det.shots.forEach((body, i) => {
-            s3.append(h("div", { class: "sx-shot" },
-                h("div", { class: "sx-row" }, h("span", { class: "sx-code" }, `[Shot ${i + 1}]`), h("span", { class: "grow" }),
-                    det.shots.length > 1 ? h("button", { class: "small danger", title: _t("sections.delete_this_shot"), onclick: () => { det.shots.splice(i, 1); commitDet(true); } }, "✕") : null),
-                i === 0 && auto ? h("div", { class: "sx-lock", title: _t("sections.sentence_required_by_how_the_clip") }, auto) : null,
-                ta(body, (v) => { det.shots[i] = v; commitDet(false); }, { placeholder: _t("sections.framing_place_light_action_camera_acting") })));
+        const secs = H3.isRun(c.frames) ? c.frames / H3.FPS : 0;
+        return h("div", { class: "sx-box sx-anchors" },
+            h("div", { class: "sx-head" }, h("span", { class: "sx-code" }, _t("sx.anchors")), h("span", { class: "sx-hint" }, _t("sx.anchors_hint"))),
+            h("div", { class: "sx-anchor-row" },
+                slot(_t("sx.anchor_first"), a.first, (label) => set((x) => { x.first = label; }), () => set((x) => { delete x.first; }),
+                    continues ? _t("sx.anchor_first_off") : null),
+                ...keys,
+                h("button", { class: "small sx-addkey", title: _t("sx.add_keyframe_hint"), onclick: () => {
+                    const first = images[0];
+                    if (!first) { alert(_t("sx.import_pictures_first")); return; }
+                    set((x) => { x.keyframes = [...(x.keyframes || []), { at: Math.round(secs * 500) / 1000 || 1, file: fileLabel(ctx.plan, first.path, "image") }]; });
+                } }, _t("sx.add_keyframe")),
+                slot(_t("sx.anchor_last"), a.last, (label) => set((x) => { x.last = label; }), () => set((x) => { delete x.last; }))));
+    }
+    // ---- the subjects of the clip (the ones its texts name), with their settings, and the counts H3 allows
+    function drawUses(ctx, node) {
+        const box = node || document.getElementById("sxUses");
+        if (!box) return;
+        const c = ctx.clip;
+        const subjects = subjectsOf(ctx);
+        const names = H3.clipSubjects(ctx.plan, c, ctx.index);
+        const rows = names.map((name) => {
+            const s = subjects[name];
+            if (!s) return h("div", { class: "sx-row sx-use" }, h("span", { class: "sx-chip sx-chipX" }, "@" + name),
+                h("span", { class: "sx-hint" }, _t("sx.unknown_subject")),
+                ctx.locked ? null : h("button", { class: "small", onclick: () => editSubject(ctx, null, name) }, _t("sx.create_subject", { name })));
+            const u = useOf(c, name);
+            const keep = h("select", { class: "sx-keep", title: _t("sx.keep_hint"), onchange: (e) => { setUse(c, name, "keep", e.target.value, "identical"); ctx.changed(true); } },
+                H3.KEEPS.map((k) => h("option", { value: k, selected: (u.keep || "identical") === k || null, title: _t("sx.keep_h3_" + k) }, _t("sx.keep_" + k))));
+            const voice = ctx.free && s.voice ? h("select", { class: "sx-voicekeep", title: _t("sx.voice_keep_hint"),
+                onchange: (e) => { setUse(c, name, "voice_keep", e.target.value, "timbre"); ctx.changed(true); } },
+                H3.VOICE_KEEPS.map((k) => h("option", { value: k, selected: (u.voice_keep || "timbre") === k || null }, "🎙 " + _t("sx.voice_keep_" + k)))) : null;
+            const note = h("input", { class: "sx-note", value: u.note || "", placeholder: _t("sx.note_placeholder"), title: _t("sx.note_hint"),
+                oninput: (e) => { setUse(c, name, "note", e.target.value.trim() ? e.target.value : "", ""); ctx.changed(false); } });
+            const img = subjectThumb(ctx, name, subjects);
+            const spk = ctx.compose && (ctx.compose.speakers || []).find(([n]) => n === name);
+            return h("div", { class: "sx-row sx-use", "data-subject": name },
+                spk ? h("span", { class: "sx-speaker", title: _t("sx.speaker_hint", { k: spk[1] }) }, `🗣 S${spk[1]}`) : null,
+                h("span", { class: "sx-chip sx-chipS", draggable: "true", ondragstart: dragText("@" + name), title: s.description || "" },
+                    img ? h("img", { src: img, alt: "" }) : h("span", {}, KIND_ICON[s.kind || "person"]), "@" + name),
+                keep, voice, note);
         });
-        s3.append(h("button", { class: "small", onclick: () => { det.shots.push(""); commitDet(true); } }, `+ [Shot ${det.shots.length + 1}]`));
-
-        // ---- overall_soundscape, non_diegetic_music
-        box("overall_soundscape:", free ? _t("sections.sounds_of_the_place_never_any") : _t("sections.a_few_quiet_sounds_under_the"),
-            fromPrev(_t("sections.from_the_previous_clip"), () => { const p = prevDisplay(4); if (p != null) commit(4, toDisplay(toPrompt(p, subjectNames(prev, prevParts)), names), true); }))
-            .append(ta(disp[4], (v) => commit(4, v), { one: true }));
-        box("non_diegetic_music:", free ? _t("sections.free_mode_none") : _t("sections.this_part_of_the_song_no"),
-            fromPrev(_t("sections.from_the_previous_clip"), () => { const p = prevDisplay(5); if (p != null) commit(5, toDisplay(toPrompt(p, subjectNames(prev, prevParts)), names), true); }))
-            .append(ta(disp[5], (v) => commit(5, v), { one: true }));
+        const got = H3.clipFiles(ctx.plan, c, ctx.index);
+        const edits = !!H3.editSlice(ctx.plan, ctx.index);
+        const total = got.pictures.length + got.voices.length + (edits ? 1 : 0);
+        const count = (n, max, label) => h("span", { class: n > max ? "sx-over-limit" : "" }, `${n}/${max} ${label}`);
+        box.replaceChildren(h("div", { class: "sx-head" }, h("span", { class: "sx-code" }, _t("sx.clip_subjects")), h("span", { class: "sx-hint" }, _t("sx.clip_subjects_hint"))),
+            rows.length ? h("div", {}, ...rows) : h("div", { class: "hint" }, _t("sx.no_subject_named")),
+            h("div", { class: "sx-quota" }, count(got.pictures.length, H3.MAX_REFS, "🖼"), " · ",
+                ctx.free ? count(got.voices.length, H3.MAX_VOICES, "🎙") : null, ctx.free ? " · " : null,
+                count(total, H3.MAX_REF_FILES, _t("sx.files"))));
+    }
+    // ---- the H3 prompt: composed by the server, editable (prompt_override); the numbers of the clip beside it
+    function renderH3(card, ctx) {
+        const c = ctx.clip;
+        const made = ctx.compose;
+        const override = typeof c.prompt_override === "string" && c.prompt_override.trim() !== "";
+        const legend = h("div", { class: "sx-legend", id: "sxLegend" });
+        const ta = h("textarea", { class: "sx-ta sx-h3", spellcheck: "false", id: "rawPrompt",
+            value: override ? c.prompt_override : made ? made.prompt : "" });
+        ta.addEventListener("input", () => { c.prompt_override = ta.value; autosize(ta); ctx.changed(false); });
+        attachAc(ta, () => items(ctx));
+        requestAnimationFrame(() => autosize(ta));
+        card.append(h("div", { class: "hint" }, _t(override ? "sx.h3_hint_override" : "sx.h3_hint")), legend, made || override ? ta : h("div", { class: "hint" }, _t("sx.composing")));
+        drawLegend(ctx, legend);
+    }
+    function drawLegend(ctx, node) {
+        const box = node || document.getElementById("sxLegend");
+        if (!box) return;
+        const made = ctx.compose;
+        if (!made) { box.replaceChildren(); return; }
+        const L = made.legend;
+        const subjects = subjectsOf(ctx);
+        const fileName = (label) => { const f = H3.definitions(ctx.plan, ctx.clip).files[label]; return f && f.file ? f.file.split("/").pop() : label; };
+        box.replaceChildren(
+            ...L.subjects.map((n, i) => h("span", { class: "sx-chip sx-chipS", title: (subjects[n] || {}).description || "" }, `<Subject ${i + 1}> = @${n}`)),
+            ...L.pictures.map((f, i) => h("span", { class: "sx-chip sx-chipR", title: fileName(f) },
+                fileUrl(ctx, f) ? h("img", { src: fileUrl(ctx, f), alt: "" }) : null, `<Picture ${i + 1}>`)),
+            ...L.audio.map((f, i) => h("span", { class: "sx-chip sx-chipD", title: f === "<video sound>" ? _t("sx.video_sound") : fileName(f) },
+                `<Audio ${i + 1}> ${f === "<video sound>" ? "🎞" : "🎙 " + fileName(f)}`)),
+            ...(L.video ? [h("span", { class: "sx-chip sx-chipP" }, `<Video 1> 🎞`)] : []),
+            ...(made.speakers || []).map(([n, k]) => h("span", { class: "sx-chip sx-chipD", title: _t("sx.speaker_hint", { k }) }, `(S${k}) = @${n}`)));
+    }
+    // the parts of the editor that follow the server's answer (the whole editor is not drawn again: the caret stays)
+    function refreshCompose(ctx) {
+        drawLegend(ctx);
+        const ta = document.querySelector("textarea.sx-h3");
+        const c = ctx.clip;
+        if (ta && !(typeof c.prompt_override === "string" && c.prompt_override.trim()) && ctx.compose && document.activeElement !== ta) {
+            ta.value = ctx.compose.prompt;
+            autosize(ta);
+        }
+        drawUses(ctx);
+        refreshChecks(ctx);
     }
 
-    // ------------------------------------------------------------------ the palette (right column)
+    // ------------------------------------------------------------------ a subject of the plan (window)
+    // name null: a new subject (`suggest`: the name typed in a text)
+    function editSubject(ctx, name, suggest) {
+        const plan = ctx.plan;
+        plan.subjects = plan.subjects || {};
+        const isNew = !name;
+        const s = JSON.parse(JSON.stringify(isNew ? { kind: "person", description: "", pictures: [] } : plan.subjects[name]));
+        const media = ctx.media || {};
+        const res = media.resources ? media.resources() : { images: [], voices: [] };
+        const nameIn = h("input", { class: "sx-sname", value: name || suggest || "", placeholder: _t("sx.subject_name_placeholder") });
+        const kind = h("select", { class: "sx-skind" }, H3.SUBJECT_KINDS.map((k) => h("option", { value: k, selected: (s.kind || "person") === k || null }, `${KIND_ICON[k]} ${_t("sx.kind_" + k)}`)));
+        const desc = h("textarea", { class: "sx-ta sx-sdesc", placeholder: _t("sx.subject_desc_placeholder"), value: s.description || "" });
+        const pics = h("div", { class: "sx-pics" });
+        const frozen = !isNew && (ctx.frozenSubjects || []).includes(name);
+        // 0.48.2: a file the plan declares without an image yet (an imported plan) gets one here; applied on « save »,
+        // under its own label: its note, the role of the picture and every other use of the label keep it
+        const fills = {};
+        const relOf = (label) => fills[label] || (plan.files[label] || {}).file || null;
+        const drawPics = () => {
+            pics.replaceChildren(...(s.pictures || []).map((p, i) => {
+                const rel = relOf(p.file);
+                const note = (plan.files[p.file] || {}).note || "";
+                // an empty label gets the image; a picture already there is replaced for this subject only
+                const setRel = (r) => { if (!r) return; if (rel) p.file = fileLabel(plan, r, "image"); else fills[p.file] = r; drawPics(); };
+                const choose = async () => { if (!frozen) setRel(await pickImage()); };
+                const thumb = rel
+                    ? h("img", { src: media.fileUrl ? media.fileUrl(rel) : "", alt: "", class: "sx-thumb sx-pic-thumb", title: frozen ? "" : _t("sx.replace_picture"), onclick: choose })
+                    : h("div", { class: "sx-thumb sx-pic-missing", title: _t("sx.missing_picture_title", { label: p.file }) + (note ? "\n" + note : ""), onclick: choose },
+                        h("b", {}, p.file), note ? h("span", {}, note) : null, h("span", { class: "sx-pic-missing-act" }, _t("sx.missing_picture_choose")));
+                const item = h("div", { class: `sx-pic${rel ? "" : " missing"}`, "data-label": p.file },
+                    thumb,
+                    h("input", { class: "sx-role", value: p.role || "", placeholder: _t("sx.role_placeholder", { v0: _t("sx.role_default_" + kind.value) }),
+                        oninput: (e) => { if (e.target.value.trim()) p.role = e.target.value; else delete p.role; } }),
+                    h("button", { class: "small", title: _t("sx.remove_picture"), onclick: () => { s.pictures.splice(i, 1); drawPics(); } }, "✕"));
+                if (!frozen) dropFile(item, "image", setRel, { single: true });
+                return item;
+            }),
+            h("div", { class: "sx-pic sx-pic-add" },
+                h("select", { class: "sx-addpic", onchange: (e) => { if (e.target.value) { s.pictures = [...(s.pictures || []), { file: fileLabel(plan, e.target.value, "image") }]; drawPics(); } } },
+                    h("option", { value: "" }, _t("sx.add_picture")), res.images.map((f) => h("option", { value: f.path }, f.name))),
+                media.importFiles ? h("button", { class: "small", onclick: async () => {
+                    const paths = await media.importFiles("images");
+                    for (const p of paths || []) s.pictures = [...(s.pictures || []), { file: fileLabel(plan, p, "image") }];
+                    drawPics();
+                } }, _t("sx.import")) : null,
+                h("span", { class: "hint" }, _t("sx.or_drop_a_picture"))));
+        };
+        if (!frozen) dropFile(pics, "image", (rel) => { s.pictures = [...(s.pictures || []), { file: fileLabel(plan, rel, "image") }]; drawPics(); });
+        kind.addEventListener("change", drawPics);
+        drawPics();
+        // a voice the plan declares without a file yet stays chosen (« to supply ») until another one is picked
+        const missingVoice = s.voice && !relOf(s.voice) ? s.voice : null;
+        const voice = h("select", { class: "sx-svoice", disabled: !ctx.free || null, title: ctx.free ? "" : _t("sx.voice_music_video") },
+            h("option", { value: "" }, _t("sx.no_voice")),
+            missingVoice ? h("option", { value: "label:" + missingVoice, selected: true }, _t("sx.voice_to_supply", { label: missingVoice })) : null,
+            res.voices.map((f) => h("option", { value: f.path, selected: (s.voice && relOf(s.voice) === f.path) || null }, f.name)));
+        if (ctx.free && !frozen) dropFile(voice, "voice", (rel) => { voice.append(h("option", { value: rel, selected: true }, rel.split("/").pop())); voice.value = rel; }, { single: true });
+        const body = h("div", { class: "sx-subject-form" },
+            h("div", { class: "grid2" }, h("label", {}, _t("sx.subject_name")), nameIn, h("label", {}, _t("sx.subject_kind")), kind),
+            h("label", {}, _t("sx.subject_desc")), desc,
+            h("label", {}, _t("sx.subject_pictures")), h("div", { class: "hint" }, _t("sx.subject_pictures_hint")), pics,
+            h("label", {}, _t("sx.subject_voice")), h("div", { class: "sx-row" }, voice,
+                media.importFiles && ctx.free ? h("button", { class: "small", onclick: async () => {
+                    const [p] = await media.importFiles("voices");
+                    if (p) { voice.append(h("option", { value: p, selected: true }, p.split("/").pop())); voice.value = p; }
+                } }, _t("sx.import")) : null));
+        const overlay = h("div", { class: "tk-modal", style: "z-index:70" });
+        const close = () => overlay.remove();
+        const save = () => {
+            const newName = nameIn.value.trim();
+            if (!H3.SUBJECT_NAME_RE.test(newName)) { alert(_t("sx.subject_name_invalid")); return; }
+            if (newName !== name && newName in plan.subjects) { alert(_t("sx.subject_name_taken", { name: newName })); return; }
+            for (const [label, rel] of Object.entries(fills)) if (plan.files[label]) plan.files[label].file = rel;
+            s.kind = kind.value;
+            if (desc.value.trim()) s.description = desc.value.trim(); else delete s.description;
+            if (voice.value.startsWith("label:")) s.voice = voice.value.slice(6);
+            else if (voice.value && missingVoice && plan.files[missingVoice]) { plan.files[missingVoice].file = voice.value; s.voice = missingVoice; }   // the declared voice gets its file
+            else if (voice.value) s.voice = fileLabel(plan, voice.value, "voice"); else delete s.voice;
+            if (!isNew && newName !== name) renameSubject(plan, name, newName, ctx.isLocked || ctx.lockedCount || 0);
+            plan.subjects[newName] = s;
+            pruneFiles(plan);
+            close();
+            ctx.changed(true);
+            if (isNew && ctx.toast) ctx.toast(_t("sx.subject_created", { name: newName }));
+        };
+        const remove = async () => {
+            const users = (plan.clips || []).filter((c, i) => !(ctx.isLocked ? ctx.isLocked(i) : i < (ctx.lockedCount || 0)) && H3.clipSubjects(plan, c, i + 1).includes(name)).length;
+            if (!(await H3Dialog.confirm(users ? _t("sx.delete_subject_used", { name, count: users }) : _t("sx.delete_subject", { name })))) return;
+            delete plan.subjects[name];
+            pruneFiles(plan);
+            close();
+            ctx.changed(true);
+        };
+        // 0.48: a subject of a master plan frozen by the takes of its branch is shown, not changed
+        if (frozen) {
+            for (const el of body.querySelectorAll("input, textarea, select, button")) { el.disabled = true; if (el.tagName !== "SELECT") el.readOnly = true; }
+            body.prepend(h("div", { class: "locked-banner sx-frozen-subject" }, _t("sx.subject_frozen")));
+        }
+        overlay.append(h("div", { class: "tk-box tk-form wide" },
+            h("div", { class: "tk-box-head" }, h("b", {}, isNew ? _t("sx.new_subject") : _t("sx.subject_title", { name })), h("span", { style: "flex:1" }),
+                isNew || frozen ? null : h("button", { class: "danger", onclick: remove }, _t("sx.delete")),
+                h("button", { onclick: close }, _t("plan.close")), frozen ? null : h("button", { class: "primary sx-save", onclick: save }, _t("sx.save"))),
+            body));
+        overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
+        document.body.append(overlay);
+        requestAnimationFrame(() => { autosize(desc); (isNew ? nameIn : desc).focus(); });
+    }
+
+    // ------------------------------------------------------------------ the library (right column)
     function palette(side, ctx) {
-        const c = ctx.clip;
-        const parts = c ? H3.parseSections(c.prompt) : null;
-        const names = c ? subjectNames(c, parts) : [];
+        const plan = ctx.plan;
         const sect = (title, ...kids) => h("section", { class: "box sx-pal" }, h("h2", {}, title), ...kids);
-        if (!c) return;
-
-        // references of the clip
-        const declared = Object.keys(ctx.plan.refs || {}).filter((r) => r !== (ctx.plan.start_video || ctx.plan.edit_video || {}).ref);   // not the plan's video
-        const avail = declared.filter((r) => !(c.refs || []).includes(r));
-        const refs = sect(_t("sections.clip_references"),
-            h("div", { class: "hint" }, ctx.media ? _t("sections.previews_branch_drag_a_reference_into", { v0: ctx.media.label() }) : _t("sections.drag_a_reference_into_a_text")));
-        (c.refs || []).forEach((r, k) => {
-            const img = ctx.media ? ctx.media.image(r) : null;
-            const voice = ctx.free && ctx.media ? ctx.media.voice(r) : null;
-            let thumb;
-            if (img) {
-                const im = h("img", { src: img, alt: r, class: "sx-thumb" });
-                thumb = window.H3Takes && window.H3Takes.zoomable ? window.H3Takes.zoomable(im, r) : im;
-            } else thumb = h("div", { class: "sx-thumb sx-thumb-empty", title: ctx.media ? _t("sections.no_picture_in_this_branch") : "" }, "—");
-            refs.append(h("div", { class: "sx-refrow" },
-                h("span", { class: "sx-num" }, k + 1),
-                thumb,
-                h("div", { class: "sx-refmain" },
-                    h("span", { class: "sx-chip sx-chipR", draggable: "true", ondragstart: dragText(`{picture:${r}}`), title: (ctx.plan.refs || {})[r] || "" }, r),
-                    h("span", { class: "sx-desc", title: (ctx.plan.refs || {})[r] || "" }, (ctx.plan.refs || {})[r] || ""),
-                    voice ? playButton(voice) : null),
-                h("span", { class: "sx-refbtns" },
-                    h("button", { class: "small", title: _t("sections.move_earlier"), disabled: k === 0 || null, onclick: () => { [c.refs[k - 1], c.refs[k]] = [c.refs[k], c.refs[k - 1]]; ctx.changed(true); } }, "‹"),
-                    h("button", { class: "small", title: _t("sections.move_later"), disabled: k === c.refs.length - 1 || null, onclick: () => { [c.refs[k + 1], c.refs[k]] = [c.refs[k], c.refs[k + 1]]; ctx.changed(true); } }, "›"),
-                    h("button", { class: "small", title: _t("sections.remove_from_the_clip"), onclick: () => { c.refs.splice(k, 1); ctx.changed(true); } }, "✕"))));
+        const media = ctx.media || {};
+        // subjects of the plan
+        const subjects = plan.subjects || {};
+        const used = ctx.clip ? H3.clipSubjects(plan, ctx.clip, ctx.index) : [];
+        const list = Object.entries(subjects).map(([n, s]) => {
+            const thumbs = (s.pictures || []).map((p) => { const rel = (plan.files[p.file] || {}).file; return rel && media.fileUrl ? h("img", { src: media.fileUrl(rel), alt: "", title: p.role || "", class: "sx-mini" })
+                : h("span", { class: "sx-mini sx-mini-missing", title: _t("sx.missing_picture_title", { label: p.file }) }, "?"); });
+            return h("div", { class: `sx-lib-subject${used.includes(n) ? " in-clip" : ""}`, "data-subject": n },
+                h("span", { class: "sx-chip sx-chipS", draggable: "true", ondragstart: dragText("@" + n), title: _t("sx.drag_subject") }, `${KIND_ICON[s.kind || "person"]} @${n}`),
+                h("span", { class: "sx-lib-thumbs" }, ...thumbs, s.voice ? h("span", { title: _t("sx.has_voice") }, "🎙") : null),
+                h("button", { class: "small sx-edit", title: (ctx.frozenSubjects || []).includes(n) ? _t("sx.subject_frozen_short") : _t("sx.edit_subject"), onclick: () => editSubject(ctx, n) },
+                    (ctx.frozenSubjects || []).includes(n) ? "🔒" : "✎"),
+                h("div", { class: "sx-desc" }, s.description || ""));
         });
-        const tools = h("div", { class: "sx-row" });
-        if (avail.length) tools.append(h("select", { onchange: (e) => { if (e.target.value) { c.refs = [...(c.refs || []), e.target.value]; ctx.changed(true); } } },
-            h("option", { value: "" }, _t("sections.plan_reference")), avail.map((r) => h("option", { value: r }, r))));
-        else if (!declared.length) tools.append(h("span", { class: "hint" }, _t("sections.declare_the_references_in_plan_settings")));
-        if (ctx.prevClip) tools.append(h("button", { class: "small", onclick: () => { c.refs = [...(ctx.prevClip.refs || [])]; ctx.changed(true); } }, _t("sections.those_of_the_previous_clip")));
-        refs.append(tools);
-        side.append(refs);
-
-        if (parts) {
-            side.append(sect(_t("sections.subjects"), h("div", { class: "sx-chips" }, names.length
-                ? names.map((n, i) => h("span", { class: "sx-chip sx-chipS", draggable: "true", ondragstart: dragText("@" + n), title: `<Subject ${i + 1}>` },
-                    subjectImage(ctx, n) ? h("img", { src: subjectImage(ctx, n), alt: "" }) : null, `@${n}`))
-                : h("span", { class: "hint" }, _t("sections.no_subject")))));
-            const dl = dialogueItems(ctx, names);
+        side.append(sect(_t("sx.library_subjects"),
+            h("div", { class: "hint" }, _t("sx.library_subjects_hint")),
+            list.length ? h("div", {}, ...list) : h("div", { class: "hint" }, _t("sx.no_subject_yet")),
+            h("button", { class: "small sx-newsubject", onclick: () => editSubject(ctx, null) }, _t("sx.new_subject_button"))));
+        // 0.48.2: the files the plan declares without an image or a voice yet (an imported plan): filled here, under their label
+        const missing = Object.entries(plan.files || {}).filter(([, f]) => f && !f.file && (f.kind === "image" || (f.kind === "voice" && ctx.free)));
+        if (missing.length && media.fileUrl) {
+            const users = (label) => Object.entries(subjects).filter(([, s]) => (s.pictures || []).some((p) => p.file === label) || s.voice === label).map(([n]) => "@" + n);
+            const set = (label) => (rel) => { if (!rel || !plan.files[label]) return; plan.files[label].file = rel; ctx.changed(true); };
+            side.append(sect(_t("sx.missing_files"), h("div", { class: "hint" }, _t("sx.missing_files_hint")),
+                ...missing.map(([label, f]) => {
+                    const row = h("div", { class: "sx-missing", "data-label": label },
+                        h("div", { class: "sx-missing-head" }, h("b", {}, (f.kind === "voice" ? "🎙 " : "🖼 ") + label),
+                            h("span", { class: "hint" }, users(label).join(" ")), h("span", { style: "flex:1" }),
+                            f.kind === "image" ? h("button", { class: "small", onclick: async () => set(label)(await pickImage()) }, _t("sx.missing_picture_choose"))
+                                : media.importFiles ? h("button", { class: "small", onclick: async () => { const [p] = await media.importFiles("voices"); set(label)(p); } }, _t("sx.import")) : null),
+                        f.note ? h("div", { class: "hint" }, f.note) : null);
+                    dropFile(row, f.kind, set(label), { single: true });
+                    return row;
+                })));
+        }
+        // files of the project
+        const res = media.resources ? media.resources() : null;
+        if (res) {
+            const tab = (k) => h("button", { class: view.files === k ? "on" : "", onclick: () => { view.files = k; ctx.redraw(); } }, _t("sx.files_" + k));
+            const files = (res[view.files] || []).map((f) => {
+                const kind = KIND_OF_FOLDER[view.files];
+                const url = media.fileUrl(f.path);
+                return h("div", { class: "sx-file", draggable: "true", ondragstart: dragFile(f.path, kind), title: f.name },
+                    kind === "image" ? h("img", { src: url, alt: f.name, class: "sx-thumb" }) : h("div", { class: "sx-thumb sx-thumb-empty" }, "🎙"),
+                    h("div", { class: "sx-file-name" }, f.name),
+                    kind === "voice" ? playButton(url) : null);
+            });
+            const box = sect(_t("sx.library_files"),
+                h("div", { class: "tabs sx-filetabs" }, tab("images"), tab("voices"),
+                    media.importFiles ? h("button", { class: "small", onclick: async () => { await media.importFiles(view.files); ctx.redraw(); } }, _t("sx.import")) : null),
+                h("div", { class: "hint" }, _t("sx.library_files_hint")),
+                files.length ? h("div", { class: "sx-files" }, ...files) : h("div", { class: "hint" }, _t("sx.no_file")));
+            // files dropped from the computer are imported (images, or voices on the voices tab)
+            box.classList.add("sx-files-box");
+            box.addEventListener("dragover", (e) => { if (isOsDrag(e)) { e.preventDefault(); box.classList.add("sx-over"); } });
+            box.addEventListener("dragleave", () => box.classList.remove("sx-over"));
+            box.addEventListener("drop", async (e) => {
+                box.classList.remove("sx-over");
+                if (!isOsDrag(e) || !e.dataTransfer.files.length) return;
+                e.preventDefault();
+                const done = await importDropped(e, KIND_OF_FOLDER[view.files], false);
+                if (done.length) ctx.redraw();
+            });
+            side.append(box);
+        }
+        if (ctx.clip) {
+            const dl = dialogueItems(ctx);
             if (dl.length) side.append(sect(ctx.free ? _t("sections.lines") : _t("sections.lyrics"), ...dl.map((d) => h("div", { class: "sx-dl" },
                 h("span", { class: "sx-chip sx-chipD", draggable: "true", ondragstart: dragText(d.ins), title: d.ins }, `⠿ ${d.label}`),
                 h("div", { class: "sx-dltext" }, d.hint)))));
-            side.append(sect(_t("sections.stock_sentences"), h("div", { class: "sx-chips" }, snippets(ctx, names).map((p) =>
+            side.append(sect(_t("sections.stock_sentences"), h("div", { class: "sx-chips" }, snippets(ctx, used[0]).map((p) =>
                 h("span", { class: "sx-chip sx-chipP", draggable: "true", ondragstart: dragText(p.ins), title: p.ins }, p.label)))));
+            side.append(checksBox(ctx));
         }
-        side.append(checksBox(ctx));
     }
     function checksBox(ctx) {
-        const c = ctx.clip;
-        const parts = c ? H3.parseSections(c.prompt) : null;
-        const checks = c ? clipChecks(ctx, parts, subjectNames(c, parts)) : [];
+        const checks = (ctx.messages || []).map((m) => ({ level: m.level, text: m.text }));
         return h("section", { class: "box sx-pal", id: "sxChecks" }, h("h2", {}, _t("sections.clip_checks")),
             checks.length ? h("ul", { class: "vlist" }, checks.map((m) => h("li", { class: m.level }, m.text)))
                 : h("div", { class: "hint", style: "color:var(--ok)" }, _t("sections.nothing_to_report")));
@@ -621,30 +732,16 @@ const H3Sections = (() => {
     }
     function playButton(url) {
         const audio = h("audio", { src: url, preload: "none" });
-        const b = h("button", { class: "small", title: _t("sections.play_the_voice"), onclick: () => { if (audio.paused) { audio.currentTime = 0; audio.play(); } else audio.pause(); } }, _t("sections.voice_2"));
+        const b = h("button", { class: "small", title: _t("sections.play_the_voice"), onclick: (e) => { e.stopPropagation(); if (audio.paused) { audio.currentTime = 0; audio.play(); } else audio.pause(); } }, _t("sections.voice_2"));
         audio.addEventListener("play", () => { b.textContent = _t("sections.voice_3"); });
         audio.addEventListener("pause", () => { b.textContent = _t("sections.voice_2"); });
         audio.addEventListener("ended", () => { b.textContent = _t("sections.voice_2"); });
         return h("span", {}, b, audio);
     }
-    // checks of the clip: the plan's own, plus the editor's (@names, subjects)
-    function clipChecks(ctx, parts, names) {
-        const out = (ctx.messages || []).map((m) => ({ level: m.level, text: m.text }));
-        if (!parts) return out;
-        const all = parts.map((p) => toDisplay(p, names)).join("\n");
-        for (const n of unknownMentions(all, names)) out.push({ level: "error", text: _t("sections.unknown_subject_in_this_clip", { n }) });
-        const subj = parseSubjects(toDisplay(parts[0], names), names);
-        subj.rows.forEach((r) => { if (!r.text.trim()) out.push({ level: "warning", text: _t("sections.has_no_definition", { name: r.name }) }); });
-        const det = parseDetailed(toDisplay(parts[3], names));
-        if (!det.shots.some((s) => s.trim())) out.push({ level: "warning", text: _t("sections.no_shot_is_written") });
-        if (!splitSummary(toDisplay(parts[1], names)).text.trim()) out.push({ level: "warning", text: _t("sections.summary_is_empty") });
-        return out;
-    }
 
     return {
-        subjectNames, toDisplay, toPrompt, parseSubjects, composeSubjects, parseRetention, composeRetention, splitSummary, composeSummary,
-        parseDetailed, composeDetailed, expectedSentence, customOpening, openingFor, remapSubjects, inheritedPrompt, unknownMentions,
-        render, palette, refreshChecks, closeAc, attachAc,
+        fileLabel, pruneFiles, renameSubject, useOf, setUse, inheritedClip,
+        render, palette, refreshChecks, refreshCompose, editSubject, closeAc, attachAc, acceptDrops, KIND_ICON,
     };
 })();
 if (typeof module !== "undefined") module.exports = H3Sections;

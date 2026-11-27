@@ -1,0 +1,79 @@
+{
+ "version": 7,
+ "project": "robot_workshop",
+ "mode": "free",
+ "notes": "Example plan in free mode: H3 generates picture and sound. Two images (robot, workshop) in examples/; a voice sample named 'robot' is optional.",
+ "files": {
+  "robot": {
+   "kind": "image",
+   "note": "examples/robot.png"
+  },
+  "robot_voice": {
+   "kind": "voice",
+   "note": "optional: a sample of the robot's voice; without one, H3 picks a voice"
+  },
+  "workshop": {
+   "kind": "image",
+   "note": "examples/workshop.png"
+  }
+ },
+ "subjects": {
+  "robot": {
+   "kind": "person",
+   "description": "the small friendly robot",
+   "pictures": [
+    {
+     "file": "robot",
+     "role": "orange body, dark visor face with two round glowing blue eyes and a thin blue light for a mouth, yellow-bulb antenna, blue ear bolts and chest panel with three coloured buttons"
+    }
+   ],
+   "voice": "robot_voice"
+  },
+  "workshop": {
+   "kind": "place",
+   "description": "The workshop, its workbench, pegboard of tools, window and wooden crates",
+   "pictures": [
+    {
+     "file": "workshop",
+     "role": ""
+    }
+   ]
+  }
+ },
+ "context_frames": 39,
+ "crossfade_frames": 0,
+ "clips": [
+  {
+   "name": "fixing_lamp",
+   "frames": 158,
+   "continue": false,
+   "dialogue": [
+    {
+     "speaker": "robot",
+     "text": "Oh, hello! You're just in time.",
+     "language": "English"
+    }
+   ],
+   "summary": "In a cosy workshop, the little robot is repairing a desk lamp at the workbench; it notices the camera and greets it.",
+   "description": "The target video is a colourful stylized 3D animated short in the style of a family animated film, with soft toy-like materials, clean shapes and colours matching the references, gentle physically grounded camera movement, no on-screen text.\n[Shot 1] Medium shot in the workshop, warm daylight from the window. @robot stands at the workbench with its back half turned, tightening a screw on a small desk lamp with a screwdriver. It pauses, turns its head toward the camera, its eyes light up and it waves the screwdriver. @robot (S), cheerful and a little surprised, says: <d>[English] Oh, hello! You're just in time.</d> Its mouth light flickers with each word. End with the robot turning back to the lamp, reaching for its switch, the movement still in progress. Setting: @workshop.",
+   "soundscape": "Quiet workshop room tone, the squeak of the screwdriver, a soft whirr of the robot's motors, birds faintly outside the window.",
+   "music": ""
+  },
+  {
+   "name": "lamp_works",
+   "frames": 158,
+   "continue": true,
+   "dialogue": [
+    {
+     "speaker": "robot",
+     "text": "Look, it works! Want to build something together?",
+     "language": "English"
+    }
+   ],
+   "summary": "Same unbroken shot: the robot switches the repaired lamp on, it glows, and the robot invites the viewer to build something together.",
+   "description": "The target video is a colourful stylized 3D animated short in the style of a family animated film, with soft toy-like materials, clean shapes and colours matching the references, gentle physically grounded camera movement, no on-screen text.\n[Shot 1] @robot presses the lamp's switch with a click; the lamp lights up with a warm yellow glow. The robot claps its hands once, turns back to the camera and spreads its arms. @robot (S), delighted, says: <d>[English] Look, it works! Want to build something together?</d> It tilts its head, waiting for an answer. End with a quiet half second, mouth light still. Setting: @workshop.",
+   "soundscape": "The click of the switch, a faint electric hum from the lamp, the robot's soft motor whirr, quiet room tone.",
+   "music": ""
+  }
+ ]
+}

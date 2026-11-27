@@ -10,8 +10,8 @@ import json
 import re
 
 FPS = 24
-PLAN_VERSION = 6
-ACCEPTED_VERSIONS = (1, 2, 3, 4, 5, 6)   # older plans still load as music_video plans
+PLAN_VERSION = 7
+ACCEPTED_VERSIONS = (7,)   # no older format: a plan without subjects must be rewritten
 MODES = ("music_video", "free")
 MAX_CLIPS = 64          # limit of the final assembler node
 MAX_REFS = 9            # MiniMax H3 accepts at most 9 reference images
@@ -25,28 +25,57 @@ MAX_WORDS_PER_SECOND = 3.0
 SOFT_MAX_FRAMES = 243   # about 10 s; longer clips work but are slow
 HARD_MAX_FRAMES = 1195  # sanity bound only
 DEFAULT_CONTEXT = 39
-_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")       # file names (they name ComfyUI reference nodes)
+SUBJECT_NAME_RE = re.compile(r"^[^\W_](?:[\w-]*\w)?$")     # subject names: any letters, digits, '_' and '-'
+MENTION_RE = re.compile(r"(?<![\w@])@([^\W_](?:[\w-]*\w)?)")
 _PROMPT_SECTIONS = (
     "subject_definitions:", "summary:", "retention_analysis:",
     "detailed_description:", "overall_soundscape:", "non_diegetic_music:",
 )
 _PLAN_KEYS = {
-    "version", "project", "mode", "refs_dir", "refs", "width", "height", "context_frames",
+    "version", "project", "mode", "files", "subjects", "width", "height", "context_frames",
     "crossfade_frames", "audio_feather_ticks", "seed", "ref_image_size", "song", "clips", "notes", "start_video",
     "edit_video",
 }
+FILE_KINDS = ("image", "voice", "video")
+SUBJECT_KINDS = ("person", "place", "object", "outfit", "style", "action", "pose")
+KIND_WORDS = {"person": "a character", "place": "a place", "object": "an object", "outfit": "an outfit",
+              "style": "a visual style", "action": "an action", "pose": "a pose"}
+DEFAULT_ROLES = {"person": "appearance", "place": "scene", "object": "appearance", "outfit": "outfit",
+                 "style": "visual style", "action": "motion", "pose": "pose"}
+KEEP_MARKERS = {"identical": "fully_preserved", "partial": "partially_preserved",
+                "attribute": "attribute_transfer", "loose": "weak_reference"}
+VOICE_MARKERS = {"exact": "fully_copy", "partial": "partially_copy", "timbre": "reference", "loose": "weak_reference"}
+DEFAULT_KEEP, DEFAULT_VOICE_KEEP = "identical", "timbre"
+KEEP_REASONS = {"identical": "keep it exactly as defined while pose, expression and movement follow the scene",
+                "partial": "keep its main traits; details may change",
+                "attribute": "take only what its definition names from the reference",
+                "loose": "a loose inspiration only"}
+_FILE_KEYS = {"kind", "file", "note"}
+_SUBJECT_KEYS = {"kind", "description", "pictures", "voice", "note"}
+_USE_KEYS = {"name", "keep", "voice_keep", "note"}
+_ANCHOR_KEYS = {"first", "last", "keyframes"}
+_TEXT_KEYS = ("summary", "description", "soundscape", "music")
 _START_VIDEO_KEYS = {"ref", "start", "end", "in_assembly", "song"}
 START_SONG_CHOICES = ("with_video", "after_video")   # music_video: the song starts with the video, or after it
 _EDIT_VIDEO_KEYS = {"ref", "start", "end", "sound", "instruction"}
-EDIT_MARK = "{edit}"     # replaced by edit_video.instruction, the edit common to the clips
 EDIT_SOUND_CHOICES = ("original", "h3")   # the final video keeps the sound of the segment, or the one H3 made
 EDIT_MIN_FRAMES = 48     # a reference video lasts 2 to 15 s
 EDIT_MAX_FRAMES = 360
 _VIDEO_TAG_RE = re.compile(r"<Video (\d+)>")
-_CLIP_KEYS = {"name", "frames", "continue", "refs", "prompt", "seed", "lyrics", "dialogue", "notes"}
+_CLIP_KEYS = {"name", "frames", "continue", "anchors", "subjects", "summary", "description", "soundscape", "music",
+              "prompt_override", "defs", "seed", "lyrics", "dialogue", "notes"}
 _DIALOGUE_KEYS = {"speaker", "text", "language"}
-PLACEHOLDER_RE = re.compile(r"\{(picture|voice):([A-Za-z0-9][A-Za-z0-9_-]*)\}")
-_ANY_BRACE_RE = re.compile(r"\{(picture|voice|image|audio)\s*:[^}]*\}", re.IGNORECASE)
+PLACEHOLDER_RE = re.compile(r"\{(picture|voice):([A-Za-z0-9][A-Za-z0-9_-]*)\}")   # in the composed prompt only
+EDIT_AUDIO_MARK = "{edit_audio}"      # composed line kept only when the edited video has a sound (its <Audio 1>)
+AUDIO_REUSE_MARK = "{+audio_reuse}"   # becomes " + audio reuse" in the task prefix in that case
+SHOT_RE = re.compile(r"\[Shot (\d+)\]")
+CONTINUE_SENTENCE = ("The incoming performer motion, camera trajectory, body momentum, facial state, lighting, environment "
+                     "and object state continue uninterrupted from the protected video context.")
+FREE_CONTINUE_SUFFIX = " The protected sound continues too; nothing in that context is repeated."
+HIDDEN_LEADIN_FREE = "Hidden lead-in for the first 1.6 seconds: the scene is already fully established, nobody speaks."
+HIDDEN_LEADIN_MUSIC = ("The first second and a half of this clip is a lead-in that overlaps the end of the previous song "
+                       "phrase; the scene is already fully established from the first frame.")
 
 
 class PlanError(ValueError):
@@ -146,8 +175,6 @@ def validate(plan, song_duration: float | None = None):
         errors.append("'mode': 'free' needs 'version': 3")
     mode = plan_mode(plan)
     free = mode == "free"
-    if "refs_dir" in plan:
-        warnings.append("'refs_dir' is no longer used: reference images are now chosen in the workflow")
     project = plan.get("project")
     if not isinstance(project, str) or not _NAME_RE.match(project):
         errors.append("'project' must be a short name made of letters, digits, '_' or '-'")
@@ -181,20 +208,13 @@ def validate(plan, song_duration: float | None = None):
     if plan.get("ref_image_size", "match") not in ("match", "max"):
         errors.append("'ref_image_size' must be 'match' or 'max'")
 
-    refs_map = plan.get("refs", {})
-    if not isinstance(refs_map, dict):
-        errors.append("'refs' must be an object mapping a reference name to a short description")
-        refs_map = {}
-    for name, description in refs_map.items():
-        if not _NAME_RE.match(str(name)):
-            errors.append(f"reference name '{name}' may only contain letters, digits, '_' and '-'")
-        if not isinstance(description, str):
-            errors.append(f"reference '{name}': the description must be a string")
+    files_map = _check_files(plan.get("files", {}), "files", errors)
+    subjects_map = _check_subjects(plan.get("subjects", {}), "subjects", files_map, errors)
 
     start_video = plan.get("start_video")
     start_frames = None
     if start_video is not None:
-        start_frames = _check_start_video(start_video, refs_map, free, context, errors, warnings)
+        start_frames = _check_start_video(start_video, files_map, free, context, errors, warnings)
     edit_video = plan.get("edit_video")
     edit_frames = None
     if edit_video is not None:
@@ -202,8 +222,7 @@ def validate(plan, song_duration: float | None = None):
             errors.append("'start_video' and 'edit_video' cannot be used together: a plan continues a video or edits one")
         if not free:
             errors.append("'edit_video' needs free mode: the edited clips keep the sound of the video (or H3's), not a song")
-        edit_frames = _check_edit_video(edit_video, refs_map, errors, warnings)
-    instruction = edit_instruction(plan) if edit_video is not None else None
+        edit_frames = _check_edit_video(edit_video, files_map, subjects_map, errors, warnings)
 
     song = plan.get("song", {})
     if not isinstance(song, dict):
@@ -264,79 +283,7 @@ def validate(plan, song_duration: float | None = None):
         elif cont and index == 1 and start_video is None:
             errors.append("clip 1: 'continue' must be false, there is no previous clip (or set 'start_video')")
 
-        refs = clip.get("refs", [])
-        if not isinstance(refs, list) or not all(isinstance(r, str) for r in refs):
-            errors.append(f"{label}: 'refs' must be an array of reference names")
-            refs = []
-        raw_prompt = clip.get("prompt")
-        if isinstance(raw_prompt, str) and EDIT_MARK in raw_prompt and instruction is None:
-            errors.append(f"{label}: the prompt uses {EDIT_MARK} but the plan has no common edit instruction "
-                          "('instruction' of 'edit_video')")
-        expanded_prompt, refs = expand_edit(raw_prompt, refs, instruction)
-        if len(set(refs)) != len(refs):
-            errors.append(f"{label}: the same reference is listed twice")
-        limit = MAX_REF_FILES if free else MAX_REFS
-        if len(refs) > limit:
-            errors.append(f"{label}: at most {limit} references per clip (got {len(refs)})")
-        for ref in refs:
-            if not _NAME_RE.match(ref):
-                errors.append(f"{label}: reference name '{ref}' may only contain letters, digits, '_' and '-'")
-            elif refs_map and ref not in refs_map:
-                errors.append(f"{label}: reference '{ref}' is not declared in the top-level 'refs' object")
-        if not refs:
-            warnings.append(f"{label}: no reference; the clip is generated from text only")
-
-        prompt = expanded_prompt
-        if not isinstance(prompt, str) or not prompt.strip():
-            errors.append(f"{label}: 'prompt' must be a non-empty string")
-            prompt = ""
-        else:
-            position = -1
-            for section in _PROMPT_SECTIONS:
-                found = prompt.find(section)
-                if found < 0:
-                    warnings.append(f"{label}: prompt has no '{section}' section")
-                elif found < position:
-                    warnings.append(f"{label}: prompt section '{section}' is out of order")
-                position = max(position, found)
-            placeholders = PLACEHOLDER_RE.findall(prompt)
-            pictures = {n for kind, n in placeholders if kind == "picture"}
-            voices = {n for kind, n in placeholders if kind == "voice"}
-            for match in _ANY_BRACE_RE.finditer(prompt):
-                if not PLACEHOLDER_RE.fullmatch(match.group(0)):
-                    errors.append(f"{label}: '{match.group(0)}' is not a valid placeholder; write {{picture:NAME}} or {{voice:NAME}}")
-            for ref in sorted(pictures | voices):
-                if ref not in refs:
-                    errors.append(f"{label}: the prompt uses a placeholder for '{ref}' but 'refs' of the clip does not list it")
-            numbered = sorted({int(n) for n in re.findall(r"<Picture (\d+)>", prompt)})
-            for number in numbered:
-                if number < 1 or number > len(refs):
-                    errors.append(f"{label}: prompt uses <Picture {number}> but the clip lists {len(refs)} reference(s)")
-            if numbered and pictures:
-                errors.append(f"{label}: do not mix <Picture N> and {{picture:NAME}} in one prompt; use {{picture:NAME}}")
-            if len(pictures) > MAX_REFS:
-                errors.append(f"{label}: at most {MAX_REFS} reference images per clip")
-            if len(voices) > MAX_VOICES:
-                errors.append(f"{label}: at most {MAX_VOICES} voices per clip (got {len(voices)}: {', '.join(sorted(voices))})")
-            if len(pictures) + len(voices) > MAX_REF_FILES:
-                errors.append(f"{label}: at most {MAX_REF_FILES} reference files (images + voices) per clip")
-            for line in prompt.splitlines():
-                if "{voice:" in line and ("{picture:" in line or "<Picture" in line):
-                    errors.append(f"{label}: put each {{voice:NAME}} on its own line, without any picture on that line")
-                    break
-            videos = sorted({int(n) for n in _VIDEO_TAG_RE.findall(prompt)})
-            if videos and edit_video is None:
-                errors.append(f"{label}: the prompt uses <Video N> but the plan edits no video (set 'edit_video')")
-            elif any(n != 1 for n in videos):
-                errors.append(f"{label}: the edited video is <Video 1> (the only reference video of a clip)")
-            if "<Audio " in prompt:
-                if free:
-                    errors.append(f"{label}: do not write <Audio N>; write {{voice:NAME}} on its own line and the node numbers it")
-                else:
-                    warnings.append(f"{label}: prompt mentions <Audio N>; the song is injected directly and must not be declared as an audio reference")
-            if voices and not free:
-                warnings.append(f"{label}: voices are ignored in music_video mode; the {{voice:...}} lines are removed")
-
+        _check_clip_fields(clip, label, files_map, subjects_map, errors, warnings)
         lyrics = clip.get("lyrics", "")
         if lyrics and free:
             warnings.append(f"{label}: 'lyrics' is a music_video field; use 'dialogue' in free mode")
@@ -356,13 +303,14 @@ def validate(plan, song_duration: float | None = None):
                 if key not in _DIALOGUE_KEYS and not key.startswith("_"):
                     warnings.append(f"{where}: unknown key '{key}' is ignored")
             speaker, text = line.get("speaker"), line.get("text")
-            if not isinstance(speaker, str) or speaker not in refs:
-                errors.append(f"{where}: 'speaker' must be one of the clip's refs (got {speaker!r})")
+            if not isinstance(speaker, str) or not SUBJECT_NAME_RE.match(speaker):
+                errors.append(f"{where}: 'speaker' must be the name of a subject (got {speaker!r})")
             if not isinstance(text, str) or not text.strip():
                 errors.append(f"{where}: 'text' must be a non-empty string")
                 continue
             words += len(text.split())
-            if prompt and _squash(text) not in _squash(prompt):
+            said = " ".join(str(clip.get(k) or "") for k in _TEXT_KEYS) + " " + str(clip.get("prompt_override") or "")
+            if _squash(text) not in _squash(said):
                 warnings.append(f"{where}: this text is not found in the prompt; H3 only says what the prompt contains")
             if "language" in line and not isinstance(line["language"], str):
                 errors.append(f"{where}: 'language' must be a string such as 'French'")
@@ -377,6 +325,10 @@ def validate(plan, song_duration: float | None = None):
         if "seed" in clip and (not _is_int(clip["seed"]) or clip["seed"] < 0):
             errors.append(f"{label}: 'seed' must be a non-negative integer")
 
+    if frames_ok and not errors:            # what depends on the composed prompt of each clip
+        for clip in normalize(plan)["clips"]:
+            errors += [f"clip {clip['index']}: {e}" for e in clip["compose"]["errors"]]
+            warnings += [f"clip {clip['index']}: {w}" for w in clip["compose"]["warnings"]]
     if frames_ok and not errors and edit_frames:
         normal = normalize(plan)
         rows = timeline(normal)
@@ -421,7 +373,145 @@ def validate(plan, song_duration: float | None = None):
     return errors, warnings
 
 
-def _check_start_video(spec, refs_map, free, context, errors, warnings):
+def _check_files(files, where, errors):
+    """Check a 'files' object (name -> {kind, file}); return the valid entries."""
+    if not isinstance(files, dict):
+        errors.append(f"'{where}' must be an object mapping a file name to {{\"kind\", \"file\"}}")
+        return {}
+    out = {}
+    for name, item in files.items():
+        if not _NAME_RE.match(str(name)):
+            errors.append(f"{where}: file name '{name}' may only contain letters, digits, '_' and '-'")
+            continue
+        if not isinstance(item, dict) or item.get("kind") not in FILE_KINDS:
+            errors.append(f"{where}: file '{name}' must be an object whose 'kind' is one of {', '.join(FILE_KINDS)}")
+            continue
+        if "file" in item and not isinstance(item["file"], str):
+            errors.append(f"{where}: file '{name}': 'file' must be a path")
+        out[name] = item
+    return out
+
+
+def _check_subjects(subjects, where, files_map, errors):
+    """Check a 'subjects' object (name -> definition); return the valid entries."""
+    if not isinstance(subjects, dict):
+        errors.append(f"'{where}' must be an object mapping a subject name to its definition")
+        return {}
+    out = {}
+    for name, item in subjects.items():
+        label = f"{where}: subject '{name}'"
+        if not SUBJECT_NAME_RE.match(str(name)):
+            errors.append(f"{label}: a name may only contain letters, digits, '_' and '-'")
+            continue
+        if not isinstance(item, dict):
+            errors.append(f"{label}: must be an object")
+            continue
+        if item.get("kind", "person") not in SUBJECT_KINDS:
+            errors.append(f"{label}: 'kind' must be one of {', '.join(SUBJECT_KINDS)}")
+        if not isinstance(item.get("description", ""), str):
+            errors.append(f"{label}: 'description' must be a text")
+        pictures = item.get("pictures", [])
+        if not isinstance(pictures, list):
+            errors.append(f"{label}: 'pictures' must be an array of {{\"file\", \"role\"}}")
+            pictures = []
+        for k, pic in enumerate(pictures, start=1):
+            file = pic.get("file") if isinstance(pic, dict) else None
+            if file not in files_map or files_map[file].get("kind") != "image":
+                errors.append(f"{label}: picture {k} must name an image of 'files' (got {file!r})")
+            elif not isinstance(pic.get("role", ""), str):
+                errors.append(f"{label}: picture {k}: 'role' must be a text")
+        voice = item.get("voice")
+        if voice is not None and (voice not in files_map or files_map[voice].get("kind") != "voice"):
+            errors.append(f"{label}: 'voice' must name a voice of 'files' (got {voice!r})")
+        out[name] = item
+    return out
+
+
+def clip_definitions(plan, clip):
+    """(files, subjects) a clip sees: the plan's, with the clip's own 'defs' on top (a clip already generated
+    keeps what it was made with)."""
+    defs = clip.get("defs") if isinstance(clip.get("defs"), dict) else {}
+    files = dict(plan.get("files") or {})
+    files.update(defs.get("files") or {})
+    subjects = dict(plan.get("subjects") or {})
+    subjects.update(defs.get("subjects") or {})
+    return files, subjects
+
+
+def _check_clip_fields(clip, label, plan_files, plan_subjects, errors, warnings):
+    """The v7 fields of a clip (texts, subjects used, anchors, own definitions). What depends on the
+    composition (unknown @, limits, a prompt written by hand) is checked when the plan is composed."""
+    defs = clip.get("defs")
+    files_map, subjects_map = dict(plan_files), dict(plan_subjects)
+    if defs is not None:
+        if not isinstance(defs, dict):
+            errors.append(f"{label}: 'defs' must be an object with 'files' and 'subjects'")
+        else:
+            for key in defs:
+                if key not in ("files", "subjects", "edit_instruction") and not key.startswith("_"):
+                    warnings.append(f"{label}: defs: unknown key '{key}' is ignored")
+            if defs.get("edit_instruction") is not None and not isinstance(defs["edit_instruction"], str):
+                errors.append(f"{label}: defs.edit_instruction must be a text or null")
+            files_map.update(_check_files(defs.get("files", {}), f"{label}: defs.files", errors))
+            subjects_map.update(_check_subjects(defs.get("subjects", {}), f"{label}: defs.subjects", files_map, errors))
+    for key in _TEXT_KEYS:
+        if not isinstance(clip.get(key, ""), str):
+            errors.append(f"{label}: '{key}' must be a text")
+    override = clip.get("prompt_override")
+    if override is not None and not isinstance(override, str):
+        errors.append(f"{label}: 'prompt_override' must be a text or null")
+    if not override and not str(clip.get("summary") or "").strip() and not str(clip.get("description") or "").strip():
+        errors.append(f"{label}: write at least a 'summary' or a 'description'")
+    uses = clip.get("subjects", [])
+    if not isinstance(uses, list):
+        errors.append(f"{label}: 'subjects' must be an array of {{\"name\", \"keep\", ...}}")
+        uses = []
+    seen = set()
+    for use in uses:
+        if not isinstance(use, dict) or not isinstance(use.get("name"), str):
+            errors.append(f"{label}: every item of 'subjects' must be an object with a 'name'")
+            continue
+        for key in use:
+            if key not in _USE_KEYS and not key.startswith("_"):
+                warnings.append(f"{label}: subject '{use['name']}': unknown key '{key}' is ignored")
+        if use["name"] in seen:
+            errors.append(f"{label}: subject '{use['name']}' is set twice")
+        seen.add(use["name"])
+        if use["name"] not in subjects_map:
+            errors.append(f"{label}: subject '{use['name']}' is not defined in 'subjects'")
+        if use.get("keep", DEFAULT_KEEP) not in KEEP_MARKERS:
+            errors.append(f"{label}: subject '{use['name']}': 'keep' must be one of {', '.join(KEEP_MARKERS)}")
+        if use.get("voice_keep", DEFAULT_VOICE_KEEP) not in VOICE_MARKERS:
+            errors.append(f"{label}: subject '{use['name']}': 'voice_keep' must be one of {', '.join(VOICE_MARKERS)}")
+        if not isinstance(use.get("note", ""), str):
+            errors.append(f"{label}: subject '{use['name']}': 'note' must be a text")
+    anchors = clip.get("anchors", {})
+    if not isinstance(anchors, dict):
+        errors.append(f"{label}: 'anchors' must be an object with 'first', 'last' and 'keyframes'")
+        return
+    for key in anchors:
+        if key not in _ANCHOR_KEYS and not key.startswith("_"):
+            warnings.append(f"{label}: anchors: unknown key '{key}' is ignored")
+    image = lambda f: f in files_map and files_map[f].get("kind") == "image"  # noqa: E731
+    for key in ("first", "last"):
+        if anchors.get(key) is not None and not image(anchors[key]):
+            errors.append(f"{label}: anchors.{key} must name an image of 'files' (got {anchors[key]!r})")
+    keyframes = anchors.get("keyframes", [])
+    if not isinstance(keyframes, list):
+        errors.append(f"{label}: anchors.keyframes must be an array of {{\"at\", \"file\"}}")
+        return
+    seconds = clip.get("frames") / FPS if _is_int(clip.get("frames")) else None
+    for k, item in enumerate(keyframes, start=1):
+        if not isinstance(item, dict) or not image(item.get("file")):
+            errors.append(f"{label}: keyframe {k} must name an image of 'files'")
+            continue
+        at = item.get("at")
+        if not isinstance(at, (int, float)) or isinstance(at, bool) or at <= 0 or (seconds is not None and at >= seconds):
+            errors.append(f"{label}: keyframe {k}: 'at' must be a number of seconds inside the clip"
+                          + (f" (0 to {seconds:.3f})" if seconds else ""))
+
+
+def _check_start_video(spec, files_map, free, context, errors, warnings):
     """Check 'start_video'; return the number of frames of the segment, or None."""
     if not isinstance(spec, dict):
         errors.append("'start_video' must be an object: {\"ref\": NAME, \"start\": seconds, \"end\": seconds}")
@@ -430,10 +520,8 @@ def _check_start_video(spec, refs_map, free, context, errors, warnings):
         if key not in _START_VIDEO_KEYS and not key.startswith("_"):
             warnings.append(f"start_video: unknown key '{key}' is ignored")
     ref = spec.get("ref")
-    if not isinstance(ref, str) or not _NAME_RE.match(ref):
-        errors.append("start_video: 'ref' must be a reference name")
-    elif ref not in refs_map:
-        errors.append(f"start_video: reference '{ref}' is not declared in the top-level 'refs' object")
+    if not isinstance(ref, str) or (files_map.get(ref) or {}).get("kind") != "video":
+        errors.append(f"start_video: 'ref' must name a video of 'files' (got {ref!r})")
     start, end = spec.get("start", 0), spec.get("end")
     number = lambda v: isinstance(v, (int, float)) and not isinstance(v, bool)  # noqa: E731
     if not number(start) or start < 0:
@@ -459,7 +547,7 @@ def _check_start_video(spec, refs_map, free, context, errors, warnings):
     return frames
 
 
-def _check_edit_video(spec, refs_map, errors, warnings):
+def _check_edit_video(spec, files_map, subjects_map, errors, warnings):
     """Check 'edit_video'; return the number of frames of the segment, or None."""
     if not isinstance(spec, dict):
         errors.append("'edit_video' must be an object: {\"ref\": NAME, \"start\": seconds, \"end\": seconds}")
@@ -468,10 +556,8 @@ def _check_edit_video(spec, refs_map, errors, warnings):
         if key not in _EDIT_VIDEO_KEYS and not key.startswith("_"):
             warnings.append(f"edit_video: unknown key '{key}' is ignored")
     ref = spec.get("ref")
-    if not isinstance(ref, str) or not _NAME_RE.match(ref):
-        errors.append("edit_video: 'ref' must be a reference name")
-    elif ref not in refs_map:
-        errors.append(f"edit_video: reference '{ref}' is not declared in the top-level 'refs' object")
+    if not isinstance(ref, str) or (files_map.get(ref) or {}).get("kind") != "video":
+        errors.append(f"edit_video: 'ref' must name a video of 'files' (got {ref!r})")
     start, end = spec.get("start", 0), spec.get("end")
     number = lambda v: isinstance(v, (int, float)) and not isinstance(v, bool)  # noqa: E731
     if not number(start) or start < 0:
@@ -485,14 +571,9 @@ def _check_edit_video(spec, refs_map, errors, warnings):
         if not isinstance(instruction, str):
             errors.append("edit_video: 'instruction' must be a text")
         else:
-            if EDIT_MARK in instruction:
-                errors.append(f"edit_video: the instruction cannot contain {EDIT_MARK}")
-            for match in _ANY_BRACE_RE.finditer(instruction):
-                if not PLACEHOLDER_RE.fullmatch(match.group(0)):
-                    errors.append(f"edit_video: '{match.group(0)}' in the instruction is not a valid placeholder")
-            for _kind, name in PLACEHOLDER_RE.findall(instruction):
-                if refs_map and name not in refs_map:
-                    errors.append(f"edit_video: the instruction names '{name}', which is not declared in 'refs'")
+            for name in MENTION_RE.findall(instruction):
+                if name not in subjects_map:
+                    errors.append(f"edit_video: the instruction names @{name}, which is not defined in 'subjects'")
     if spec.get("sound", "original") not in EDIT_SOUND_CHOICES:
         errors.append(f"edit_video: 'sound' must be one of {', '.join(EDIT_SOUND_CHOICES)} (got {spec.get('sound')!r})")
     frames = edit_video_frames(spec)
@@ -526,18 +607,6 @@ def edit_instruction(plan):
     return None
 
 
-def expand_edit(prompt, refs, instruction):
-    """A clip's prompt with {edit} replaced by the common instruction, and its references with those the
-    instruction names added at the end (so a picture named once in the instruction is in every clip)."""
-    if instruction is None or not isinstance(prompt, str) or EDIT_MARK not in prompt:
-        return prompt, list(refs)
-    refs = list(refs)
-    for _kind, name in PLACEHOLDER_RE.findall(instruction):
-        if name not in refs:
-            refs.append(name)
-    return prompt.replace(EDIT_MARK, instruction), refs
-
-
 def edit_clip_count(plan) -> int:
     """How many clips edit the video (normalized plan): those ending before the end of the segment. The
     clips after them continue the video instead (no <Video 1>)."""
@@ -564,7 +633,8 @@ def normalize(plan):
         "version": PLAN_VERSION,
         "project": plan["project"],
         "mode": plan_mode(plan),
-        "refs": dict(plan.get("refs", {})),
+        "files": dict(plan.get("files") or {}),
+        "subjects": dict(plan.get("subjects") or {}),
         "width": int(plan["width"]) if plan.get("width") is not None else None,
         "height": int(plan["height"]) if plan.get("height") is not None else None,
         "context_frames": int(plan.get("context_frames", DEFAULT_CONTEXT)),
@@ -600,7 +670,6 @@ def normalize(plan):
             "song": spec.get("song", "with_video"),
         }
     base_seed = plan.get("seed")
-    instruction = (out["edit_video"] or {}).get("instruction")
     for index, clip in enumerate(plan["clips"], start=1):
         seed = clip.get("seed")
         if seed is None:
@@ -610,12 +679,384 @@ def normalize(plan):
             "name": clip.get("name", f"clip_{index:03d}"),
             "frames": int(clip["frames"]),
             "continue": bool(clip.get("continue", False)),
-            **dict(zip(("prompt", "refs"), expand_edit(clip["prompt"], clip.get("refs", []), instruction))),
             "seed": int(seed),
             "lyrics": clip.get("lyrics", ""),
             "dialogue": [dict(line) for line in clip.get("dialogue", []) if isinstance(line, dict)],
         })
+    for clip, raw in zip(out["clips"], plan["clips"]):
+        made = compose_clip(out, raw, clip["index"])
+        clip.update(prompt=made["prompt"], refs=made["refs"], compose=made)
     return out
+
+
+# --------------------------------------------------------------------------- the composed prompt
+def _seconds_text(seconds: float) -> str:
+    """MM:SS.mmm, as H3's shot times."""
+    millis = int(round(float(seconds) * 1000))
+    return f"{millis // 60000:02d}:{millis % 60000 // 1000:02d}.{millis % 1000:03d}"
+
+
+def _shot_start(body: str) -> float:
+    match = re.match(r"\s*At (\d+):(\d+(?:\.\d+)?)", body)
+    return int(match.group(1)) * 60 + float(match.group(2)) if match else 0.0
+
+
+def split_shots(text: str):
+    """(text before [Shot 1], [body of each shot]). A text without any [Shot N] is the body of shot 1."""
+    pieces = SHOT_RE.split(str(text or ""))
+    if len(pieces) == 1:
+        return "", [pieces[0].strip()]
+    return pieces[0].strip(), [pieces[k].strip() for k in range(2, len(pieces), 2)]
+
+
+def mentioned_subjects(clip, instruction=None):
+    """Subject names a raw clip mentions with @, in order of first mention (the edit instruction first, then
+    summary, description, soundscape, music; or only its prompt written by hand), then the speakers of its
+    dialogue."""
+    names = []
+    texts = ([instruction] if instruction else []) + [str(clip.get(k) or "") for k in _TEXT_KEYS]
+    if isinstance(clip.get("prompt_override"), str) and clip["prompt_override"].strip():
+        texts = [clip["prompt_override"]]         # a prompt written by hand: its own subjects only
+    for text in texts:
+        for name in MENTION_RE.findall(text or ""):
+            if name not in names:
+                names.append(name)
+    for line in clip.get("dialogue") or []:
+        speaker = line.get("speaker") if isinstance(line, dict) else None
+        if isinstance(speaker, str) and speaker not in names:
+            names.append(speaker)
+    return names
+
+
+SPEAKER_RE = re.compile(r"(?<![\w@])@([^\W_](?:[\w-]*\w)?)(\s*\(S\d*\))?")
+SPEECH_RE = re.compile(r"<d>(.*?)</d>", re.S)
+_SENTENCE_END_RE = re.compile(r"[.!?](?=\s)|\n|</d>|\]")
+
+
+def mark_speakers(text, number, dialogue, ids):
+    """Finds who says each line <d>…</d> of a text and marks that mention @name (Sk): the subject written
+    @name (S) in the sentence of the line, else the speaker of the clip's `dialogue` line with that text, else the
+    first subject the sentence names (a second line in the same sentence: the same speaker). `ids` ({name: k},
+    shared by the texts of a clip) numbers the speakers S1, S2… in the order they first speak."""
+    text = str(text or "")
+    edits, last_speaker, last_end = [], None, -1
+    for m in SPEECH_RE.finditer(text):
+        cut = 0
+        for b in _SENTENCE_END_RE.finditer(text, 0, m.start()):
+            cut = b.end()
+        seg = text[cut:m.start()]
+        found = [x for x in SPEAKER_RE.finditer(seg) if x.group(1) in number]
+        explicit = [x for x in found if x.group(2)]
+        speaker = explicit[-1].group(1) if explicit else None
+        if speaker is None:
+            said = _squash(m.group(1))
+            for line in dialogue or []:
+                who, words = (line or {}).get("speaker"), _squash(str((line or {}).get("text") or ""))
+                if who in number and words and words in said:
+                    speaker = who
+                    break
+        if speaker is None and found:
+            speaker = found[0].group(1)
+        if speaker is None and cut == last_end:
+            speaker = last_speaker
+        if speaker:
+            ids.setdefault(speaker, len(ids) + 1)
+            spot = explicit[-1] if explicit else next((x for x in found if x.group(1) == speaker), None)
+            if spot:
+                edits.append((cut + spot.start(), cut + spot.end(), f"@{speaker} (S{ids[speaker]})"))
+        last_speaker, last_end = speaker, m.end()
+    for start, end, new in reversed(edits):
+        text = text[:start] + new + text[end:]
+    return text
+
+
+def mention_text(text, number, ids=None):
+    """@name -> <Subject N> for the subjects of the clip (``number``: name -> N); @name (Sk) -> <Subject N> (Sk),
+    the speaker mark of a line (see mark_speakers; a bare (S) takes the speaker's number, or the next one). Any other
+    @name loses its @."""
+    def one(match):
+        name, speaker = match.group(1), match.group(2)
+        if name in number:
+            mark = ""
+            if speaker:
+                digits = re.search(r"\d+", speaker)
+                if digits:
+                    k = digits.group(0)
+                elif ids is not None:
+                    k = ids.setdefault(name, len(ids) + 1)
+                else:
+                    k = number[name]
+                mark = f" (S{k})"
+            return f"<Subject {number[name]}>" + mark
+        return name + (speaker or "")
+    return SPEAKER_RE.sub(one, str(text or ""))
+
+
+def compose_clip(plan, raw, index):
+    """The H3 prompt of clip ``index`` (normalized plan ``plan``, raw clip ``raw``), with {picture:FILE} and
+    {voice:FILE} placeholders that resolve_prompt numbers. Returns
+      prompt    the text (the clip's own prompt_override when written by hand, turned into placeholders)
+      refs      the files it uses, in order: images (subjects', then anchors'), then voices
+      legend    {"subjects": [names], "pictures": [files], "audio": [files, "<video sound>" first when the clip
+                 edits a video], "video": bool}: the numbers <Subject N>, <Picture N>, <Audio N> of this clip
+      errors, warnings, tasks
+    """
+    free = plan["mode"] == "free"
+    files, subjects = clip_definitions(plan, raw)
+    errors, warnings = [], []
+    edit = plan.get("edit_video") if edit_slice(plan, index) else None
+    instruction = (edit or {}).get("instruction")
+    own = raw.get("defs") if isinstance(raw.get("defs"), dict) else {}
+    if edit and "edit_instruction" in own:          # a clip already generated keeps the instruction it was made with
+        instruction = own["edit_instruction"] if isinstance(own["edit_instruction"], str) else None
+    continues = bool(raw.get("continue")) and (index > 1 or plan.get("start_video") is not None)
+    uses = {u["name"]: u for u in raw.get("subjects") or [] if isinstance(u, dict) and isinstance(u.get("name"), str)}
+    names = mentioned_subjects(raw, instruction)
+    for name in names:
+        if name not in subjects:
+            errors.append(f"@{name} is not a subject of the plan")
+    names = [n for n in names if n in subjects]
+    for name in uses:
+        if name not in names and name in subjects:
+            warnings.append(f"subject '{name}' has settings but the clip does not mention @{name}: it is not used")
+    number = {name: k for k, name in enumerate(names, start=1)}
+
+    ids = {}                     # speakers: S1, S2… in the order they first speak (the shots, then the summary)
+    dialogue = raw.get("dialogue") or []
+    marked = {k: mark_speakers(raw.get(k) or "", number, dialogue, ids) for k in ("description", "summary")}
+
+    def mention(text):
+        return mention_text(text, number, ids)
+
+    pictures, voices = [], []
+    for name in names:
+        for pic in subjects[name].get("pictures") or []:
+            if pic.get("file") not in pictures:
+                pictures.append(pic["file"])
+    anchors = raw.get("anchors") or {}
+    first, last = anchors.get("first"), anchors.get("last")
+    keyframes = sorted((k for k in anchors.get("keyframes") or [] if isinstance(k, dict)), key=lambda k: k.get("at", 0))
+    if first and continues:
+        errors.append("a clip that continues the previous one cannot have a first-frame anchor: its first frames "
+                      "are those of the previous clip")
+    for file in [first] + [k.get("file") for k in keyframes] + [last]:
+        if file and file not in pictures:
+            pictures.append(file)
+    for name in names:
+        voice = subjects[name].get("voice")
+        if voice and not free:
+            warnings.append(f"the voice of @{name} is ignored in music_video mode")
+        elif voice and voice not in voices:
+            voices.append(voice)
+    audio = (["<video sound>"] if edit else []) + voices
+    if len(pictures) > MAX_REFS:
+        errors.append(f"uses {len(pictures)} images; MiniMax H3 accepts at most {MAX_REFS}")
+    if len(voices) > MAX_VOICES:
+        errors.append(f"uses {len(voices)} voices; MiniMax H3 accepts at most {MAX_VOICES}")
+    if len(pictures) + len(voices) + (1 if edit else 0) > MAX_REF_FILES:
+        errors.append(f"uses more than {MAX_REF_FILES} reference files")
+
+    tasks = []
+    if edit:
+        tasks.append("video editing")
+    if continues:
+        tasks.append("video continuation")
+    if first or last or keyframes:
+        tasks.append("keyframe completion")
+    if any(subjects[n].get("pictures") for n in names):
+        tasks.append("reference generation")
+    if voices:
+        tasks.append("audio reference")
+    legend = {"subjects": names, "pictures": pictures, "audio": audio, "video": bool(edit)}
+
+    # ---- detailed_description: the opening sentence and the anchors placed in their shots
+    style, shots = split_shots(marked["description"])
+    opening = ""
+    if continues:
+        opening = CONTINUE_SENTENCE + (FREE_CONTINUE_SUFFIX if free else "")
+    elif index > 1 or plan.get("start_video") is not None:
+        opening = HIDDEN_LEADIN_FREE if free else HIDDEN_LEADIN_MUSIC
+    head = " ".join(x for x in (opening, f"The shot begins from {{picture:{first}}}." if first else "") if x)
+    if head:
+        shots[0] = (head + " " + shots[0]).strip()
+    starts = [0.0] + [_shot_start(b) for b in shots[1:]]
+    key_shot = []
+    for key in keyframes:
+        k = max(i for i, t in enumerate(starts) if t <= key["at"] or i == 0)
+        key_shot.append(k)
+        shots[k] = (shots[k] + f" At {_seconds_text(key['at'])}, the shot's keyframe corresponds to {{picture:{key['file']}}}.").strip()
+    if last:
+        shots[-1] = (shots[-1] + f" The shot ends on {{picture:{last}}}.").strip()
+    description = "\n".join(([mention(style)] if style else []) + [f"[Shot {i + 1}] {mention(b)}".rstrip() for i, b in enumerate(shots)])
+
+    # ---- subject_definitions
+    defs = []
+    for name in names:
+        sub, use = subjects[name], uses.get(name) or {}
+        kind = sub.get("kind", "person")
+        line = f"<Subject {number[name]}> is {KIND_WORDS[kind]}"
+        desc = mention(sub.get("description") or "").strip().rstrip(".")
+        if desc:
+            line += f": {desc}"
+        if str(use.get("note") or "").strip():
+            line += f"; in this clip: {mention(use['note']).strip().rstrip('.')}"
+        cites = [f"{(pic.get('role') or '').strip() or DEFAULT_ROLES[kind]} from {{picture:{pic['file']}}}"
+                 for pic in sub.get("pictures") or []]
+        if cites:
+            line += "; " + ", ".join(cites)
+        defs.append(line + ".")
+    if first:
+        defs.append(f"{{picture:{first}}} is the first frame of [Shot 1].")
+    for key, k in zip(keyframes, key_shot):
+        defs.append(f"{{picture:{key['file']}}} is a keyframe of [Shot {k + 1}] at {_seconds_text(key['at'])}.")
+    if last:
+        defs.append(f"{{picture:{last}}} is the last frame of [Shot {len(shots)}].")
+    if edit:
+        defs.append("<Video 1> is the source video for the target video edit.")
+        defs.append(f"{EDIT_AUDIO_MARK}<Audio 1> is the synchronized audio track of <Video 1> and is reused in the target video.")
+    for name in names:
+        voice = subjects[name].get("voice")
+        if voice in voices:
+            ids.setdefault(name, len(ids) + 1)        # a voice that does not speak in this clip: the next number
+            defs.append(f"{{voice:{voice}}} is the voice-timbre reference for <Subject {number[name]}> (S{ids[name]}).")
+
+    # ---- summary
+    summary = mention(marked["summary"]).strip()
+    if edit:
+        summary = " ".join(x for x in ("The target video is an edited version of <Video 1>.",
+                                        mention(instruction).strip() if instruction else "", summary) if x)
+    if tasks:
+        summary = f"[{' + '.join(tasks)}{AUDIO_REUSE_MARK if edit else ''}] {summary}".strip()
+
+    # ---- retention_analysis
+    retention = []
+    for name in names:
+        use = uses.get(name) or {}
+        seen = [f"[Shot {i + 1}]" for i, b in enumerate(shots) if re.search(rf"(?<![\w@])@{re.escape(name)}(?![\w-])", b)]
+        scope = f" (appears in {', '.join(seen)})" if seen else ""
+        keep = use.get("keep", DEFAULT_KEEP)
+        why = mention(use.get("note") or "").strip() or KEEP_REASONS[keep]
+        retention.append(f"<Subject {number[name]}>{scope}: {KEEP_MARKERS[keep]} - {why}")
+    if first:
+        retention.append(f"{{picture:{first}}} ([Shot 1] first frame): fully_preserved - the shot begins exactly on this frame.")
+    for key, k in zip(keyframes, key_shot):
+        retention.append(f"{{picture:{key['file']}}} ([Shot {k + 1}] keyframe at {_seconds_text(key['at'])}): fully_preserved - "
+                         "the picture matches this frame at that moment.")
+    if last:
+        retention.append(f"{{picture:{last}}} ([Shot {len(shots)}] last frame): fully_preserved - the shot ends exactly on this frame.")
+    if edit:
+        retention.append("<Video 1> (source of the edit): partially_preserved - everything the edit does not change stays as in <Video 1>.")
+        retention.append(f"{EDIT_AUDIO_MARK}<Audio 1>: " + ("fully_copy - the sound of <Video 1> is kept as it is."
+                                                           if edit.get("sound") == "original" else
+                                                           "reference - the new sound follows the sound of <Video 1>."))
+    for name in names:
+        voice = subjects[name].get("voice")
+        if voice in voices:
+            marker = VOICE_MARKERS[(uses.get(name) or {}).get("voice_keep", DEFAULT_VOICE_KEEP)]
+            retention.append(f"{{voice:{voice}}}: {marker} - <Subject {number[name]}> speaks with this voice.")
+
+    parts = ["\n".join(defs), summary, "\n".join(retention), description,
+             mention(raw.get("soundscape") or "").strip(), mention(raw.get("music") or "").strip() or ("None." if free else "")]
+    prompt = "\n\n".join(f"{section}\n{text}".rstrip() for section, text in zip(_PROMPT_SECTIONS, parts))
+    override = raw.get("prompt_override")
+    if isinstance(override, str) and override.strip():
+        ids = {}
+        prompt = _from_override(mark_speakers(override, number, dialogue, ids), number, legend, errors, warnings, ids)
+    return {"prompt": prompt, "refs": pictures + voices, "legend": legend, "tasks": tasks,
+            "speakers": sorted(([n, k] for n, k in ids.items()), key=lambda x: x[1]),
+            "files": {n: dict(files[n]) for n in pictures + voices if n in files},
+            "errors": errors, "warnings": warnings, "override": bool(isinstance(override, str) and override.strip())}
+
+
+def snapshot_defs(raw_plan, plan, index):
+    """What a clip about to be generated is made with, to keep in it as 'defs': the definitions of its subjects,
+    their files and its anchors' files, and the edit instruction it uses."""
+    raw = raw_plan["clips"][index - 1]
+    files, subjects = clip_definitions(raw_plan, raw)
+    made = plan["clips"][index - 1]["compose"]
+    subs = {n: subjects[n] for n in made["legend"]["subjects"]}
+    names = set(made["refs"])
+    for sub in subs.values():
+        names.update(p.get("file") for p in sub.get("pictures") or [])
+        if sub.get("voice"):
+            names.add(sub["voice"])
+    out = json.loads(json.dumps({"subjects": subs, "files": {n: files[n] for n in sorted(names) if n in files}}))
+    edit = plan.get("edit_video")
+    if edit and edit_slice(plan, index):
+        own = raw.get("defs") if isinstance(raw.get("defs"), dict) else {}
+        out["edit_instruction"] = own["edit_instruction"] if "edit_instruction" in own else edit.get("instruction")
+    return out
+
+
+def preview(raw):
+    """What the plan screen shows: {"errors", "warnings", "clips": [{"index", "prompt" (the text H3 gets, every file
+    provided, the edited video's sound counted), "legend", "tasks", "override", "errors", "warnings"}]}. "clips" is
+    empty when the plan cannot be read far enough to be composed."""
+    errors, warnings = validate(json.loads(json.dumps(raw)))
+    out = {"errors": errors, "warnings": warnings, "clips": []}
+    try:
+        plan = normalize(json.loads(json.dumps(raw)))
+    except (KeyError, TypeError, ValueError, AttributeError, IndexError):
+        return out
+    free = plan["mode"] == "free"
+    for clip in plan["clips"]:
+        made = clip["compose"]
+        files = made["files"]
+        try:
+            text = resolve_prompt(clip["prompt"], clip["refs"], {n for n, f in files.items() if f.get("kind") == "image"},
+                                  {n for n, f in files.items() if f.get("kind") == "voice"}, use_voices=free,
+                                  audio_offset=1 if made["legend"]["video"] else 0)[0]
+        except PlanError:
+            text = clip["prompt"]
+        out["clips"].append({"index": clip["index"], "prompt": text, "legend": made["legend"], "tasks": made["tasks"],
+                             "speakers": made.get("speakers") or [],
+                             "override": made["override"], "errors": made["errors"], "warnings": made["warnings"]})
+    return out
+
+
+def _from_override(text, number, legend, errors, warnings, ids=None):
+    """A prompt written by hand: @name, <Picture N> and <Audio N> (numbers of the clip's legend) turned into
+    what resolve_prompt numbers again."""
+    pictures, audio = legend["pictures"], legend["audio"]
+
+    for name in MENTION_RE.findall(text):
+        if name not in number:
+            errors.append(f"the prompt written by hand names @{name}, which the clip does not use")
+    text = mention_text(text, number, ids)
+    for n in sorted({int(x) for x in re.findall(r"<Subject (\d+)>", text)}):
+        if not 1 <= n <= len(number):
+            errors.append(f"the prompt written by hand uses <Subject {n}> but the clip has {len(number)} subject(s)")
+
+    def one_picture(match):
+        n = int(match.group(1))
+        if 1 <= n <= len(pictures):
+            return f"{{picture:{pictures[n - 1]}}}"
+        errors.append(f"the prompt written by hand uses <Picture {n}> but the clip has {len(pictures)} image(s)")
+        return match.group(0)
+    text = re.sub(r"<Picture (\d+)>", one_picture, text)
+
+    def one_audio(match):
+        n = int(match.group(1))
+        if 1 <= n <= len(audio):
+            return match.group(0) if audio[n - 1] == "<video sound>" else f"{{voice:{audio[n - 1]}}}"
+        errors.append(f"the prompt written by hand uses <Audio {n}> but the clip has {len(audio)} sound(s)")
+        return match.group(0)
+    text = re.sub(r"<Audio (\d+)>", one_audio, text)
+    if _VIDEO_TAG_RE.search(text) and not legend["video"]:
+        errors.append("the prompt written by hand uses <Video 1> but the clip edits no video")
+    position = -1
+    for section in _PROMPT_SECTIONS:
+        found = text.find(section)
+        if found < 0:
+            warnings.append(f"the prompt written by hand has no '{section}' section")
+        elif found < position:
+            warnings.append(f"the prompt written by hand: section '{section}' is out of order")
+        position = max(position, found)
+    for line in text.splitlines():
+        if "{voice:" in line and "{picture:" in line:
+            errors.append("the prompt written by hand: put each voice (<Audio N>) on a line without any <Picture N>")
+            break
+    return text
 
 
 def stable_seed(project: str, index: int) -> int:
@@ -762,8 +1203,8 @@ def format_timeline(plan) -> str:
 
 
 def reference_names(plan):
-    """Every reference name used by the plan: declared ones first, then first use order."""
-    names = list(plan.get("refs", {}))
+    """Every file name the plan uses: those declared first, then the files clips use."""
+    names = list(plan.get("files", {}))
     for clip in plan["clips"]:
         for name in clip["refs"]:
             if name not in names:
@@ -772,20 +1213,25 @@ def reference_names(plan):
 
 
 def reference_kinds(plan, name):
-    """What a normalized plan needs for a reference: 'video' (start video), 'image', 'voice'."""
+    """What a normalized plan needs for a file: 'video', 'image' or 'voice' (one kind per file in v7)."""
     kinds = []
     if (plan.get("start_video") or {}).get("ref") == name or (plan.get("edit_video") or {}).get("ref") == name:
         kinds.append("video")
     for clip in plan["clips"]:
-        if name not in clip["refs"]:
-            continue
-        found = {kind for kind, ref in PLACEHOLDER_RE.findall(clip["prompt"]) if ref == name}
-        if "picture" in found or ("<Picture" in clip["prompt"] and not PLACEHOLDER_RE.search(clip["prompt"])):
-            if "image" not in kinds:
-                kinds.append("image")
-        if "voice" in found and plan.get("mode") == "free" and "voice" not in kinds:
-            kinds.append("voice")
+        if name in clip["refs"]:
+            kind = "voice" if f"{{voice:{name}}}" in clip["prompt"] else "image"
+            if kind not in kinds:
+                kinds.append(kind)
     return kinds
+
+
+def file_of(plan, name, clip=None):
+    """The declared entry {kind, file} of a file name (the clip's own 'defs' first), or {}."""
+    if clip is not None:
+        own = ((clip.get("defs") or {}).get("files") or {}) if isinstance(clip.get("defs"), dict) else {}
+        if name in own:
+            return own[name]
+    return (plan.get("files") or {}).get(name) or {}
 
 
 def check_size(width, height):
@@ -804,7 +1250,8 @@ def resolve_prompt(prompt: str, refs, has_image, has_voice, use_voices: bool = T
     has_image  names for which the workflow provides an image
     has_voice  names for which the workflow provides a voice
     use_voices False in music_video mode (the song is injected, voices cannot be used)
-    audio_offset  <Audio N> labels taken before the voices (the sound of the edited video is <Audio 1>)
+    audio_offset  <Audio N> labels taken before the voices (the sound of the edited video is <Audio 1>); without
+               it, the composed lines about that sound are removed
 
     Images are numbered in the order of ``refs`` among the names that have an image.
     Voices are numbered in the order of ``refs`` among the names whose voice is used.
@@ -831,6 +1278,11 @@ def resolve_prompt(prompt: str, refs, has_image, has_voice, use_voices: bool = T
                 notes.append(f"voice '{name}' not used: the prompt has no {{voice:{name}}} line")
     lines = []
     for line in prompt.split("\n"):
+        if line.startswith(EDIT_AUDIO_MARK):     # the sound of the edited video: only when it has one
+            if not audio_offset:
+                continue
+            line = line[len(EDIT_AUDIO_MARK):]
+        line = line.replace(AUDIO_REUSE_MARK, " + audio reuse" if audio_offset else "")
         dropped = [name for kind, name in PLACEHOLDER_RE.findall(line) if kind == "voice" and name not in voices]
         if dropped:
             for name in dropped:

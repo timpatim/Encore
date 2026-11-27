@@ -1,0 +1,489 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "h3-clip-plan-v7",
+  "title": "H3 Clip Plan",
+  "description": "A video described as an ordered list of MiniMax H3 clips. Mode 'music_video': the picture is generated against one song that is injected into every clip. Mode 'free': H3 generates picture and sound (dialogue, voices, ambience). The plan declares its files and its subjects; clips name subjects with @name and the nodes compose the H3 prompt. Clip start times are NOT stored: they are derived from the clip lengths. See PLAN_SPEC.md.",
+  "type": "object",
+  "required": [
+    "version",
+    "project",
+    "clips"
+  ],
+  "additionalProperties": false,
+  "patternProperties": {
+    "^_": {}
+  },
+  "properties": {
+    "version": {
+      "const": 7
+    },
+    "project": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$",
+      "description": "Short name used for the output folder: output/h3_clip_plan/<project>/."
+    },
+    "mode": {
+      "enum": [
+        "music_video",
+        "free"
+      ],
+      "default": "music_video",
+      "description": "music_video: a song is injected and kept untouched. free: H3 generates the sound of every clip (no song)."
+    },
+    "files": {
+      "$ref": "#/$defs/files",
+      "description": "File label -> {kind, file, note}. Labels are unique across kinds."
+    },
+    "subjects": {
+      "$ref": "#/$defs/subjects",
+      "description": "Subject name -> definition. Clips name subjects with @name."
+    },
+    "width": {
+      "type": "integer",
+      "minimum": 64,
+      "multipleOf": 32,
+      "description": "Optional fallback picture size. Normally left out: the size is chosen in the workflow. Give both or neither."
+    },
+    "height": {
+      "type": "integer",
+      "minimum": 64,
+      "multipleOf": 32,
+      "description": "Optional fallback picture size. Normally left out: the size is chosen in the workflow. Give both or neither."
+    },
+    "context_frames": {
+      "type": "integer",
+      "enum": [
+        5,
+        22,
+        39,
+        56,
+        73,
+        90,
+        107,
+        124,
+        141,
+        158,
+        175,
+        192,
+        209,
+        226,
+        243
+      ],
+      "default": 39,
+      "description": "Frames shared between a clip and the end of the previous one. Keep 39. In free mode only 39, 90, 141, 192, 243 are allowed."
+    },
+    "crossfade_frames": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 0,
+      "description": "0 = hard cut between clips. Up to context_frames = linear blend over that many frames at every seam."
+    },
+    "seed": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Base seed: clip i uses seed + i unless it has its own."
+    },
+    "ref_image_size": {
+      "enum": [
+        "match",
+        "max"
+      ],
+      "default": "match"
+    },
+    "song": {
+      "type": "object",
+      "description": "music_video only (forbidden in free mode). file is informational; duration_seconds lets a checker verify the plan fits.",
+      "properties": {
+        "file": {
+          "type": "string"
+        },
+        "duration_seconds": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      }
+    },
+    "notes": {
+      "type": "string"
+    },
+    "clips": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "required": [
+          "frames"
+        ],
+        "additionalProperties": false,
+        "patternProperties": {
+          "^_": {}
+        },
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$",
+            "description": "Unique label, used in file names."
+          },
+          "frames": {
+            "type": "integer",
+            "minimum": 56,
+            "description": "Raw clip length at 24 fps. Must equal 17k + 5 (56, 73, 90, 107, 124, 141, 158, 175, 192, 209, 226, 243, ...). Includes the context_frames overlap for every clip except the first."
+          },
+          "continue": {
+            "type": "boolean",
+            "default": false,
+            "description": "true = same shot goes on: the clip starts from the last context_frames of the previous clip. false = new scene, generated from scratch. Must be false for clip 1, unless the plan has a 'start_video'."
+          },
+          "summary": {
+            "type": "string",
+            "description": "What the clip shows; subjects as @name."
+          },
+          "description": {
+            "type": "string",
+            "description": "Style sentences, then [Shot 1] ... [Shot 2] At 00:04.000, ...; words in <d>[Language] words</d> after '@name (S)'."
+          },
+          "soundscape": {
+            "type": "string",
+            "description": "Diegetic sounds."
+          },
+          "music": {
+            "type": "string",
+            "description": "music_video: the current section of the song."
+          },
+          "subjects": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "name"
+              ],
+              "additionalProperties": false,
+              "patternProperties": {
+                "^_": {}
+              },
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "keep": {
+                  "enum": [
+                    "identical",
+                    "partial",
+                    "attribute",
+                    "loose"
+                  ],
+                  "default": "identical"
+                },
+                "voice_keep": {
+                  "enum": [
+                    "exact",
+                    "partial",
+                    "timbre",
+                    "loose"
+                  ],
+                  "default": "timbre"
+                },
+                "note": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "anchors": {
+            "type": "object",
+            "additionalProperties": false,
+            "patternProperties": {
+              "^_": {}
+            },
+            "properties": {
+              "first": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "last": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "keyframes": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "at",
+                    "file"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "at": {
+                      "type": "number",
+                      "exclusiveMinimum": 0
+                    },
+                    "file": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "prompt_override": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A complete H3 prompt written by hand, used instead of the composed one."
+          },
+          "defs": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "files": {
+                "$ref": "#/$defs/files"
+              },
+              "subjects": {
+                "$ref": "#/$defs/subjects"
+              },
+              "edit_instruction": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "description": "The clip's own definitions (a clip already generated)."
+          },
+          "seed": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "lyrics": {
+            "type": "string",
+            "description": "Informational: words newly heard in this clip."
+          },
+          "notes": {
+            "type": "string"
+          },
+          "dialogue": {
+            "type": "array",
+            "description": "free mode: the lines spoken in this clip, for the checker. The prompt holds what H3 actually says.",
+            "items": {
+              "type": "object",
+              "required": [
+                "speaker",
+                "text"
+              ],
+              "additionalProperties": false,
+              "patternProperties": {
+                "^_": {}
+              },
+              "properties": {
+                "speaker": {
+                  "type": "string",
+                  "description": "Name of a subject."
+                },
+                "text": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "language": {
+                  "type": "string",
+                  "description": "For example French."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "audio_feather_ticks": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 64,
+      "default": 8,
+      "description": "free mode only: soft release, in 25 ms steps, at the end of the sound copied from the previous clip."
+    },
+    "start_video": {
+      "type": "object",
+      "description": "Clip 1 continues (or cuts from) a segment of an existing video, given by an 'H3 Plan - Video' node with the same name. See PLAN_SPEC.md section 5.1.",
+      "required": [
+        "ref",
+        "end"
+      ],
+      "additionalProperties": false,
+      "patternProperties": {
+        "^_": {}
+      },
+      "properties": {
+        "ref": {
+          "type": "string",
+          "description": "Label of a video in 'files'."
+        },
+        "start": {
+          "type": "number",
+          "minimum": 0,
+          "default": 0,
+          "description": "Start of the segment, in seconds of the file (moved forward onto the frame grid)."
+        },
+        "end": {
+          "type": "number",
+          "description": "End of the segment, in seconds of the file."
+        },
+        "in_assembly": {
+          "type": "boolean",
+          "default": true,
+          "description": "true: the segment opens the final video. false: it is only a springboard."
+        },
+        "song": {
+          "enum": [
+            "with_video",
+            "after_video"
+          ],
+          "default": "with_video",
+          "description": "music_video mode: the song starts with the segment, or after it (the segment keeps its own sound)."
+        }
+      }
+    },
+    "edit_video": {
+      "type": "object",
+      "description": "free mode: the clips that end within a segment of an existing video edit their slice of it (<Video 1> in their prompt); the next ones continue the video. Given by an 'H3 Plan - Video' node with the same name. Not with start_video. See PLAN_SPEC.md section 5.2.",
+      "required": [
+        "ref",
+        "end"
+      ],
+      "additionalProperties": false,
+      "patternProperties": {
+        "^_": {}
+      },
+      "properties": {
+        "ref": {
+          "type": "string",
+          "description": "Label of a video in 'files'."
+        },
+        "start": {
+          "type": "number",
+          "minimum": 0,
+          "default": 0,
+          "description": "Start of the edited segment, in seconds of the file."
+        },
+        "end": {
+          "type": "number",
+          "description": "End of the edited segment, in seconds of the file. The clips that end before it edit the video; the next ones continue it."
+        },
+        "sound": {
+          "enum": [
+            "original",
+            "h3"
+          ],
+          "default": "original",
+          "description": "Sound of the final video: the original sound of the segment, or the sound H3 made."
+        },
+        "instruction": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The edit common to the clips; opens the summary of every clip that edits the video. Names subjects with @name."
+        }
+      }
+    }
+  },
+  "$defs": {
+    "files": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "kind"
+        ],
+        "additionalProperties": false,
+        "patternProperties": {
+          "^_": {}
+        },
+        "properties": {
+          "kind": {
+            "enum": [
+              "image",
+              "voice",
+              "video"
+            ]
+          },
+          "file": {
+            "type": "string",
+            "description": "Path of the file (Encore: in the project)."
+          },
+          "note": {
+            "type": "string",
+            "description": "What the user must supply."
+          }
+        }
+      }
+    },
+    "subjects": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "patternProperties": {
+          "^_": {}
+        },
+        "properties": {
+          "kind": {
+            "enum": [
+              "person",
+              "place",
+              "object",
+              "outfit",
+              "style",
+              "action",
+              "pose"
+            ],
+            "default": "person"
+          },
+          "description": {
+            "type": "string"
+          },
+          "pictures": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "file"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "file": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$"
+                },
+                "role": {
+                  "type": "string",
+                  "description": "What the picture gives the subject (face, outfit, scene...)."
+                }
+              }
+            }
+          },
+          "voice": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Label of a voice file (free mode)."
+          },
+          "note": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

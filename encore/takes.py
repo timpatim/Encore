@@ -1,6 +1,7 @@
 """Encore - the takes of a project, stored in the project folder.
 
-    takes/clip_NNN/<take id>.pt     latent (H3 audio-video latent, as saved by the plugin)
+    takes/clip_NNN/<take id>.safetensors  latent (H3 video and audio latents, MultiRef's format; a .pt written by the
+                                    plugin up to 0.49 until it is converted, see latents.py)
     takes/clip_NNN/<take id>.json   signature written by the plugin, plus a "studio" part
     takes/clip_NNN/<take id>.mp4    preview
     selection.json                  the selected twig: the take chosen for clips 1..k, a chain of predecessors
@@ -41,7 +42,21 @@ def clip_dir(project: Path, index: int) -> Path:
 
 def take_files(project: Path, index: int, take_id: str):
     base = clip_dir(project, index) / take_id
-    return base.with_suffix(".pt"), base.with_suffix(".json"), base.with_suffix(".mp4")
+    return base.with_suffix(".safetensors"), base.with_suffix(".json"), base.with_suffix(".mp4")
+
+
+def _has_latent(meta: Path):
+    return meta.with_suffix(".safetensors").is_file() or meta.with_suffix(".pt").is_file()
+
+
+def latent_ok(project: Path, index: int, take_id: str):
+    """The take's latent can be continued: it is in MultiRef's format (an old .pt not converted cannot)."""
+    return take_files(project, index, take_id)[0].is_file()
+
+
+def old_latents(project: Path):
+    """The .pt latents written by the plugin (up to 0.49), to convert."""
+    return sorted(p for p in (project / "takes").glob("clip_*/*.pt") if TAKE_ID_RE.match(p.stem)) if (project / "takes").is_dir() else []
 
 
 def all_take_ids(project: Path):
@@ -51,7 +66,7 @@ def all_take_ids(project: Path):
         if not folder.is_dir() or not folder.name[5:].isdigit():
             continue
         for meta in sorted(folder.glob("*.json")):
-            if TAKE_ID_RE.match(meta.stem) and meta.with_suffix(".pt").is_file():
+            if TAKE_ID_RE.match(meta.stem) and _has_latent(meta):
                 out.append((int(folder.name[5:]), meta.stem))
     return out
 
@@ -66,7 +81,7 @@ def list_takes(project: Path, plan=None):
         records = []
         for meta in sorted(folder.glob("*.json")):
             take_id = meta.stem
-            if not TAKE_ID_RE.match(take_id) or not meta.with_suffix(".pt").is_file():
+            if not TAKE_ID_RE.match(take_id) or not _has_latent(meta):
                 continue
             try:
                 record = json.loads(meta.read_text(encoding="utf-8"))

@@ -30,12 +30,6 @@
         S().branches = data.branches || S().branches;
         return data;
     }
-    // the first clip of a plan that uses each reference name
-    function firstUse(plan) {
-        const out = {};
-        (plan.clips || []).forEach((c, i) => { for (const n of c.refs || []) if (!(n in out)) out[n] = i + 1; });
-        return out;
-    }
     // a control greyed out with the reason (the server refuses it anyway)
     function frozen(el, why) {
         el.disabled = true;
@@ -50,52 +44,83 @@
         try { data = await project(); } catch (e) { alert(e.message); return; }
         const branches = data.branches || [];
         const twig = S().twig || {};
-        let how = opts.how || (branches.length ? "copy" : "empty");
+        // 0.48: « + nouvelle branche » makes an empty branch or one from a plan file; « dupliquer » (branch header)
+        // copies a branch, without its clips (its master plan free again) or with the clips 1..k of the selection
+        const dup = !!opts.duplicate;
+        let how = dup ? (opts.how === "clips" ? "clips" : "copy") : (opts.how === "file" ? "file" : "empty");
         let source = opts.source || twig.branch || (branches[branches.length - 1] || {}).id || null;
         const nameIn = h("input", { placeholder: _t("branch.name_auto"), style: "flex:1" });
         const body = h("div", { class: "br-new" });
         const choice = (value, label, hint) => h("label", { class: `br-opt${how === value ? " on" : ""}` },
             h("input", { type: "radio", name: "brhow", checked: how === value || null, onchange: () => { how = value; draw(); } }),
             h("b", {}, label), hint ? h("span", { class: "hint" }, " — " + hint) : null);
-        let upto = null;
+        // 0.49: the clips taken over, in portions that each start a scene: clicking a clip keeps its scene from its
+        // start up to it, clicking a clip kept frees it and the rest of its scene
+        let keep = null;
+        const thumbs = new Map();          // take id → <video>, kept between redraws
+        const thumb = (id) => {
+            if (thumbs.has(id)) return thumbs.get(id);
+            const v = h("video", { muted: true, preload: "metadata", playsinline: true });
+            v.muted = true;
+            thumbs.set(id, v);
+            if (tk() && tk().previewUrl) tk().previewUrl(id).then((url) => {
+                if (!url) return;
+                v.addEventListener("loadeddata", () => { v.currentTime = Math.min(0.5, (v.duration || 1) / 3); }, { once: true });
+                v.src = url;
+            });
+            return v;
+        };
+        const ranges = (list) => {
+            const out = [];
+            for (const i of list) { const last = out[out.length - 1]; if (last && last[1] === i - 1) last[1] = i; else out.push([i, i]); }
+            return out.map(([a, b]) => (a === b ? String(a) : `${a}→${b}`)).join(", ");
+        };
         const draw = () => {
             const src = branches.find((b) => b.id === source) || {};
             const sel = twig.branch === source && twig.leaf ? twig : null;
             const chain = sel ? Object.keys(sel.takes || {}).map(Number).sort((a, b) => a - b) : [];
-            if (upto === null || upto > chain.length) upto = chain.length;
+            const n = chain.length;
+            const cont = (i) => i > 1 && !!(((sel && sel.plan && sel.plan.clips) || [])[i - 1] || {}).continue;
+            if (keep === null) keep = new Set(chain);
+            const sceneStart = (i) => { let a = i; while (a > 1 && cont(a)) a--; return a; };
+            const sceneEnd = (i) => { let b = i; while (b < n && cont(b + 1)) b++; return b; };
+            const toggle = (i) => {
+                if (keep.has(i)) for (let j = i; j <= sceneEnd(i); j++) keep.delete(j);
+                else for (let j = sceneStart(i); j <= i; j++) keep.add(j);
+                how = "clips";
+                draw();
+            };
+            const strip = h("div", { class: "br-pick" });
+            for (const i of chain) {
+                if (i > 1 && !cont(i)) strip.append(h("span", { class: "br-cut", title: _t("plan.new_scene_cut") }, "✂"));
+                else if (i > 1) strip.append(h("span", { class: "br-link" }, "→"));
+                const on = keep.has(i);
+                strip.append(h("button", { class: `br-clip${on ? " on" : ""}`, "data-clip": i,
+                    title: on ? _t("branch.clip_kept_title", { index: i }) : _t("branch.clip_free_title", { index: i }), onclick: () => toggle(i) },
+                    thumb(sel.takes[i]), h("b", {}, String(i)), h("span", { class: "br-state" }, on ? "✓" : _t("branch.clip_free"))));
+            }
+            const kept = chain.filter((i) => keep.has(i)), free = chain.filter((i) => !keep.has(i) && i < Math.max(0, ...kept));
             const copyBox = h("div", { class: "br-sub" },
-                h("div", { class: "tk-inline" }, _t("branch.duplicate_of"),
-                    h("select", { onchange: (e) => { source = e.target.value; upto = null; draw(); } },
-                        branches.map((b) => h("option", { value: b.id, selected: b.id === source || null }, b.name)))),
                 choice("copy", _t("branch.without_clips"), _t("branch.without_clips_hint")),
-                chain.length
-                    ? h("div", {}, choice("clips", _t("branch.with_clips"), null),
-                        h("span", { class: "tk-inline", style: "margin-left:26px" }, chain.map((i) => (sel.takes[i] || "").split("_").pop().slice(0, 4)).join(" → "),
-                            " ", _t("branch.up_to_clip"), " ",
-                            h("select", { class: "br-upto", onchange: (e) => { upto = Number(e.target.value); how = "clips"; draw(); } },
-                                chain.slice().reverse().map((i) => h("option", { value: i, selected: i === upto || null }, String(i))))))
+                n
+                    ? h("div", {}, choice("clips", _t("branch.with_clips"), _t("branch.with_clips_hint")),
+                        h("div", { style: "margin-left:26px" }, strip,
+                            h("div", { class: "tk-inline" },
+                                h("button", { class: "small br-all", onclick: () => { keep = new Set(chain); how = "clips"; draw(); } }, _t("branch.keep_all")))))
                     : h("div", { class: "hint", style: "margin-left:26px" }, _t("branch.with_clips_needs_selection", { name: src.name || "?" })));
             const parts = [
                 h("div", { class: "tk-inline" }, h("span", { class: "hint", style: "width:60px" }, _t("branch.name")), nameIn),
-                choice("empty", _t("branch.empty"), _t("branch.empty_hint")),
-                choice("file", _t("branch.from_file"), _t("branch.from_file_hint")),
-                branches.length ? copyBox : null,
+                ...(dup ? [copyBox] : [choice("empty", _t("branch.empty"), _t("branch.empty_hint")), choice("file", _t("branch.from_file"), _t("branch.from_file_hint"))]),
             ];
             if (how === "clips" && sel) {
-                const uses = firstUse(sel.plan || {});
-                const names = Object.keys(src.refs || {}).sort((a, b) => (uses[a] || 999) - (uses[b] || 999));
-                parts.push(h("div", { class: "hint", style: "margin-top:6px" }, _t("branch.clips_taken_over", { k: upto })),
-                    h("table", { class: "br-refs" }, names.map((n) => {
-                        const at = uses[n];
-                        const kept = at && at <= upto;
-                        return h("tr", {}, h("td", {}, n), h("td", { class: "hint" }, at ? _t("branch.from_clip", { index: at }) : _t("branch.not_used")),
-                            h("td", { class: kept ? "br-kept" : "br-free" }, kept ? "🔒 " + _t("branch.kept") : at ? _t("branch.free_until", { k: at - 1 }) : _t("branch.free")));
-                    })),
-                    h("div", { class: "hint" }, _t("branch.fixed_like", { name: src.name || "?" })));
+                parts.push(h("div", { class: "hint br-summary", style: "margin-top:6px" }, kept.length
+                    ? _t("branch.portions_summary", { kept: ranges(kept), n: kept.length }) : _t("branch.portions_none")));
+                if (free.length) parts.push(h("div", { class: "hint br-free" }, _t("branch.portions_free", { free: ranges(free) })));
+                if (kept.length) parts.push(h("div", { class: "hint" }, _t("branch.subjects_kept_by_clips")));
             }
+            go.disabled = how === "clips" && (!sel || !kept.length);
             K().fill(body, parts);
         };
-        draw();
         const go = h("button", { class: "primary", onclick: async () => {
             const label = nameIn.value.trim();
             try {
@@ -108,7 +133,12 @@
                 } else {
                     const payload = { how, name: label || null };
                     if (how === "copy" || how === "clips") payload.source = source;
-                    if (how === "clips") { payload.leaf = (S().twig.takes || {})[upto]; payload.upto = upto; }
+                    if (how === "clips") {
+                        const tw = S().twig.takes || {};
+                        const kept = [...keep].sort((a, b) => a - b);
+                        payload.leaf = tw[kept[kept.length - 1]];
+                        payload.keep = kept;
+                    }
                     res = await K().post(`${K().base()}/branches`, payload);
                 }
                 dlg.close();
@@ -119,22 +149,21 @@
                 K().toast(_t("branch.created", { name: res.branch.name }));
             } catch (e) { alert(e.message); }
         } }, _t("branch.create"));
-        const dlg = K().modal(_t("branch.new_branch"), h("div", {}, body, h("div", { class: "tk-inline", style: "justify-content:flex-end;margin-top:12px" }, go)));
+        draw();
+        const title = dup ? _t("branch.duplicate_title", { name: (branches.find((b) => b.id === source) || {}).name || "?" }) : _t("branch.new_branch");
+        const dlg = K().modal(title, h("div", {}, body, h("div", { class: "tk-inline", style: "justify-content:flex-end;margin-top:12px" }, go)));
     }
 
     // ------------------------------------------------------------------ « Réglages de la branche »
     async function settings(id, { first = false } = {}) {
         let data;
         try { data = await project(); } catch (e) { alert(e.message); return; }
-        const state = (data.branch_states || {})[id] || { has_takes: false, refs_used: [] };
-        const used = new Set(state.refs_used || []);
+        const state = (data.branch_states || {})[id] || { has_takes: false };
         const body = h("div", { class: "tk-refs br-settings" });
         let dlg = null;
         const draw = () => {
             const br = K().branchById(id);
             if (!br) return;
-            const plan = K().plan() || {};
-            const free = H3.mode(plan) === "free";
             const why = _t("branch.frozen_why", { name: br.name });
             const parts = [];
             if (first) parts.push(h("p", { class: "hint" }, _t("studio.choose_the_size_and_files_of")));
@@ -153,10 +182,9 @@
                 })));
             // the segment of the project's video this branch uses: shown here, chosen in its master plan
             parts.push(h("h3", {}, _t("branch.video")), planSummary(id, state, why));
-            parts.push(h("h3", {}, _t("branch.references")), refRows(id, br, plan, free, used, draw));
             parts.push(h("h3", {}, _t("branch.generation")), generationRows(id, br));
             parts.push(h("div", { class: "hint br-foot" }, _t("branch.other_values"), " ",
-                h("button", { class: "small", onclick: () => { if (dlg) dlg.close(); create({ how: "copy", source: id }); } }, _t("branch.duplicate"))));
+                h("button", { class: "small", onclick: () => { if (dlg) dlg.close(); create({ how: "copy", source: id, duplicate: true }); } }, _t("branch.duplicate"))));
             K().fill(body, parts);
         };
         draw();
@@ -179,45 +207,6 @@
             if (state.has_takes) frozen(open, why);
             K().fill(box, row(_t("branch.segment"), video), sv ? h("div", { class: "tk-row" }, h("label", {}), open) : null);
         }).catch((e) => K().fill(box, h("span", { class: "hint" }, e.message)));
-        return box;
-    }
-
-    function refRows(id, br, plan, free, used, redraw) {
-        const box = h("div", {});
-        const names = Object.keys(plan.refs || {}).filter((n) => n !== (plan.start_video || plan.edit_video || {}).ref);
-        for (const n of Object.keys(br.refs || {})) if (!names.includes(n)) names.push(n);
-        if (!names.length) return h("p", { class: "hint" }, _t("studio.the_plan_declares_no_reference_plan"));
-        const res = S().resources || {};
-        for (const name of names) {
-            const r = { ...((br.refs || {})[name] || {}) };
-            const locked = used.has(name);
-            const why = _t("branch.ref_frozen_why", { name });
-            const setRef = async (kind, value) => {
-                const refs = JSON.parse(JSON.stringify(br.refs || {}));
-                refs[name] = { ...(refs[name] || {}), [kind]: value || null };
-                try { await K().putBranch(id, { refs }); } catch (e) { alert(e.message); }
-                redraw();
-            };
-            const pick = (kind, label, list) => {
-                const folder = { image: "images", voice: "voices" }[kind];
-                const sel = h("select", { onchange: (e) => setRef(kind, e.target.value || null) },
-                    h("option", { value: "" }, label), list.map((it) => h("option", { value: it.path, selected: it.path === r[kind] || null }, it.name)));
-                const up = h("button", { onclick: async () => {
-                    const [file] = await K().pickFiles(K().ACCEPT[folder]);
-                    if (!file) return;
-                    try { const [path] = await K().importFiles(folder, [file]); await setRef(kind, path); } catch (e) { alert(e.message); }
-                } }, _t("studio.import"));
-                if (locked) { frozen(sel, why); frozen(up, why); }
-                return h("div", { class: "tk-inline" }, sel, up, locked ? lock(why) : null);
-            };
-            box.append(h("div", { class: "tk-ref" },
-                r.image ? K().zoom(h("img", { src: K().fileUrl(r.image), class: "tk-refimg" }), name) : h("div", { class: "tk-refimg empty" }, _t("studio.no_picture_2")),
-                h("div", { class: "tk-refbody" },
-                    h("div", {}, h("b", {}, name), h("span", { class: "hint" }, "  " + ((plan.refs || {})[name] || "")),
-                        h("span", { class: locked ? "br-kept" : "br-free" }, "  " + (locked ? _t("branch.ref_used") : _t("branch.ref_not_used")))),
-                    h("label", {}, _t("studio.picture")), pick("image", _t("studio.no_picture"), res.images || []),
-                    free ? [h("label", {}, _t("studio.voice")), pick("voice", _t("studio.no_voice_h3_chooses"), res.voices || [])] : null)));
-        }
         return box;
     }
 

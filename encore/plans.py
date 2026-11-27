@@ -5,7 +5,13 @@ the take before it in time (studio.predecessor: the take it continues, or the on
 scene). What can still change is stored here, in plans.json:
 
     {"masters": {branch id: plan},                         the plan of a branch before any take (« plan maître »)
-     "suites":  {take id: {"after": k, "plan": plan}}}     what comes after a take: clips k+1..N, header included
+     "suites":  {take id: {"after": k, "plan": plan}},     what comes after a take: clips k+1..N, header included
+     "frozen":  {branch id: {"clips": k, "subjects": [names]}}}   what of a master plan no longer changes (0.48)
+
+The master line (0.48): the takes made from the master plan itself (studio.line), one per clip, in a row at the
+top of the branch; they have no suite of their own, what follows them is the master plan. Once a branch has a take
+or a generation waiting, its master plan is frozen: its clips 1..k and its subjects (with the files they use) do not
+change any more; clips can be added at the end, and new subjects. A master clip the line generates is frozen too.
 
 A plan has the form of a plan file (header + "clips"); a suite holds only the clips after its take. The plan of
 a twig 1 → … → k (a chain of takes ending with the « leaf ») is never stored: the portions of the chain are read
@@ -51,6 +57,7 @@ def load(path: Path):
         data = {}
     data.setdefault("masters", {})
     data.setdefault("suites", {})
+    data.setdefault("frozen", {})
     return data
 
 
@@ -68,7 +75,8 @@ def head(plan):
 
 # --------------------------------------------------------------------------- portions
 def portion_of(record):
-    """The portion of plan of a take: {"clip": raw entry, "edit_instruction", "refs_desc"}, or None."""
+    """The portion of plan of a take: {"clip": raw entry, with its 'defs' (subjects, files and edit instruction it
+    was made with)}, or None."""
     return ((record or {}).get("studio") or {}).get("portion")
 
 
@@ -81,11 +89,9 @@ def branch_of(record, default=None):
 
 
 def locked_entry(portion, record):
-    """The clip entry of a generated take, as it was made: {edit} replaced by its own instruction, the frames
-    of the take, no seed (it is in the record)."""
+    """The clip entry of a generated take, as it was made (its 'defs' hold the subjects, files and edit
+    instruction it used), with the frames of the take and no seed (it is in the record)."""
     entry = _copy(portion["clip"])
-    prompt, refs = plan_core.expand_edit(entry.get("prompt"), entry.get("refs") or [], portion.get("edit_instruction"))
-    entry["prompt"], entry["refs"] = prompt, refs
     entry.pop("seed", None)
     if record and record.get("frames"):
         entry["frames"] = int(record["frames"])
@@ -158,7 +164,8 @@ def fits_map(path: Path, known=None, pending=None):
 
 
 def base_of(path: Path, branch_id):
-    """[take ids of clips 1..k] a duplicated branch takes over from another branch ([] otherwise)."""
+    """[take id or None of clips 1..k] a duplicated branch takes over from another branch ([] otherwise); None: a
+    clip left free between two portions (0.49)."""
     from . import projects
     try:
         meta = projects.read_meta(path)
@@ -168,25 +175,41 @@ def base_of(path: Path, branch_id):
     return projects.branch_base(branch)
 
 
+def kept_of(path: Path, branch_id):
+    """{clip index: take id} of the clips a duplicated branch takes over."""
+    return {i: t for i, t in enumerate(base_of(path, branch_id), start=1) if t}
+
+
+def holes_of(path: Path, branch_id):
+    """0.49: the clips left free before the last clip a duplicated branch takes over (their frames are locked,
+    so that the portions after them stay at their moment of the song)."""
+    base = base_of(path, branch_id)
+    return [i for i, t in enumerate(base, start=1) if not t]
+
+
 def selection_prefer(path: Path, branch_id):
     """Where a twig meets a new scene, it follows the selection (when it is in this branch); the clips a branch
     takes over always come first."""
     sel = takes.read_selection(path)
     out = {k: v for k, v in sel.items() if k != "branch"} if sel.get("branch") in (None, branch_id) else {}
-    out.update({i: t for i, t in enumerate(base_of(path, branch_id), start=1)})
+    out.update(kept_of(path, branch_id))
     return out
 
 
-def chain(path: Path, leaf_id, known=None, pending=None, prefer=None):
+def chain(path: Path, leaf_id, known=None, pending=None, prefer=None, branch=None):
     """[(clip index, take id, record or None)] from clip 1 to the leaf, following the predecessors; at a new scene
     (✂), the take chosen in `prefer` ({clip index: take id}, the selection) for the clip before when the new scene
     fits after it (cut_fits). known: records_by_id(path) if already read. pending: {take id: (clip index,
     pseudo-record)} for generations still waiting (their take id is known at launch). Raises StudioError when a
-    link is missing."""
+    link is missing. branch (0.49): the twig is read in that branch: a clip it takes over after a clip left free
+    follows its own take of that clip (the one of `prefer` when it is one, otherwise the one of its master line).
+    """
     known = records_by_id(path) if known is None else known
     pending = _pending_of(path) if pending is None else pending
     prefer = prefer or {}
     masters = None
+    kept = kept_of(path, branch) if branch else {}
+    line = None
     out, take_id, seen = [], leaf_id, set()
     while take_id:
         if take_id in seen:
@@ -202,6 +225,17 @@ def chain(path: Path, leaf_id, known=None, pending=None, prefer=None):
             raise StudioError(_t("plans.chain_broken", take_id=take_id))
         out.append((index, take_id, record))
         nxt = predecessor_of(record)
+        if kept and kept.get(index) == take_id and index > 1 and (index - 1) not in kept:
+            # a portion taken over after a clip left free: it follows the branch's own take of that clip
+            fill = prefer.get(index - 1)
+            mine = (known.get(fill) or pending.get(fill)) if fill else None
+            if not (mine and int(mine[0]) == index - 1 and branch_of(mine[1]) == branch):
+                line = line_of(path, branch, known, pending) if line is None else line
+                fill = line.get(index - 1)
+            if not fill or fill in kept.values():
+                raise StudioError(_t("plans.portion_hole", index=index - 1))
+            take_id = fill
+            continue
         alt = prefer.get(index - 1)
         if alt and alt != nxt and is_cut(index, record) and (alt in known or alt in pending):
             masters = load(path)["masters"] if masters is None else masters
@@ -213,6 +247,123 @@ def chain(path: Path, leaf_id, known=None, pending=None, prefer=None):
     if out and out[0][0] != 1:
         raise StudioError(_t("plans.chain_broken", take_id=out[0][1]))
     return out
+
+
+# --------------------------------------------------------------------------- the master line, the frozen master
+def is_line(record):
+    return bool(((record or {}).get("studio") or {}).get("line"))
+
+
+def line_of(path: Path, branch_id, known=None, pending=None):
+    """{clip index: take id} of the master line of a branch: the clips it takes over (duplicated branch), then its
+    takes made from the master plan (generations waiting included), the oldest one when there are several."""
+    known = records_by_id(path) if known is None else known
+    pending = _pending_of(path) if pending is None else pending
+    out = kept_of(path, branch_id)
+    found = [(index, record.get("saved_at") or 0, take_id) for take_id, (index, record) in known.items()
+             if is_line(record) and branch_of(record) == branch_id]
+    found += [(index, float("inf"), take_id) for take_id, (index, record) in pending.items()
+              if is_line(record) and branch_of(record) == branch_id and take_id not in known]
+    for index, _at, take_id in sorted(found):
+        out.setdefault(int(index), take_id)
+    return out
+
+
+def line_end(line):
+    """The last clip of a master line, from clip 1 without a gap (0: nothing generated yet)."""
+    k = 0
+    while (k + 1) in line:
+        k += 1
+    return k
+
+
+def has_own_takes(path: Path, branch_id, known=None, pending=None):
+    """True when a branch has a take of its own (not one it takes over) or a generation waiting."""
+    known = records_by_id(path) if known is None else known
+    pending = _pending_of(path) if pending is None else pending
+    base = set(kept_of(path, branch_id).values())
+    return (any(branch_of(r) == branch_id and t not in base for t, (_i, r) in known.items())
+            or any(branch_of(r) == branch_id for _t, (_i, r) in pending.items()))
+
+
+def frozen_of(path: Path, branch_id, known=None, pending=None):
+    """What of a branch's master plan no longer changes: {"clips": k, "subjects": [names]}, or None while the
+    branch has no take of its own and no generation waiting."""
+    if not has_own_takes(path, branch_id, known, pending):
+        return None
+    data = load(path)
+    item = data["frozen"].get(branch_id)
+    if item is None:     # a branch with takes made before 0.48: frozen as it is now
+        item = _snapshot(data, branch_id)
+        data["frozen"][branch_id] = item
+        save(path, data)
+    return _copy(item)
+
+
+def _snapshot(data, branch_id):
+    master_plan = data["masters"].get(branch_id) or {}
+    return {"clips": len(master_plan.get("clips") or []), "subjects": sorted((master_plan.get("subjects") or {}).keys())}
+
+
+def freeze(path: Path, branch_id, index=None, subjects=(), known=None, pending=None):
+    """A generation of the branch is launched (before it is queued): the master plan is frozen as it is, if it was
+    not already; a clip of the master line freezes that clip and the subjects it uses."""
+    active = has_own_takes(path, branch_id, known, pending)
+    data = load(path)
+    item = data["frozen"].get(branch_id) if active else None
+    item = _copy(item) if item else _snapshot(data, branch_id)
+    if index:
+        item["clips"] = max(int(item["clips"]), int(index))
+    item["subjects"] = sorted(set(item["subjects"]) | set(subjects or ()))
+    data["frozen"][branch_id] = item
+    save(path, data)
+
+
+def _frozen_files(plan, item):
+    """The file labels the frozen part of a master plan uses: pictures and voices of its frozen subjects, anchors
+    of its frozen clips, the edited video."""
+    out = set()
+    subjects = plan.get("subjects") or {}
+    for name in item["subjects"]:
+        subject = subjects.get(name) or {}
+        out.update(p.get("file") for p in subject.get("pictures") or [] if isinstance(p, dict))
+        if subject.get("voice"):
+            out.add(subject["voice"])
+    for clip in (plan.get("clips") or [])[:item["clips"]]:
+        anchors = (clip or {}).get("anchors") or {}
+        out.update(x for x in (anchors.get("first"), anchors.get("last")) if x)
+        out.update(k.get("file") for k in anchors.get("keyframes") or [] if isinstance(k, dict))
+    for key in ("edit_video", "start_video"):
+        if isinstance(plan.get(key), dict) and plan[key].get("ref"):
+            out.add(plan[key]["ref"])
+    out.discard(None)
+    return out
+
+
+def master_frozen_problems(path: Path, branch_id, new_plan):
+    """What a new master plan changes in the frozen part of the old one ([] when nothing, or not frozen)."""
+    item = frozen_of(path, branch_id)
+    if not item:
+        return []
+    old = load(path)["masters"].get(branch_id) or {}
+    kept = kept_of(path, branch_id)      # the clips taken over are never read from the master plan
+    old_clips, new_clips = old.get("clips") or [], new_plan.get("clips") or []
+    problems = []
+    k = min(item["clips"], len(old_clips))
+    if len(new_clips) < k or any(_copy(new_clips[i]) != _copy(old_clips[i]) for i in range(k) if (i + 1) not in kept):
+        problems.append(_t("plans.frozen_clips", k=k))
+    old_subjects, new_subjects = old.get("subjects") or {}, new_plan.get("subjects") or {}
+    changed = [n for n in item["subjects"] if n in old_subjects and _copy(new_subjects.get(n)) != _copy(old_subjects[n])]
+    if changed:
+        problems.append(_t("plans.frozen_subjects", names=", ".join("@" + n for n in changed)))
+    old_files, new_files = old.get("files") or {}, new_plan.get("files") or {}
+    def filled(f):         # a file declared without its path (an imported plan) may get one: that changes nothing made
+        o, n = old_files[f] or {}, new_files.get(f) or {}
+        return not o.get("file") and n.get("file") and {k: v for k, v in n.items() if k != "file"} == {k: v for k, v in o.items() if k != "file"}
+    files = [f for f in sorted(_frozen_files(old, item)) if f in old_files and _copy(new_files.get(f)) != _copy(old_files[f]) and not filled(f)]
+    if files:
+        problems.append(_t("plans.frozen_files", names=", ".join(files)))
+    return problems
 
 
 # --------------------------------------------------------------------------- plans
@@ -257,40 +408,73 @@ def plan_of(path: Path, branch_id, leaf_id=None, known=None, pending=None, proje
         plan.setdefault("clips", [])
         if project_name:
             plan["project"] = project_name
-        base = base_of(path, branch_id)
-        if not base:
-            return {"plan": plan, "locked": 0, "chain": [], "takes": {}}
-        # a duplicated branch: its master plan starts with the clips it takes over, read-only
-        known = records_by_id(path) if known is None else known
+        kept = kept_of(path, branch_id)
+        frozen = frozen_of(path, branch_id, known, pending)
+        out = {"plan": plan, "locked": 0, "chain": [], "takes": {}}
+        if kept:
+            # a duplicated branch: its master plan starts with the clips it takes over, read-only; the clips left
+            # free between them (0.49) stay editable ("free"), their length locked
+            known = records_by_id(path) if known is None else known
+            clips = list(plan["clips"])
+            last = max(kept)
+            while len(clips) < last:
+                clips.append({})
+            for i, take_id in kept.items():
+                if take_id not in known:
+                    raise StudioError(_t("plans.take_missing", take_id=take_id))
+                record = known[take_id][1]
+                clips[i - 1] = locked_entry(portion_of(record), record)
+            plan["clips"] = clips
+            prefix = []
+            while (len(prefix) + 1) in kept:
+                prefix.append(kept[len(prefix) + 1])
+            out = {"plan": plan, "locked": last, "chain": prefix, "takes": dict(kept)}
+            holes = [i for i in range(1, last + 1) if i not in kept]
+            if holes:
+                out["holes"] = holes
+        if frozen:
+            # a frozen master plan: its first clips are read-only (with the take of the master line that made them)
+            out["locked"] = max(out["locked"], min(frozen["clips"], len(plan["clips"])))
+            out["takes"] = line_of(path, branch_id, known, pending)
+            out["frozen"] = frozen
+        if out.get("holes"):
+            # 0.49: the clips left free stay editable like any clip of a master plan (until the master line freezes
+            # them); only their length and link are locked (lock_length)
+            out["free"] = [i for i in out["holes"] if not (frozen and i <= int(frozen["clips"]))]
+        return out
+    kept = kept_of(path, branch_id)
+    if leaf_id in kept.values():
+        # a clip a duplicated branch takes over: what follows is the master plan of that branch; the twig up to it
+        # goes through the branch's own takes of the clips left free (0.49), when they are made
+        master_view = plan_of(path, branch_id, None, known, pending, project_name)
+        try:
+            links = chain(path, leaf_id, known, pending, selection_prefer(path, branch_id) if prefer is None else prefer,
+                          branch=branch_id)
+        except StudioError:
+            return master_view
+        plan = master_view["plan"]
         clips = []
-        for take_id in base:
-            if take_id not in known:
-                raise StudioError(_t("plans.take_missing", take_id=take_id))
-            record = known[take_id][1]
+        for _index, _take_id, record in links:
             clips.append(locked_entry(portion_of(record), record))
-        plan["clips"] = clips + plan["clips"][len(base):]
-        return {"plan": plan, "locked": len(base), "chain": list(base),
-                "takes": {i: t for i, t in enumerate(base, start=1)}}
-    if leaf_id in base_of(path, branch_id):
-        # a clip a duplicated branch takes over: what follows is the master plan of that branch
-        return plan_of(path, branch_id, None, known, pending, project_name)
-    links = chain(path, leaf_id, known, pending, selection_prefer(path, branch_id) if prefer is None else prefer)
+        plan["clips"] = clips + (plan.get("clips") or [])[len(links):]
+        out = dict(master_view, chain=[t for _i, t, _r in links])
+        out["takes"] = {**master_view["takes"], **{i: t for i, t, _r in links}}
+        return out
+    links = chain(path, leaf_id, known, pending, selection_prefer(path, branch_id) if prefer is None else prefer,
+                  branch=branch_id if kept else None)
     item = data["suites"].get(leaf_id)
     if item is None:
         # a take without a suite (made before its suite was written): the master after its clip
         base = _copy(data["masters"].get(branch_id) or {"clips": []})
         item = {"after": len(links), "plan": dict(base, clips=(base.get("clips") or [])[len(links):])}
     plan = head(item["plan"])
-    clips, declared = [], dict(plan.get("refs") or {})
+    clips = []
     for index, _take_id, record in links:
         portion = portion_of(record)
         if not portion:
             raise StudioError(_t("plans.take_without_portion", take_id=_take_id))
         clips.append(locked_entry(portion, record))
-        for name in clips[-1].get("refs") or []:
-            declared.setdefault(name, (portion.get("refs_desc") or {}).get(name) or name)
     clips += _copy(item["plan"].get("clips") or [])
-    plan["refs"] = declared
     plan["clips"] = clips
     if project_name:
         plan["project"] = project_name
@@ -310,10 +494,11 @@ def save_twig_plan(path: Path, branch_id, leaf_id, plan, known=None):
     twig are the portions of its takes: they are not stored again."""
     if not isinstance(plan, dict) or not isinstance(plan.get("clips"), list):
         raise StudioError(_t("projects.the_plan_must_be_a_json"))
-    if not leaf_id or leaf_id in base_of(path, branch_id):
+    kept = kept_of(path, branch_id)
+    if not leaf_id or leaf_id in kept.values():
         set_master(path, branch_id, plan)
-        return len(base_of(path, branch_id))
-    locked = len(chain(path, leaf_id, known, prefer=selection_prefer(path, branch_id)))
+        return max(kept) if kept else 0
+    locked = len(chain(path, leaf_id, known, prefer=selection_prefer(path, branch_id), branch=branch_id if kept else None))
     set_suite(path, leaf_id, locked, suite_from(plan, locked))
     return locked
 

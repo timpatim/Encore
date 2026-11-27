@@ -33,7 +33,7 @@ try:
         call(S, f"{P}/resources?kind=images&filename={os.path.basename(f)}", raw=open(f, "rb").read(), method="POST")
     call(S, f"{P}/resources?kind=videos&filename=intro.mp4", raw=open(fixture("v30_intro.mp4"), "rb").read(), method="POST")
     plan = call(S, P)["plan"]
-    plan["refs"]["intro"] = "start video"; plan["start_video"] = {"ref": "intro", "start": 0.5, "end": 6.0}; plan["clips"][0]["continue"] = True
+    plan["files"]["intro"] = {"kind": "video"}; plan["start_video"] = {"ref": "intro", "start": 0.5, "end": 6.0}; plan["clips"][0]["continue"] = True
     call(S, P + "/plan", plan, "PUT")
     call(S, P + "/branches/b1", {"refs": {"fillette": {"image": "refs/images/fillette.png"}, "rue": {"image": "refs/images/rue.png"}}}, "PUT")
     call(S, P + "/start-video", {"file": "refs/videos/intro.mp4"}, "PUT")

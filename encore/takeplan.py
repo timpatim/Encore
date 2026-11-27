@@ -1,12 +1,11 @@
-"""Encore - the portion of plan a take was made with (the ≡ window of a take or of a waiting generation), and the
-record of a take as it is sent with the plan of a twig.
+"""Encore - the portion of plan a take was made with (the ≡ window of a take or of a waiting generation).
 
 A take keeps its portion of plan (studio.portion) and the take before it (studio.predecessor); see plans.py.
 """
 from __future__ import annotations
 
 from .i18n import t as _t
-from . import plan_core, plans, projects, takes
+from . import plans, projects, takes
 
 
 def _file_info(project, rel, sha=None):
@@ -43,20 +42,10 @@ def _plan_view(project, index, record):
     for ref, then in (studio.get("files") or {}).items():
         shas = (studio.get("refs") or {}).get(ref) or {}
         refs[ref] = {kind: {"then": _file_info(project, (then or {}).get(kind), shas.get(kind))} for kind in ("image", "voice")}
-    return {"clip": index, "snapshot": entry, "edit_instruction": portion.get("edit_instruction"),
+    return {"clip": index, "snapshot": entry, "edit_instruction": ((entry or {}).get("defs") or {}).get("edit_instruction"),
             "raw_start": studio.get("raw_start"), "branch": studio.get("branch"), "predecessor": studio.get("predecessor"),
             "size": [record.get("width"), record.get("height")], "refs": refs, "upscale": studio.get("upscale"),
             # what the generation used besides the plan (the « Generation » block of the window)
             "generation": {"models": studio.get("models"), "extra_loras": studio.get("extra_loras"),
                            "ref_image_size": studio.get("ref_image_size"), "song": studio.get("song_file")},
             "seed": record.get("seed"), "saved_at": record.get("saved_at"), "parent": record.get("parent")}
-
-
-def rewritten_record(sent_normalized, index, record, previous_id=None):
-    """The record sent with the plan of a twig: the plugin finds it up to date."""
-    data = dict(record)
-    data["parent"] = previous_id if sent_normalized["clips"][index - 1]["continue"] else None
-    data["fingerprint"] = plan_core.take_fingerprint(sent_normalized, index)
-    data["frames"] = sent_normalized["clips"][index - 1]["frames"]
-    data["refs"] = {}
-    return data

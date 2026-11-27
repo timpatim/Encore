@@ -58,7 +58,6 @@ try:
     check("import into the first branch (no take yet)", out.get("branch") == "b1" and not out.get("created_branch"), out)
     for f in (fixture("fillette.png"), fixture("rue.png")):
         call(S, f"{P}/resources?kind=images&filename={os.path.basename(f)}", raw=open(f, "rb").read(), method="POST")
-    call(S, P + "/branches/b1", {"refs": {"fillette": {"image": "refs/images/fillette.png"}, "rue": {"image": "refs/images/rue.png"}}}, "PUT")
     master = call(S, P + "/plan?branch=b1")
     n = len(master["plan"]["clips"])
     check("master plan, nothing locked", master["locked"] == 0 and n >= 4, master.get("locked"))
@@ -69,31 +68,31 @@ try:
     check("clip 2 after clip 1", bool(t2), j2)
     tw = call(S, P + f"/plan?leaf={t2}")
     check("twig 1→2: two clips locked", tw["locked"] == 2 and tw["chain"] == [t1, t2], tw.get("chain"))
-    check("twig plan = master plan (nothing changed yet)", [c["prompt"] for c in tw["plan"]["clips"][2:]] == [c["prompt"] for c in master["plan"]["clips"][2:]])
+    check("twig plan = master plan (nothing changed yet)", [c["summary"] for c in tw["plan"]["clips"][2:]] == [c["summary"] for c in master["plan"]["clips"][2:]])
 
     # fork of clip 2: same predecessor, another prompt, seed of the take forked
-    entry = dict(tw["plan"]["clips"][1], prompt=tw["plan"]["clips"][1]["prompt"] + "\nA red umbrella.")
+    entry = dict(tw["plan"]["clips"][1], summary=tw["plan"]["clips"][1]["summary"] + "\nA red umbrella.")
     seed2 = next(x for x in call(S, P + "/jobs")["jobs"] if x["id"] == j2["id"])["seed"]
     j2b = call(S, P + "/generate", {"clip": 2, "after": t1, "plan_from": t2, "entry": entry, "seed": seed2}); run(); t2b = take_of(j2b)
     check("fork of clip 2 made with the same seed", bool(t2b) and t2b.startswith(f"s{seed2}_"), (t2b, seed2))
     tw2b = call(S, P + f"/plan?leaf={t2b}")
-    check("the fork keeps its own prompt", tw2b["plan"]["clips"][1]["prompt"].endswith("A red umbrella."))
-    check("the first take keeps its prompt", not call(S, P + f"/plan?leaf={t2}")["plan"]["clips"][1]["prompt"].endswith("A red umbrella."))
+    check("the fork keeps its own prompt", tw2b["plan"]["clips"][1]["summary"].endswith("A red umbrella."))
+    check("the first take keeps its prompt", not call(S, P + f"/plan?leaf={t2}")["plan"]["clips"][1]["summary"].endswith("A red umbrella."))
 
     # the suite of a twig changes; the master plan and the other twig do not
-    plan = tw2b["plan"]; plan["clips"][3]["prompt"] = "CHANGED clip 4"
+    plan = tw2b["plan"]; plan["clips"][3]["summary"] = "CHANGED clip 4"
     out = call(S, P + "/plan", {"branch": "b1", "leaf": t2b, "plan": plan}, "PUT")
-    check("suite saved", out.get("locked") == 2 and out["plan"]["clips"][3]["prompt"] == "CHANGED clip 4", out.get("HTTP"))
-    check("master unchanged", call(S, P + "/plan?branch=b1")["plan"]["clips"][3]["prompt"] != "CHANGED clip 4")
-    check("other twig unchanged", call(S, P + f"/plan?leaf={t2}")["plan"]["clips"][3]["prompt"] != "CHANGED clip 4")
-    locked_edit = dict(plan); locked_edit["clips"] = [dict(c) for c in plan["clips"]]; locked_edit["clips"][0]["prompt"] = "nope"
+    check("suite saved", out.get("locked") == 2 and out["plan"]["clips"][3]["summary"] == "CHANGED clip 4", out.get("HTTP"))
+    check("master unchanged", call(S, P + "/plan?branch=b1")["plan"]["clips"][3]["summary"] != "CHANGED clip 4")
+    check("other twig unchanged", call(S, P + f"/plan?leaf={t2}")["plan"]["clips"][3]["summary"] != "CHANGED clip 4")
+    locked_edit = dict(plan); locked_edit["clips"] = [dict(c) for c in plan["clips"]]; locked_edit["clips"][0]["summary"] = "nope"
     call(S, P + "/plan", {"branch": "b1", "leaf": t2b, "plan": locked_edit}, "PUT")
-    check("a generated clip is not changed by saving", not call(S, P + f"/plan?leaf={t2b}")["plan"]["clips"][0]["prompt"] == "nope")
+    check("a generated clip is not changed by saving", not call(S, P + f"/plan?leaf={t2b}")["plan"]["clips"][0]["summary"] == "nope")
 
     # clip 3 after the fork, then its suite came from the fork's twig
     j3 = call(S, P + "/generate", {"clip": 3, "after": t2b}); run(); t3 = take_of(j3)
     tw3 = call(S, P + f"/plan?leaf={t3}")
-    check("clip 3 after the fork: suite inherited", tw3["locked"] == 3 and tw3["plan"]["clips"][3]["prompt"] == "CHANGED clip 4", tw3.get("locked"))
+    check("clip 3 after the fork: suite inherited", tw3["locked"] == 3 and tw3["plan"]["clips"][3]["summary"] == "CHANGED clip 4", tw3.get("locked"))
     sel = call(S, P + "/takes")
     chosen = {c["index"]: c["selected"] for c in sel["clips"]}
     check("selection follows the new take", chosen.get(1) == t1 and chosen.get(2) == t2b and chosen.get(3) == t3, chosen)
@@ -102,11 +101,15 @@ try:
     # frozen settings of a branch with takes
     out = call(S, P + "/branches/b1", {"width": 640, "height": 384}, "PUT")
     check("size frozen", out.get("HTTP") == 400 or "error" in out, out)
-    out = call(S, P + "/branches/b1", {"refs": {"fillette": {"image": "refs/images/rue.png"}, "rue": {"image": "refs/images/rue.png"}}}, "PUT")
-    check("reference file frozen", out.get("HTTP") == 400 or "error" in out, out)
-    out = call(S, P + "/branches/b1", {"refs": {"fillette": {"image": "refs/images/fillette.png"}, "rue": {"image": "refs/images/rue.png"},
-                                                "chien": {"image": "refs/images/rue.png"}}}, "PUT")
-    check("a new reference can be added", "branch" in out, out)
+    # (B1) the subjects are in the plan: a picture changed in a suite only goes to the clips after
+    plan = call(S, P + f"/plan?leaf={t3}")["plan"]
+    plan["subjects"]["fillette"]["pictures"][0]["file"] = "rue"
+    call(S, P + "/plan", {"branch": "b1", "leaf": t3, "plan": plan}, "PUT")
+    again = call(S, P + f"/plan?leaf={t3}")["plan"]
+    check("the clips already made keep their subjects", again["clips"][0]["defs"]["subjects"]["fillette"]["pictures"][0]["file"] == "fillette"
+          and again["subjects"]["fillette"]["pictures"][0]["file"] == "rue", again["clips"][0].get("defs"))
+    plan["subjects"]["fillette"]["pictures"][0]["file"] = "fillette"
+    call(S, P + "/plan", {"branch": "b1", "leaf": t3, "plan": plan}, "PUT")
 
     # assembly of the twig 1 → 2b → 3
     a = call(S, P + "/assemble", {"clip": 3, "take": t3}); run()
@@ -124,7 +127,7 @@ try:
     check("compléter: every clip made", made and all(j["status"] == "done" for j in made), [(j["clip"], j["status"], j.get("error")) for j in made])
     last = made[-1]["take"] if made else None
     twl = call(S, P + f"/plan?leaf={last}") if last else {}
-    check("the twig goes to the end", twl.get("locked") == n and twl["plan"]["clips"][3]["prompt"] == "CHANGED clip 4", twl.get("locked"))
+    check("the twig goes to the end", twl.get("locked") == n and twl["plan"]["clips"][3]["summary"] == "CHANGED clip 4", twl.get("locked"))
     ex = call(S, P + "/exports")["exports"]
     check("assembly after compléter", len(ex) == 2 and ex[0]["clips"] == n, [(e["clips"]) for e in ex])
     print("ERRORS:", [j.get("error") for j in call(S, P + "/jobs")["jobs"] if j.get("error")])

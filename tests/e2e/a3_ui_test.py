@@ -83,12 +83,10 @@ async def main():
         check("the take it starts from stays visible beside it", box and box["x"] + box["width"] <= panel["x"], (box, panel))
         await page.evaluate("H3Launch.close()"); await page.wait_for_timeout(400)
 
-        # the minimap: scrolled to the bottom, its frame stays inside
+        # the minimap (0.47, like ComfyUI): scrolled to the bottom, the frame may go past the map, which cuts it
         await page.evaluate("const v = document.querySelector('#takesView .tk-viewport'); v.scrollTop = v.scrollHeight"); await page.wait_for_timeout(500)
-        inside = await page.evaluate("""(() => { const f = document.querySelector('.tk-map-frame'), b = document.querySelector('.tk-map-body');
-            if (!f || !b) return null; const r = f.getBoundingClientRect(), q = b.getBoundingClientRect();
-            return r.bottom <= q.bottom + 1 && r.top >= q.top - 1; })()""")
-        check("minimap: the frame stays inside, scrolled to the bottom", inside is not False, inside)
+        cut = await page.evaluate("getComputedStyle(document.querySelector('.tk-map-body')).overflow")
+        check("minimap: the frame is cut at the edges of the map", cut == "hidden", cut)
         await page.evaluate("document.querySelector('#takesView .tk-viewport').scrollTop = 0"); await page.wait_for_timeout(300)
 
         # 🗑 on 2a: 3 goes with it
@@ -106,7 +104,7 @@ async def main():
         await page.evaluate("document.querySelectorAll('.tk-modal').forEach((m) => m.remove())")
 
         # Ctrl+Z: on the plan screen, not on the takes screen
-        await plan_screen(page, master=True)
+        await plan_screen(page)          # (0.48: the master plan of a branch with takes is frozen)
         name = page.locator("#editor .fields input").first
         old = await name.input_value()
         await name.fill(old + "_x"); await page.locator("#list").click(); await page.wait_for_timeout(900)

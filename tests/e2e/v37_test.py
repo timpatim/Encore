@@ -5,6 +5,7 @@ slice behind the empty take cards, and the assembly with the original sound."""
 import asyncio, json, os, shutil, subprocess, sys, time, urllib.request, urllib.error
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from common import ENCORE, CHROME, fixture, plan_screen, takes_screen, launch_go  # noqa: E402
 from playwright.async_api import async_playwright
+sys.path.insert(0, ENCORE); from encore import plan_core  # noqa: E402
 S = "http://127.0.0.1:8246"; M = "http://127.0.0.1:8771"
 OK = []
 def check(name, cond, info=""):
@@ -31,14 +32,27 @@ def gen(body):            # until the job is over: the mock runs what ComfyUI ha
     return out
 
 # a video of 3 shots (9 s, 12 s, 7 s) with a sound
+def tone(path, at):
+    """0.50: dominant frequency (Hz) of the sound 0.5 s around ``at`` seconds of a video (0 when silent)."""
+    import numpy as np
+    raw = subprocess.run(["ffmpeg", "-v", "error", "-ss", str(max(0, at - 0.25)), "-t", "0.5", "-i", path, "-ac", "1", "-ar", "48000", "-f", "f32le", "-"],
+                         capture_output=True).stdout
+    x = np.frombuffer(raw[: len(raw) // 4 * 4], dtype=np.float32)
+    if len(x) < 1000 or np.abs(x).max() < 1e-3: return 0
+    spec = np.abs(np.fft.rfft(x * np.hanning(len(x))))
+    return round(float(np.argmax(spec) * 48000 / len(x)) / 50) * 50
+def last_export(root, project):
+    folder = f"{root}/projets/{project}/exports"
+    return max((os.path.join(folder, n) for n in os.listdir(folder) if n.endswith(".mp4")), key=os.path.getmtime)
+
 SRC = "/tmp/v37_source.mp4"
 subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=640x360:rate=24:duration=9", "-f", "lavfi", "-i",
                 "smptebars=size=640x360:rate=24:duration=12", "-f", "lavfi", "-i", "mandelbrot=size=640x360:rate=24", "-f", "lavfi", "-i",
-                "sine=frequency=300:duration=28", "-filter_complex", "[2:v]trim=duration=7,setpts=PTS-STARTPTS[m];[0:v][1:v][m]concat=n=3:v=1:a=0[v]",
+                "sine=frequency=1000:duration=28", "-filter_complex", "[2:v]trim=duration=7,setpts=PTS-STARTPTS[m];[0:v][1:v][m]concat=n=3:v=1:a=0[v]",
                 "-map", "[v]", "-map", "3:a", "-c:v", "libx264", "-preset", "veryfast", "-c:a", "aac", "-shortest", SRC], check=True)
 
 root = "/tmp/h3s_v37"; shutil.rmtree(root, ignore_errors=True); os.makedirs(root)
-cfg = root + "/config.json"; json.dump({"projects_root": root + "/projets", "comfy_url": M, "configured": True, "setup_done": True, "assembly_engine": "plugin", "language": "en"}, open(cfg, "w"))
+cfg = root + "/config.json"; json.dump({"projects_root": root + "/projets", "comfy_url": M, "configured": True, "setup_done": True, "language": "en"}, open(cfg, "w"))
 srv = subprocess.Popen([sys.executable, "-m", "encore", "--port", "8246", "--no-browser", "--config", cfg], cwd=ENCORE, stdout=subprocess.DEVNULL, stderr=open("v37_srv.log", "w"))
 time.sleep(1.5)
 P = "/api/projects/rue"
@@ -52,8 +66,10 @@ try:
     subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=500:duration=4", voice], check=True)
     call(S, f"{P}/resources?kind=voices&filename=voix.wav", raw=open(voice, "rb").read(), method="POST")
     res = call(S, f"{P}/resources?kind=videos&filename=source.mp4", raw=open(SRC, "rb").read(), method="POST")
-    call(S, P + "/branches/b1", {"refs": {"fillette": {"image": "refs/images/fillette.png", "voice": "refs/voices/voix.wav"},
-                                          "rue": {"image": "refs/images/rue.png"}}, "width": 768, "height": 768}, "PUT")
+    call(S, P + "/branches/b1", {"width": 768, "height": 768}, "PUT")
+    _plan = call(S, P)["plan"]                     # (B) the girl's voice is in the plan
+    _plan["files"]["voix"] = {"kind": "voice", "file": "refs/voices/voix.wav"}; _plan["subjects"]["fillette"]["voice"] = "voix"
+    call(S, P + "/plan", _plan, "PUT")
     cuts = call(S, f"{P}/resources/scenes?path=refs/videos/source.mp4&start=0&end=672")
     check("changes of shot found in the segment", cuts.get("cuts") == [216, 504], cuts)
 
@@ -99,19 +115,18 @@ try:
             plan = await page.evaluate("H3Editor.state.plan")
             shape = [[c["frames"], c["continue"]] for c in plan["clips"]]
             check("cut on the shots: a new scene at each shot, the long shot in 2 parts", shape == [[209, False], [192, False], [175, True], [209, False]], shape)
-            check("every clip's prompt keeps <Video 1>", all("<Video 1>" in c["prompt"] for c in plan["clips"]))
+            check("every clip names <Video 1>", all("<Video 1>" in c["description"] for c in plan["clips"]))
             errors = await page.evaluate("H3.validate(H3Editor.state.plan).filter((m) => m.level === 'error').map((m) => m.text)")
             check("the plan is valid", not errors, errors)
             check("timeline: the edited segment in the header", "edits the video" in await page.locator(".tl-edit").inner_text())
             await page.screenshot(path="v37_settings.png")
             # clip 2 speaks with the voice of « fillette »
-            plan["clips"][1]["refs"] = ["fillette"]
-            plan["clips"][1]["prompt"] = plan["clips"][1]["prompt"].replace("No music", "<Subject 1> speaks with the voice from {voice:fillette}.\nNo music")
+            plan["clips"][1]["summary"] = "@fillette (S) says hello."
             saved = call(S, P + "/plan", plan, "PUT")
-            check("plan saved (current version)", saved.get("plan", {}).get("version") == 6 and not saved["validation"]["errors"], saved.get("validation"))
+            check("plan saved (current version)", saved.get("plan", {}).get("version") == 7 and not saved["validation"]["errors"], saved.get("validation"))
             await page.reload(); await page.wait_for_timeout(1500)
             await takes_screen(page); await page.wait_for_timeout(2500)
-            src = page.locator(".tk-placeholder .tk-src-thumb").first
+            src = page.locator(".tk-cell .tk-src-thumb").first
             state = ""
             for _ in range(60):
                 state = await src.evaluate("(v) => v.dataset.state + ' ' + (v.getAttribute('src') || '')") if await src.count() else ""
@@ -132,12 +147,16 @@ try:
     check("clip 1: its 209 frames of the video as <Video 1>, at the branch size", r2v["videos"] == [[209, br["height"], br["width"], 3]], r2v["videos"])
     check("…with the video's sound", r2v["video_audios"] == 1)
     wf = json.load(open("/tmp/mock_last_prompt.json"))
-    check("the workflow gives the video with an « H3 Plan - Video » node", any(n["class_type"] == "H3PlanVideo" and n["inputs"]["name"] == plan_ref
-                                                                            for n in wf.values()) if (plan_ref := call(S, P)["plan"]["edit_video"]["ref"]) else False)
+    plan_ref = call(S, P)["plan"]["edit_video"]["ref"]
+    r2v_in = next(n for n in wf.values() if n["class_type"] == "MiniMaxH3ReferenceToVideo")["inputs"]
+    check("the workflow gives the slice of the video (VHS) as the reference video, with its sound",
+          any(n["class_type"] == "VHS_LoadVideo" for n in wf.values()) and any(k.startswith("ref_videos.") for k in r2v_in)
+          and any(k.startswith("ref_video_audios.") for k in r2v_in), sorted(r2v_in))
     gen({"clip": 2, "branch": "b1", "random": True})
     r2v = call(M, "/test/cap", {})["r2v"]
     check("clip 2: its 192 frames, the voice numbered after the video's sound (<Audio 2>)",
-          r2v["videos"] and r2v["videos"][0][0] == 192 and "<Audio 2>" in (r2v["prompt"] or "") and "<Audio 1>" not in (r2v["prompt"] or ""), r2v)
+          r2v["videos"] and r2v["videos"][0][0] == 192 and "<Audio 2> is the voice-timbre reference" in (r2v["prompt"] or "")
+          and "<Audio 1> is the synchronized audio track of <Video 1>" in (r2v["prompt"] or ""), r2v)
     takes = call(S, P + "/takes")["clips"]
     rec = takes[0]["takes"][-1]["record"]
     check("the take records the video's SHA", rec["studio"]["refs"].get(plan_ref, {}).get("video") == res.get("sha") or
@@ -146,16 +165,17 @@ try:
     leaf = takes[1]["takes"][-1]["id"]
     out = call(S, P + "/assemble", {"clip": 2, "take": leaf})
     time.sleep(1.5); run_mock(); time.sleep(3)
-    asm = call(M, "/test/cap", {})["assembly"]
     jobs = call(S, P + "/jobs")["jobs"]
     check("assembly done", jobs[-1]["kind"] == "assemble" and jobs[-1]["status"] == "done", (out, jobs[-1]["status"], jobs[-1].get("error")))
-    check("…with the original sound of the segment (the generated one is silent here)", asm.get("audio_level", 0) > 0.01, asm)
+    # 0.50: assembled by Encore (ffmpeg); the segment's sound is at 1000 Hz, the fake previews at 300/400 Hz
+    normal = plan_core.normalize(call(S, P)["plan"]); rows = plan_core.timeline(normal)
+    mid = (rows[0]["visible"] + rows[0]["end"]) / 2 / 24 - plan_core.final_start(normal) / 24
+    check("…with the original sound of the segment", tone(last_export(root, "rue"), mid) == 1000, tone(last_export(root, "rue"), mid))
     # the same with the sound H3 made
     plan = call(S, P)["plan"]; plan["edit_video"]["sound"] = "h3"; call(S, P + "/plan", plan, "PUT")
     out = call(S, P + "/assemble", {"clip": 2, "take": leaf})
     time.sleep(1.5); run_mock(); time.sleep(3)
-    asm = call(M, "/test/cap", {})["assembly"]
-    check("sound « h3 »: the generated sound is kept", asm.get("audio_level", 1) < 0.001, asm)
+    check("sound « h3 »: the generated sound is kept", tone(last_export(root, "rue"), mid) == 300, tone(last_export(root, "rue"), mid))
 finally:
     srv.terminate()
 print(f"\n{sum(OK)}/{len(OK)} passed")

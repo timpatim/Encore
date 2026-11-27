@@ -57,7 +57,6 @@ try:
     call(S, P + "/import-plan?filename=rue.json", raw=open(fixture("rue_test_v1.plan.json"), "rb").read(), method="POST")
     for f in (fixture("fillette.png"), fixture("rue.png")):
         call(S, f"{P}/resources?kind=images&filename={os.path.basename(f)}", raw=open(f, "rb").read(), method="POST")
-    call(S, P + "/branches/b1", {"refs": {"fillette": {"image": "refs/images/fillette.png"}, "rue": {"image": "refs/images/rue.png"}}}, "PUT")
     root_p = root + "/projets/rue"
     gen = lambda body: (lambda j: (run(), take_of(j))[1])(call(S, P + "/generate", body))
     t1 = gen({"clip": 1, "branch": "b1"})
@@ -108,22 +107,15 @@ try:
     check("refused while a generation needs it", j6.get("status") == "queued" and out.get("HTTP") == 400 and on_disk(t5, 5), (j6.get("error"), out.get("error")))
     run()
 
-    # ---------------- 0.45: « Utiliser ce plan… »: the plan of a twig as master plan, of its branch or of a new branch
+    # ---------------- « Nouvelle branche avec ce plan… » (0.48: a master plan is no longer replaced)
     old = call(S, P + "/plan?branch=b1")["plan"]
     twig = call(S, P + f"/plan?branch=b1&leaf={t4}")
-    out = call(S, P + "/use-plan", {"branch": "b1", "leaf": t4, "target": "master"})
-    m = call(S, P + "/plan?branch=b1")["plan"]
-    check("the twig's plan becomes the master plan of its branch", [c["prompt"] for c in m["clips"]] == [c["prompt"] for c in twig["plan"]["clips"]], out.get("error"))
-    tr = call(S, P + "/trash")["entries"]
-    check("…the previous one is in the trash", tr and tr[0]["kind"] == "master", tr[:1])
-    call(S, P + f"/trash/{tr[0]['id']}/restore", {})
-    check("…and comes back from it", [c["prompt"] for c in call(S, P + "/plan?branch=b1")["plan"]["clips"]] == [c["prompt"] for c in old["clips"]])
-    out = call(S, P + "/use-plan", {"branch": "b1", "leaf": t4, "target": "new", "name": "Essai"})
+    out = call(S, P + "/use-plan", {"branch": "b1", "leaf": t4, "name": "Essai"})
     nb = out.get("branch") or {}
     st = (out.get("project") or {}).get("branch_states", {}).get(nb.get("id"), {})
     check("a new branch with this master plan, nothing taken over", nb.get("name") == "Essai" and not st.get("has_takes")
-          and [c["prompt"] for c in call(S, P + f"/plan?branch={nb['id']}")["plan"]["clips"]] == [c["prompt"] for c in twig["plan"]["clips"]], out.get("error"))
-    check("…the branch it comes from keeps its master plan", [c["prompt"] for c in call(S, P + "/plan?branch=b1")["plan"]["clips"]] == [c["prompt"] for c in old["clips"]])
+          and [c["summary"] for c in call(S, P + f"/plan?branch={nb['id']}")["plan"]["clips"]] == [c["summary"] for c in twig["plan"]["clips"]], out.get("error"))
+    check("…the branch it comes from keeps its master plan", [c["summary"] for c in call(S, P + "/plan?branch=b1")["plan"]["clips"]] == [c["summary"] for c in old["clips"]])
 
     # ---------------- a selection through a generation still waiting
     j5 = call(S, P + "/generate", {"clip": 5, "after": t4, "branch": "b1"})
@@ -133,7 +125,7 @@ try:
     check("a waiting generation can be selected", sel.get(5) == p5, sel)
     tw = call(S, P + f"/plan?branch=b1&leaf={p5}")
     check("…the plan of the selection goes through it", tw.get("chain") == [t1, t2a, t3, t4, p5] and call(S, P)["plan_leaf"] == p5, tw.get("error"))
-    out = call(S, P + "/use-plan", {"branch": "b1", "leaf": p5, "target": "new", "name": "Essai 2"})
+    out = call(S, P + "/use-plan", {"branch": "b1", "leaf": p5, "name": "Essai 2"})
     check("…and « Utiliser ce plan » works with it", (out.get("branch") or {}).get("name") == "Essai 2", out.get("error"))
     run()
     check("once made, the take is still selected", {c["index"]: c["selected"] for c in call(S, P + "/takes")["clips"]}.get(5) == p5)

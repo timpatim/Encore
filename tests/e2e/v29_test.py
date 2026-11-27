@@ -53,7 +53,8 @@ try:
             folds = page.locator(".tk-band-head .tk-fold")
             await folds.nth(1).click(); await page.wait_for_timeout(1200)
             active = await page.evaluate("H3Takes.activeBranch()")
-            check("folding the selected branch moves the selection to an unfolded branch", active in (ids[0], ids[2]), active)
+            check("folding the selected branch moves the selection to the first unfolded branch", active == ids[0], active)
+            check("… on its first twig", await page.locator(f".tk-card.chosen[data-take='{takes[ids[0]]}']").count() == 1)
             check("folded header shows no « selection »", "selection" not in await page.locator(".tk-band-head.folded").first.inner_text())
             saved = call(S, P + "/takes").get("selection_branch")
             check("the moved selection is saved", saved == active, (saved, active))
@@ -67,11 +68,10 @@ try:
                   await page.locator(".tk-band-head:not(.folded).active").count() == 1)
             await last.evaluate("e => e.click()"); await page.wait_for_timeout(500)
             check("clicking it anyway changes nothing", await page.locator(".tk-band-head.folded").count() == 2)
-            # same width, ▶▶ lined up
+            # same width, no ▶▶ on a folded branch
             boxes = [await heads.nth(k).bounding_box() for k in range(2)]
-            fills = [await heads.nth(k).locator(".tk-fill").bounding_box() for k in range(2)]
             check("folded headers have the same width", abs(boxes[0]["width"] - boxes[1]["width"]) < 1, boxes)
-            check("▶▶ lined up on the right", abs((fills[0]["x"] + fills[0]["width"]) - (fills[1]["x"] + fills[1]["width"])) < 1, fills)
+            check("no ▶▶ on a folded branch", await page.locator(".tk-band-head.folded .tk-fill").count() == 0)
             await page.screenshot(path="v29_folded.png")
             # all folded in the browser's memory (e.g. from an older visit): one is unfolded again
             await page.evaluate(f"localStorage.setItem('encore.folded.rue', JSON.stringify({json.dumps(ids)}))")

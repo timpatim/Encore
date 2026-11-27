@@ -133,8 +133,11 @@ def delete_take(root, name, take_id, confirm=False, busy=()):
             old = projects.branch_base(branch)
             entry["bases"][branch["id"]] = json.loads(json.dumps(branch["base"]))
             k = plan["bases"][branch["id"]]
-            if k:
-                branch["base"] = dict(branch["base"], takes=old[:k])
+            rest = old[:k]
+            while rest and not rest[-1]:       # 0.49: no clip left free at the end
+                rest.pop()
+            if any(rest):
+                branch["base"] = dict(branch["base"], takes=rest)
             else:
                 branch.pop("base", None)
     projects._write_json(path / "project.json", meta)

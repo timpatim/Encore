@@ -38,7 +38,12 @@ async def main():
         await page.screenshot(path="q1_manager.png")
         groups = page.locator(".studio-q-group")
         print("groups", await groups.count())
-        await groups.nth(1).drag_to(groups.nth(0), target_position={"x": 40, "y": 5}); await page.wait_for_timeout(1500)
+        # 0.48.2: a group is dragged by its ≡ handle
+        h = await groups.nth(1).locator(".studio-q-handle").bounding_box(); top = await groups.nth(0).bounding_box()
+        await page.mouse.move(h["x"] + h["width"] / 2, h["y"] + h["height"] / 2); await page.mouse.down()
+        for k in range(1, 11):
+            await page.mouse.move(h["x"] + h["width"] / 2, h["y"] + (top["y"] + 3 - h["y"]) * k / 10); await page.wait_for_timeout(30)
+        await page.mouse.up(); await page.wait_for_timeout(1500)
         q = call(S, "/api/queue"); print("after drag", [[(j["clip"], j["seed"] == C["seed"]) for j in g["jobs"]] for g in q["groups"]])
         await page.click(".studio-q-group >> nth=0 >> button:has-text('suspendre')"); await page.wait_for_timeout(1200)
         await page.click(".studio-q-group >> nth=1 >> .studio-q-line >> nth=0 >> button:has-text('annuler')"); await page.wait_for_timeout(600)

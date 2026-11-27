@@ -3,25 +3,12 @@
   "core_nodes": [
     "MiniMaxH3ReferenceToVideo",
     "MiniMaxH3SigmaShift",
-    "MiniMaxH3AudioVAECompatibility"
+    "MiniMaxH3AudioVAECompatibility",
+    "LoadImage",
+    "LoadAudio",
+    "VAEDecodeAudio"
   ],
   "packs": [
-    {
-      "id": "h3clipplan",
-      "name": "ComfyUI-H3-ClipPlan",
-      "url": "https://github.com/timpatim/ComfyUI-H3-ClipPlan.git",
-      "folder": "ComfyUI-H3-ClipPlan",
-      "required": true,
-      "nodes": [
-        "H3PlanClip",
-        "H3PlanSaveLatent",
-        "H3PlanAssemble",
-        "H3PlanReference",
-        "H3PlanVoice",
-        "H3PlanVideo"
-      ],
-      "why": "plans, takes and assembly: the nodes Encore drives"
-    },
     {
       "id": "multiref",
       "name": "ComfyUI-H3-Motion-Context-MultiRef",
@@ -29,11 +16,13 @@
       "folder": "ComfyUI-H3-Motion-Context-MultiRef",
       "required": true,
       "nodes": [
-        "MiniMaxH3SongMaskedAVContext",
+        "MiniMaxH3MotionContextSaveLatent",
+        "MiniMaxH3MotionContextLoadLatent",
         "MiniMaxH3GeneratedAVMaskedContext",
-        "MiniMaxH3StreamLiveMusicVideoToVHS"
+        "MiniMaxH3SongMaskedAVContext",
+        "MiniMaxH3ExistingVideoMaskedContext"
       ],
-      "why": "seams between clips, injected song, final assembly"
+      "why": "the takes kept to be continued, seams between clips, injected song, start and edited videos"
     },
     {
       "id": "vhs",
@@ -42,9 +31,10 @@
       "folder": "ComfyUI-VideoHelperSuite",
       "required": true,
       "nodes": [
-        "VHS_VideoCombine"
+        "VHS_VideoCombine",
+        "VHS_LoadVideo"
       ],
-      "why": "writing the videos"
+      "why": "reading and writing the videos"
     },
     {
       "id": "kjnodes",

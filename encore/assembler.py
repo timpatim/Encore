@@ -9,7 +9,7 @@ no wait in ComfyUI's queue). It follows the plugin's assembly (H3 Plan - Assembl
   overlap, a new scene keeps the previous clip's sound under its lead-in); an edited video with its original sound
   keeps that sound over the edited part.
 
-Used when every take has its preview and ffmpeg is there; otherwise Encore asks the plugin, as before."""
+Every take needs its preview, and ffmpeg (0.50: the plugin's assembly is not used any more)."""
 from __future__ import annotations
 
 import array
@@ -221,14 +221,12 @@ def build(project: Path, job, ffmpeg, target: Path, on_progress=None, procs=None
 
 
 def ready_for(project: Path, job, config):
-    """(ffmpeg, None) when Encore can assemble this job itself, else (None, why)."""
-    if config.get("assembly_engine", "ffmpeg") == "plugin":
-        return None, "assembly_engine is 'plugin' in config.json"
+    """(ffmpeg, None) when Encore can assemble this job, else (None, why) (0.50: it is the only way)."""
     ffmpeg = previews.find_ffmpeg(config)
     if not ffmpeg:
-        return None, "no ffmpeg"
+        return None, _t("assembler.no_ffmpeg")
     if previews_of(project, job) is None:
-        return None, "a take has no preview"
+        return None, _t("assembler.take_without_preview")
     if not re.match(r"^[0-9]+x[0-9]+$", f"{job['size'][0]}x{job['size'][1]}"):
-        return None, "unknown size"
+        return None, _t("assembler.unknown_size")
     return ffmpeg, None

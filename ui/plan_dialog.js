@@ -4,7 +4,7 @@
 // (alerts never needed to block); confirm and prompt are awaited at their call sites.
 const H3Dialog = (() => {
     const DANGER = /supprim|restaur|écraser|arrêter|annuler|interrompre|remplacer|perdues|invalidées|retirer/i;
-    function open(text, { input = null, cancel = true, ok = "OK", no: noLabel = _t("dialog.cancel"), danger = false, check = null } = {}) {
+    function open(text, { input = null, cancel = true, ok = "OK", no: noLabel = _t("dialog.cancel"), danger = false, check = null, choices = null } = {}) {
         return new Promise((resolve) => {
             const prev = document.activeElement;
             const overlay = document.createElement("div");
@@ -44,7 +44,9 @@ const H3Dialog = (() => {
                 cancelBtn.textContent = noLabel;
                 row.append(cancelBtn);
             }
-            row.append(okBtn);
+            // choose(): one button per choice instead of OK (Esc and « cancel » give null)
+            const picks = (choices || []).map((c) => { const b = document.createElement("button"); b.textContent = c.label; b.className = "primary"; b.onclick = () => done(c.value); return b; });
+            if (picks.length) row.append(...picks); else row.append(okBtn);
             box.append(row);
             overlay.append(box);
             const done = (value) => {
@@ -54,24 +56,26 @@ const H3Dialog = (() => {
                 resolve(value);
             };
             const yes = () => done(field ? field.value : box2 ? { checked: box2.checked } : true);
-            const no = () => done(field ? null : (cancel ? false : undefined));
+            const no = () => done(field || choices ? null : (cancel ? false : undefined));
             const onKey = (e) => {
                 if (!document.body.contains(overlay) || overlay !== [...document.querySelectorAll(".h3-dlg")].pop()) return;
                 if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); no(); }
-                else if (e.key === "Enter" && !(e.target && e.target.tagName === "BUTTON" && e.target !== okBtn)) { e.preventDefault(); e.stopPropagation(); yes(); }
+                else if (!picks.length && e.key === "Enter" && !(e.target && e.target.tagName === "BUTTON" && e.target !== okBtn)) { e.preventDefault(); e.stopPropagation(); yes(); }
             };
             okBtn.onclick = yes;
             if (cancelBtn) cancelBtn.onclick = no;
             overlay.addEventListener("mousedown", (e) => { if (e.target === overlay && cancel) no(); });
             document.addEventListener("keydown", onKey, true);
             document.body.append(overlay);
-            if (field) { field.focus(); field.select(); } else (danger && cancelBtn ? cancelBtn : okBtn).focus();
+            if (field) { field.focus(); field.select(); } else if (picks.length) picks[0].focus(); else (danger && cancelBtn ? cancelBtn : okBtn).focus();
         });
     }
     return {
         alert: (text) => open(text, { cancel: false }),
         confirm: (text, opts = {}) => open(text, { ok: opts.ok || _t("dialog.yes"), no: opts.no || _t("dialog.no"), danger: opts.danger ?? DANGER.test(String(text)), check: opts.check || null }),
         prompt: (text, value = "", opts = {}) => open(text, { input: value ?? "", ok: opts.ok || "OK" }),
+        // choose(text, [{value, label}]) -> Promise<value|null>
+        choose: (text, choices) => open(text, { choices }),
     };
 })();
 window.H3Dialog = H3Dialog;

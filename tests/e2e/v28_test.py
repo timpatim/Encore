@@ -94,7 +94,7 @@ try:
             await page.screenshot(path="v28_jobplan.png")
             await page.click(".tk-plan-modal >> text=Close"); await page.wait_for_timeout(300)
             # ≡ on a « generate » box (placeholder) or « next clip » box
-            ph = page.locator(".tk-placeholder").first; await ph.hover(); await ph.locator(".tk-plan-btn").click(); await page.wait_for_timeout(600)
+            ph = page.locator(".tk-cell").first; await ph.hover(); await ph.locator(".tk-plan-btn").click(); await page.wait_for_timeout(600)
             head = await page.locator(".tk-plan-modal .tk-box-head b").text_content()
             check("≡ of a « generate » box opens the clip's plan, nothing launched", "Plan of clip" in head and len([j for j in call(S, P + "/jobs")["jobs"] if j["status"] == "queued"]) == 1, head)
             check("≡ of a box: generation if launched now", "if launched now" in await page.locator(".tk-plan-modal .tk-plan-gen").inner_text())

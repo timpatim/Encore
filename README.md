@@ -28,12 +28,15 @@
 
 [MiniMax H3](https://huggingface.co/Comfy-Org/MiniMax-H3) makes clips of about ten seconds, with
 picture and sound, from reference images. A music video or a short is a series of such clips that
-follow one another. The ComfyUI plugin [ComfyUI-H3-ClipPlan](https://github.com/timpatim/ComfyUI-H3-ClipPlan)
-describes that series in a **plan** (a JSON file: one prompt per clip, which clip continues which,
-the references, the song). Encore is the application around it:
+follow one another. Encore describes that series in a **plan** (a JSON file: the subjects and files, one
+clip after another, which clip continues which, the song; format in [docs/PLAN_SPEC.md](docs/PLAN_SPEC.md))
+and is the application around it. ComfyUI does all the inference: Encore composes the prompts, prepares
+the files and sends ComfyUI workflows made of its own nodes and those of two node packs (see
+[Requirements](#requirements)). What it offers:
 
-- **Plan editor**: clips on a timeline over the song, prompts edited by section, references and
-  subjects as chips, checks of the plan and of each clip.
+- **Plan editor**: clips on a timeline over the song; subjects (a character, a place, an object…) with
+  their pictures and voice, named `@name` in plain fields; Encore writes the prompt in MiniMax's own form
+  (numbers, definitions, retention, task) and shows it, editable; checks of the plan and of each clip.
 - **Takes as a tree**: every generation is a take; a continuation is built on the exact take it
   follows. Try several takes, keep the best chain (a *twig*), go back to an earlier one. Each twig has
   its own plan: the clips already generated are frozen, the next ones can be rewritten.
@@ -51,9 +54,13 @@ ComfyUI is only the engine: Encore talks to it at its address and never changes 
 
 ## Screenshots
 
-**Plan of the selection: generated clips 🔒 as they were made, clips over the song, prompts by section**
+**Plan editor: the master plan of a branch with takes, its clips frozen (🔒, made by the master line), the fields of clip 2, the subjects and files on the right**
 
 ![Plan editor](docs/screenshots/plan_editor.png)
+
+**The same clip, « H3 prompt » tab: what MiniMax H3 gets, composed from the fields, with its numbers**
+
+![H3 prompt](docs/screenshots/plan_h3.png)
 
 **Launch panel: a new take of clip 2, over the takes; which twig's plan to start from, the clip, the seed**
 
@@ -67,8 +74,8 @@ ComfyUI is only the engine: Encore talks to it at its address and never changes 
 
 ![Generation queue](docs/screenshots/queue.png)
 
-*(Screenshots made with the robot example of the plugin; the takes there are stand-in animations,
-not real H3 renders.)*
+*(Screenshots made with the robot example of the `examples/` folder; the takes there are stand-in
+animations, not real H3 renders.)*
 
 ## Requirements
 
@@ -76,9 +83,13 @@ not real H3 renders.)*
 - A working **[ComfyUI](https://github.com/comfyanonymous/ComfyUI)** with MiniMax H3 support, on
   this PC or reachable on the network, and **git** (for the node packs).
 - The node packs below; Encore's installation screen can install them for you:
-  [ComfyUI-H3-ClipPlan](https://github.com/timpatim/ComfyUI-H3-ClipPlan) **3.11 or newer**,
-  ComfyUI-H3-Motion-Context-MultiRef, ComfyUI-VideoHelperSuite; optional: ComfyUI-KJNodes
-  (animated preview), the LBH latent upscaler nodes (upscale).
+  [ComfyUI-H3-Motion-Context-MultiRef](https://github.com/seitanism/ComfyUI-H3-Motion-Context-MultiRef)
+  (takes kept to be continued, seams, song, videos) and
+  [ComfyUI-VideoHelperSuite](https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite) (videos);
+  optional: ComfyUI-KJNodes (animated preview), the LBH latent upscaler nodes (upscale). Since 0.50 Encore
+  no longer uses ComfyUI-H3-ClipPlan.
+- **ffmpeg**, found by Encore (the one of VideoHelperSuite in ComfyUI's Python, or on the PATH): it cuts the
+  voices and the pieces of video it sends, and assembles the videos.
 - The H3 models (diffusion model, text encoder, VAE, turbo LoRA): the installation screen downloads
   the default ones.
 
@@ -95,14 +106,14 @@ Encore itself only uses Python's standard library: nothing to `pip install`.
    ComfyUI, download the default models.
 4. **☰ Projects > New project**: a name, *free* mode (H3 makes picture and sound) or *music video*
    (a song is laid under the clips).
-5. **master plan…** (branch header), then **Import a plan…**: a plan written by hand, by an LLM (the
-   plugin gives the
-   [system prompt](https://github.com/timpatim/ComfyUI-H3-ClipPlan/blob/main/docs/LLM_SYSTEM_PROMPT.md)
-   for that) or one of the plugin's `examples/`. Or write it there.
+5. **master plan…** (branch header), then **Import a plan…**: a plan written by hand, by an LLM (with the
+   [system prompt](docs/LLM_SYSTEM_PROMPT.md) of `docs/`) or one of the `examples/`. Or write it there.
 6. **Resources…**: import the pictures (and the song or voices); the song is chosen in **Project
-   settings**; the branch's **settings…** button gives a picture to each reference of the plan.
-7. On the takes screen: click the box of clip 1 to generate a take, **+ next clip…** for the next
-   clip, or **▶▶ complete** to queue the whole branch. Click a take to choose it.
+   settings**. On the plan screen, give each subject of the plan its pictures (✎ on the subject, or drop
+   a picture of the « Files of the project » onto it).
+7. On the takes screen: the top row of the branch is its **master line**, one box per clip of the master
+   plan; click the first one to generate it, or **▶▶ complete** to queue the whole line. **↻ new take…**
+   and **+ next clip…** make variants of it. Click a take to choose it.
 8. Hover the last take: **▶ assemble 1–k** makes the video; it shows up in the **▶ Videos** pane.
 
 The rest of this page is the full user guide.
@@ -168,7 +179,7 @@ The console window must stay open while you use it; Ctrl+C stops it.
 
 **You had H3 Studio?** Unzip `Encore` next to the `H3Studio` folder (in the same parent folder):
 at the first start, Encore takes over `config.json`, `defaults.json` and the queue (`queue.json`).
-Projects do not move. (In ComfyUI, the working copy keeps its `h3studio_…` name.)
+Projects do not move.
 
 ## First start: the « Welcome to Encore » screen
 
@@ -180,17 +191,21 @@ later with the **Installation…** button of the top bar (without blocking).
    Encore finds **ComfyUI's Python**: `python_embeded` (portable version), `.venv` or `venv`
    (manual install, Desktop app). Otherwise, give the path of its `python.exe` (conda for
    example); « Check » runs it and makes sure torch is there. **git** is also needed (Git for
-   Windows, git-scm.com).
+   Windows, git-scm.com). The screen also shows the **ffmpeg** Encore found (to cut the voices and
+   pieces of video it sends, and to assemble): the one VideoHelperSuite brings in ComfyUI's Python, or
+   the one on the PATH.
 2. **Custom nodes**: the packs Encore uses, with their state (loaded, installed but ComfyUI not
-   restarted yet, missing, version too old). The required ones (ComfyUI-H3-ClipPlan,
-   ComfyUI-H3-Motion-Context-MultiRef, ComfyUI-VideoHelperSuite) are checked from the start; the
+   restarted yet, missing). The required ones (ComfyUI-H3-Motion-Context-MultiRef,
+   ComfyUI-VideoHelperSuite) are checked from the start; the
    optional ones (ComfyUI-KJNodes for the animated preview, LBH nodes for the upscale) are checked
    as you like; a pack already in ComfyUI is checked and cannot be unchecked. Each name links to
    the pack's repository: **you can also install the packs yourself** (ComfyUI-Manager, git
    clone…), Encore detects them when ComfyUI restarts. **Install** does a `git clone` into
    `custom_nodes`, then installs the dependencies (`requirements.txt`) with ComfyUI's Python (`-s`
    for the portable version), without ComfyUI-Manager. The log shows below. A pack already present
-   is recognized by its folder name or by the address of its git repository.
+   is recognized by its folder name or by the address of its git repository. A
+   ComfyUI-H3-ClipPlan folder still in `custom_nodes` is pointed out: Encore no longer uses it since
+   0.50 (keep it if you use it directly in ComfyUI).
 3. **Restart ComfyUI**: Encore does not restart it itself. It detects it going down and coming
    back, reads the node list again, and the **Continue** button turns on when all the required
    packs are loaded.
@@ -241,21 +256,28 @@ node and model lists again.
   store\            (reserved)
 ```
 
-- **☰ Projects**: list, creation (name = folder name; free mode or music video).
+- **☰ Projects**: list, creation (name = folder name; free mode or music video). **🗑** on a project
+  card deletes it **for good** (no trash): the confirmation counts its takes, assembled videos and size
+  on the disk; its copies in ComfyUI's `input` and `output` folders go too. Refused while one of its
+  generations or assemblies is waiting or running.
 - **Import a plan…** (on the master plan screen of a branch): the file replaces the master plan of a
   branch that has no take yet; greyed once the branch has takes (make a new branch « from a plan file »).
   The seeds of the file are ignored. While the project has no take, the plan's mode, video and context
   become the project's.
-- **Resources…**: imports pictures, voices, songs and videos (copied into `refs\`). A big file shows a
+- **Resources…**: imports pictures, voices, songs and videos (copied into `refs\`), with its buttons or
+  by dropping files from the computer (an audio file goes to the section it is dropped on, otherwise Encore
+  asks voices or songs); files can also be dropped on « Files of the project » in the library. A big file shows a
   progress window (cancel leaves nothing behind); it is written as it arrives. When ComfyUI's folder is known
   (welcome screen), files are later copied straight into its `input` folder, with no size limit;
   otherwise they go through ComfyUI's upload route, which refuses files over 100 MB unless ComfyUI is
   started with `--max-upload-size` (the queue shows « sending … to ComfyUI »). A video the browser
   cannot play (AVI, ProRes, HEVC…) gets a light H.264 copy for the players only, made by ffmpeg (the
-  one of ComfyUI's Python, or on the PATH) with its progress; ComfyUI always gets the original. 🗑 deletes a file: refused while
-  a branch or the start video uses it (the message says where), after a warning listing the
-  takes that still need it, at once otherwise; its copy in ComfyUI goes too when
-  ComfyUI's folder is known. An identical file is
+  one of ComfyUI's Python, or on the PATH) with its progress; ComfyUI always gets the original. Each file
+  shows its state: **used** (by a plan, the song or the video of the project, or a generation waiting),
+  **takes only** (only takes already made used it) or **unused**. 🗑 deletes a file: refused while
+  a plan, the song, the video or a waiting generation uses it (the message says where), after a warning
+  listing the takes that still need it, at once otherwise. **Delete the unused files** removes all the
+  unused ones at once, after confirmation. Their copy in ComfyUI goes too when ComfyUI's folder is known. An identical file is
   not copied twice. Accepted pictures: PNG, JPEG, WebP,
   BMP; the content is checked, and JPEG files named `.jfif`, `.jfi`, `.jpe`, `.pjpeg` or `.pjp`
   are saved as `.jpg` (same bytes).
@@ -268,49 +290,87 @@ node and model lists again.
 
 The **takes screen** is the main screen: branches, takes, queue, assembled videos. The plan is edited
 on the **plan screen**, opened from it, which replaces it until **← Takes** (the plan is saved on the
-way back if it was changed):
+way back if it was changed). The plan screen has a row of its own under the project's: **← Takes**, what
+it shows (● when changes are not saved), **⚙ Plan settings**, then **↶ Undo**, **↷ Redo** and **Save the
+plan**, which act on the plan shown. The project's buttons (Resources, Trash, Assembled videos, Project
+settings) stay in the row above:
 
-- **master plan…** (branch header): the plan of the branch before any take, the starting point of
-  its new twigs. Every clip can be changed.
+- **master plan…** (branch header): the starting pattern of the branch; its master line follows it.
+  **Once the branch has a take** (or a generation waiting), **it is frozen**: its clips are read only
+  (🔒, with the take of the master line that made them) and so are its subjects (🔒 in the library: their
+  window shows them without « Save »), with the files they use. Clips can still be added at the end
+  (they stay free until the master line generates them) and new subjects for them. To change the rest,
+  duplicate the branch (without its clips: the copy's master plan is free).
 - **Plan of the selection…** (selection bar, above the graph): the plan of the selected twig. The
   clips already generated in it show 🔒 and are read only (their prompt is the one the take was made
   with); clips can be added, changed or removed after them. The changes stay in this twig: the
-  master plan and the other twigs do not change. **Use this plan…** makes this plan the master plan of
-  the branch (the previous one goes to the trash) or of a new branch with the settings of this one
-  (nothing taken over): to try prompts that work elsewhere.
+  master plan and the other twigs do not change. **New branch with this plan…** makes it the master plan
+  of a new branch with the settings of this one (nothing taken over): to try prompts that work elsewhere.
+  A master plan is never replaced once its branch has takes.
 
-**Plans of a branch.** A branch has a master plan. Each take has the plan of what comes after it (its
-*suite*): a new take of clip k records the clips k+1 to the end it was launched with. The plan of a
+**Plans of a branch.** A branch has a master plan and a **master line**: the takes made from the master
+plan itself, one per clip, in a row at the top of its band (« master plan » tag), followed by empty boxes
+for the clips not generated yet. A box of the line is generated once, in order (the first empty one is
+clicked, or ▶▶): a change is made with **↻ new take…**, which makes a fork. After a take of the line comes
+the master plan itself. Each other take has the plan of what comes after it (its *suite*): a new take of
+clip k records the clips k+1 to the end it was launched with. The plan of a
 twig is the frozen part of each of its takes, then the suite of its last take. Nothing is copied: a
 fork references the takes it continues. Once a branch has a take, the plan settings that would make
 its takes inconsistent (mode, start or edited video, context) are frozen; assembly options (start
 video in the final video, sound and common instruction of an edit) are not.
 
-Three columns: the clip list, the clip editor, and on the right what the clip can use (references
-with their thumbnails, subjects, lines or lyrics, stock sentences) and the checks. The plan
-settings (mode, context, crossfade, song, declared references) are in **⚙ Plan settings**.
+Three columns: the clip list, the clip editor, and on the right the library (subjects of the plan,
+files of the project, stock sentences) and the checks. The plan settings (mode, context, crossfade,
+song, video) are in **⚙ Plan settings**.
 
-- **@ and drag and drop**: in the sections, `<Subject N>` shows as `@name`. Typing `@` opens a
-  filtered list (subjects, `{picture:…}`, lines or lyrics, stock sentences): arrows, Enter or Tab,
-  Esc. The labels of the right column can be dragged into any text. H3 always receives
-  `<Subject N>`: the numbers are recomputed when the prompt is written.
-- **subject_definitions**: one block per subject (working name, references, definition); ↑ ↓
-  renumber everywhere; renaming does not change the prompt (the name is kept in `_subjects`,
-  ignored by the nodes).
-- **retention_analysis**: one line per subject (mode in a list), added or removed with it. A
-  section of another shape is edited as text.
-- **summary**: the `[reference generation]` prefix is added automatically.
-- **detailed_description**: style, then one block per `[Shot N]`. The required opening sentence
-  (continuation, or lead-in of a new scene) follows how the clip is linked to the previous one, and
-  changes with it. An opening sentence written by hand (plans made by an LLM) is kept.
-- **« ↺ from the previous clip »** on the style, the overall_soundscape and the non_diegetic_music.
-- **+ clip** takes over the references, subjects, retention_analysis, style and overall_soundscape
-  of the selected clip; ▾ offers an empty clip.
+**Subjects and files.** A plan has **subjects**: a character, a place, an object, an outfit, a style, an
+action or a pose. Each one has a name (`@robot`), a kind, a description in English, as many pictures as
+needed (each with what it gives: face, outfit, scene…; one picture can serve several subjects) and, in
+free mode, a voice. **+ subject** or ✎ opens its window; a picture of « Files of the project », or a file
+from the computer, can be dropped onto it; clicking a picture's thumbnail replaces it (its role kept), from
+the project's images or imported directly. The files are those of the project (**Resources…**); the plan
+names them by a label made automatically from the file name.
+
+**Pictures to supply.** A plan imported with labels but no files (written elsewhere, for instance) shows
+each missing picture as a dashed box with its label and note, and lists them in the library section
+« Images to supply ». Choosing or importing (or dropping) an image fills the label: its name, note and role
+are kept, so the clips that use it stay right.
+
+**The fields of a clip** (« Fields » tab): plain text, the subjects named `@name`.
+
+- **Anchors**: the picture the clip starts from (first frame; not on a clip that continues the previous
+  one), keyframes at a given second, the picture it ends on (last frame). Choose a file in the list or
+  drop one from the library.
+- **Summary**: what the clip shows. **Shots**: the style, then `[Shot 1] …`, `[Shot 2] At 00:04.000 …`.
+  **Sound** and **Music**: the ambience, the music (in a music video, the section of the song).
+- **@ and drag and drop**: typing `@` opens a filtered list (subjects, lines or lyrics, stock
+  sentences, « create @name »): arrows, Enter or Tab, Esc. A subject can be dragged into any text.
+- **/ for the camera**: typing `/` in a text opens MiniMax's camera vocabulary: moves (push in, pan,
+  tilt, arc, tracking…) followed by their amplitude and speed, cuts to a new shot, framings (close-up,
+  wide shot, over the shoulder…). The sentence is written in English where the caret is.
+- **Lines** (free mode): `@name says: <d>[French] …</d>`. The speaker of each line is found
+  automatically: the subject named in its sentence, or the one of the clip's dialogue whose text matches.
+  Speakers are numbered S1, S2… in the order they speak; write `@name (S)` only to choose another speaker.
+- **Subjects of the clip**: the subjects its texts name, each with how closely the clip keeps its
+  pictures (identical, partial, the attribute only, loose inspiration), how closely it keeps its voice,
+  and a note for this clip only (« wears a cap »). A counter shows the pictures, voices and files used
+  against H3's limits (9 pictures, 3 voices, 12 files).
+
+**The « H3 prompt » tab** shows what MiniMax H3 will get, composed by Encore from the fields: subjects
+numbered `<Subject N>` in the order they appear, pictures `<Picture N>`, voices `<Audio N>`, the
+definitions, the retention of each subject, the task prefix (`[video continuation + reference
+generation]`…) and the required opening sentence of a continuation or a new scene. The chips above it
+give each number. The text can be **changed by hand**: it is then sent as it is (✎ on the tab) and the
+fields no longer change it; « Back to the composed prompt » undoes that. In a text written by hand,
+`@name` still works and gets its number.
+
+- **« ↺ from the previous clip »** on the style, the sound and the music.
+- **+ clip** takes over the subjects and the texts of the selected clip; ▾ offers an empty clip.
 - **Passage of the song** (music video): « ▶ whole passage » (overlap included) and « ▶ new part »,
   played from the branch's song; bars of the passage in the song and of the overlap. The clip
   lyrics are below.
-- Thumbnails, voices (▶) and song come from the branch of the plan shown.
-- Showing a clip never changes its prompt: it is only written again for the section you edit.
+- A clip already generated (🔒, plan of a selection) keeps the subjects and files it was made with,
+  even if the plan changes them afterwards.
 
 Everywhere in the application, a drop-down list of at least 8 items (LoRA, models…) opens with a
 filter field (several words allowed), arrows and Enter.
@@ -333,34 +393,42 @@ hand.
 ## Branches
 
 A project says what the video is (mode, video, song, context: **Project settings**). **Branches** try
-variations of it: picture size, segment of the video, references (picture and voice of each name of the
-plan), LoRA, upscale, prompts. They are set in the **settings…** window of the branch (one button in its
+variations of it: picture size, segment of the video, LoRA, upscale, and its master plan (subjects with
+their pictures and voices, prompts). They are set in the **settings…** window of the branch (one button in its
 header). The size: presets by format (16:9, 9:16, 4:3, 3:4, 3:2, 2:3) and
 megapixels (0.2 to 2; 0.5 MP by default, that is 960 × 544 in 16:9; same sizes as ComfyUI,
 1 MP = 1024 × 1024 pixels), or a free size in multiples of 32. A 0.2 MP branch lets you test a
 prompt quickly before a 1 MP branch (the same seed does not give the same video at another size).
 The same screen sets the **reference size** (`max` by default, or `match`), passed to the H3
 reference encoder: it is no longer a field of the plan (`ref_image_size` is removed from the plan
-on import or save). A branch keeps its set of references to the end; several branches let you try other
-pictures, voices or sizes side by side. **Once a branch has a take, its size, the segment of its video
-and the files of the references its takes use are frozen**: greyed in the windows, with a tooltip saying
-why (a reference not used yet can still get a file). To try other values, duplicate the branch. LoRA,
-upscale and reference size can always change.
+on import or save). Several branches let you try other pictures, voices or sizes side by side: give
+the subjects of each branch's master plan other pictures. **Once a branch has a take, its size and the
+segment of its video are frozen**: greyed in the windows, with a tooltip saying why. To try other values,
+duplicate the branch. LoRA, upscale and reference size can always change. The takes keep the subjects
+and files they were made with.
 
 - A new project has « Branch 1 », with an empty master plan. **+ new branch** opens a window:
-  - **Empty**: references, settings and master plan of the last branch made;
-  - **From a plan file…**: its master plan is the file;
-  - **Duplicate a branch**: its settings and master plan, **without clips** (everything can change
-    until its first take), or **with the clips 1 to k of the selection**: they are taken over by
-    reference (no file is copied), shown dimmed in the new band (« ⇡ Branch 1 »), and generation goes
-    on from clip k+1. Its master plan is the plan of that selection. The window lists the references
-    with the first clip that uses them: those of the clips taken over stay fixed (« Marie from clip 6:
-    take over clips 1 to 5 at most to keep her free »). A branch whose takes are taken over by another
-    one cannot be deleted before it.
+  - **Empty**: settings and master plan of the last branch made;
+  - **From a plan file…**: its master plan is the file.
+- **duplicate** (branch header): a new branch with its settings and master plan, **without clips** (its
+  master plan can change again until its first take), or **with clips of the selection**: the dialog shows
+  the selection as small thumbnails, scene by scene (✂ between them). The clips taken over form **portions**,
+  each from the start of a scene: clicking a clip takes it over with its scene from its start, clicking a clip
+  taken over leaves it free with the rest of its scene (a clip that continues another one is never taken over
+  without it). For 1→2→3 | 4→5→6 | 7→8→9: 1→2→3 and 7→8→9, or 1→2, 4→5 and 7→8, or 1, 4→5 and 7.
+  They are taken over by
+  reference (no file is copied), shown dimmed in the new band (« ⇡ Branch 1 »), and its master line makes the
+  clips left free: an empty box for each, the clips taken over after it hang on it. The clips left free start
+  from the plan of the selection and stay editable in the master plan (until the master line freezes them);
+  their length and link are locked, in the master plan and in the launch panel, so the portions after them
+  stay at their moment of the song; a clip taken over after a clip left free waits
+  for it (its ↻ and + are greyed). Its master plan is the plan of that selection, with its subjects; the clips taken
+  over keep the subjects and files they were made with; ↻ new take… and + next clip… work on them, the new
+  take being a variant of the duplicated branch (the branch it comes from does not change). A branch whose
+  takes are taken over by another one cannot be deleted before it.
   Making a branch starts no generation.
-- Each branch is a horizontal band (tree or columns), with on the left its color, its name
-  (double-click or « rename »), its pictures, its voices, its song (hover a thumbnail: the large
-  picture).
+- Each branch is a horizontal band (a tree), with on the left its color, its name (a field: type the
+  new name, Enter or a click elsewhere saves it, Esc gives the old one back), its size and its song.
 - **delete** (branch header, not while the branch is generating): moves its takes, its plans and its
   assembled videos to the trash, after a warning that counts them. The takes another branch takes over
   stay (shown in that branch). A branch number is never used again.
@@ -370,19 +438,22 @@ upscale and reference size can always change.
 - **Trash…** (project bar): what was deleted waits there. **Restore** puts an item back whole (a take
   with what followed it, a branch with its takes, master plan and videos, the clips other branches took
   over); **Erase** or **Empty the trash** deletes the files for good.
-- **generate**: clip 1 of a branch, from its master plan.
+- **The boxes of the master line**: the first empty one (▶) opens the launch panel for that clip of the
+  master plan, shown read only (seed, LoRA and upscale can be set); the next ones wait for it.
 - **+ next clip…** (on a take that has no continuation yet, even a take still queued, and in the
   dotted box to its right, always there, even after the end of the plan): opens the launch panel for
   the next clip after this take, pre-filled with the next clip of the selection's plan, else of the
-  master plan, else a copy of the clip before (prompt, length, references, lines), continuing it (↪).
+  master plan, else a copy of the clip before (texts, length, subjects, lines), continuing it (↪).
 - **↻ new take…** (orange arrow on a take, also on a generation still queued or running): opens the
   launch panel for a new take of the same clip, after the same take of the previous clip (on clip 1:
   from the master plan). It makes a fork: a new twig, with its own plan.
-- **▶▶ (branch header)**: fills the selected twig (or, when the selection is in another branch, the
-  latest twig of this one) to the end of its plan, in order. Its tooltip says what it will do
-  (« generate the clips 5 to 16 », « branch complete »); a summary (clips, estimated time) asks for
+- **▶▶ complete (branch header)**: fills the empty boxes of the branch's master line, in order.
+  **▶▶ complete the selection** (selection bar): generates the rest of the selected twig's plan, after
+  its last take (the selection ending the master line is the master line). Their tooltip says what they
+  will do (« generate the clips 5 to 16 », « master line complete »); a summary (clips, estimated time) asks for
   confirmation, with the box « assemble at the end » (checked by default). Random seeds, branch
-  settings. Refused while generations of the branch are already queued.
+  settings. Generations of the branch already queued or running do not block it: the twig goes through
+  them and the rest is queued after them.
 - **▶ assemble 1–k** also exists on hover of a take still queued: the assembly is planned and
   starts as soon as this generation (and those it depends on) are finished.
 - **The selection** (click on a take) is a twig: the take clicked and the takes it continues, back
@@ -400,12 +471,13 @@ upscale and reference size can always change.
 
 **↻ new take…** and **+ next clip…** open the same panel, over the takes screen:
 
-- **Start from the plan of**: when several twigs go through this take (for instance 4a and 4b after
-  3a), choose whose plan the new take starts from; hovering a twig highlights it in the graph;
-  « whole plan ▸ » shows it.
-- **Seed**: a new take of a clip starts with the seed of the take it redoes (🎲 for a random one;
-  same seed and same prompt: Encore warns that the take will be identical); the next clip gets a
-  random seed.
+- **Plan of the following clips**: when twigs going through this take have different plans for the clips
+  after it, one choice per distinct plan: « This take · the plan it was made with » first, then each other
+  plan with the twig's takes as thumbnails (the new take dashed) and a yellow tag of what changes
+  (« clip 3 changed »). Hovering a choice highlights its twig in the graph; « Read the chosen plan in full ▸ »
+  shows it. Hidden when every twig keeps the same plan.
+- **Seed**: drawn at random (🎲 for another one), a new take too; « ↺ seed of the take redone » puts
+  its seed back (same seed and same prompt: Encore warns that the take will be identical).
 - **LoRA and upscale** of this take (pre-filled with those of the take redone, or of the branch for
   the next clip).
 - **The clip**, in the plan editor: change its prompt before launching. Only this clip and the
@@ -418,13 +490,12 @@ with this seed and the same settings.
 ### Folding a branch
 
 The ▾ arrow at the top left of a branch header folds it: the branch becomes a thin band (color,
-name, number of takes, generations waiting, ▶▶ still available). ▸ or a double click unfolds it.
+name, number of takes, generations waiting; no ▶▶). ▸ or a double click unfolds it.
 The folded branches are remembered per project in this browser; the overview map follows. Centering
 the view on a take of a folded branch (« ⌖ takes ») unfolds it.
 At least one branch always stays unfolded (the arrow of the last one is greyed out). A folded branch
-never holds the selection: folding the branch of the selection moves it to an unfolded branch (the one
-of the latest valid take of clip 1). The folded bands all have the same width, ▶▶ lined up on the
-right.
+never holds the selection: folding the branch of the selection moves it to the first twig (the top
+line of the tree) of the first unfolded branch. The folded bands all have the same width.
 
 ## Starting from an existing video
 
@@ -467,12 +538,11 @@ Video** of a branch's master plan:
    clips: a new scene at each change of shot, a shot longer than a clip cut in equal parts that
    continue each other (« clips of at most 10.1 s » by default). The cuts are on the grid where clips
    can end; move them afterwards like any clip. It asks before replacing the clips of the plan.
-4. Each clip gets a prompt that keeps the framing, motion and timing of `<Video 1>`, with `{edit}`
-   where the edit goes. Write the edit once in **✎ Common instruction**, the first entry of the clip
-   list (also reached from the settings): drag a reference from the right or type `@` to name a picture
-   (« the man is replaced by {picture:homme} »); it is added to every clip that uses `{edit}`. A clip
-   can complete it (`{edit}; the man also wears a red scarf`) or replace it (erase `{edit}`). The
-   entry says which clips use it and shows how H3 gets it.
+4. Each clip gets texts that keep the framing, motion and timing of `<Video 1>`. Write the edit once
+   in **✎ Common instruction**, the first entry of the clip list (also reached from the settings): name
+   the subjects with `@` (« the man is replaced by @hero »); it opens the summary of every edited clip,
+   whose own summary can complete it (« the man also wears a red scarf »). The entry says which clips
+   use it and which subjects it names.
 
 **Going on after the segment.** The clips that end before the end of the segment edit the video (🎞 in
 the list and on the timeline, which shows the end of the segment); the next ones continue it like any
@@ -491,7 +561,7 @@ generation or assembly is frozen at the time of the click (plan, settings, refer
 upscale) and sent when its turn comes. The queue survives an Encore restart.
 
 - Groups: a job and those that continue it (« + next clip… » or ↻ started on a waiting job).
-  Their order is fixed; the whole group moves (drag ≡, or ⤒ ↑ ↓ ⤓).
+  Their order is fixed; the whole group moves (drag its ≡ handle: a line shows where it lands and the list scrolls at its edges; or ⤒ ↑ ↓ ⤓).
 - **Batches**: everything a branch ▶▶ starts (generations and final assembly) makes one block,
   « ▶▶ Branch 1: clips 3 to 16 + assembly ». It is moved, suspended or cancelled as a whole; above
   5 jobs, the list folds. A generation started after a job of the batch joins it; another
@@ -507,7 +577,10 @@ upscale) and sent when its turn comes. The queue survives an Encore restart.
 - **Suspend** a group: the queue skips it until « resume ».
 - **Cancel**: a job, and those that depend on it (after confirmation). If a generation fails, those
   that depended on it are removed from the queue.
-- The indicator, always visible on the right of the « Encore » bar, sums up the state at a glance:
+- **Cancel all** (top of the manager): every job of the queue, of every project, the running one
+  included, after confirmation.
+- The indicator, always visible on the right of the « Encore » bar (fixed width: a text too long ends
+  with « … », the whole text is in its tooltip), sums up the state at a glance:
   « Empty queue » (gray), « ▶ generating · project · clip · step 3/8 · ≈ … left · +n waiting »
   with a progress bar (green), « ⏸ Queue paused · n waiting » (orange), « ✖ failed » (red, until
   the manager is opened). A click opens it. The browser tab title shows the state too (« ▶ 3/8 ·
@@ -531,7 +604,7 @@ default.
 - Pass 2: manual list (default `0.9035, 0.8000, 0.6316, 0.3158, 0`, in 4 steps) or rest of the
   schedule; sampler and LoRA of pass 2 can be set apart (by default those of the settings).
 - The seam with the previous clip and the song are put back as they are before pass 2 (ComfyUI's
-  Separate/Concat AV Latent, Latent Cut, Replace Video Latent Frames nodes; plugin unchanged).
+  Separate/Concat AV Latent, Latent Cut, Replace Video Latent Frames nodes).
 - Changing these settings changes no take; takes made with it carry the ⇧ mark (details on
   hover). A single take can use other settings, or none (see below).
 - Time left is estimated separately for generations with upscale.
@@ -550,8 +623,8 @@ The LoRA stack of the Project settings always applies. « Extra » LoRA can be a
 
 A continuation does not inherit the LoRA of the previous clip. These LoRA
 also apply to pass 2 of the upscale. Each thumbnail carries its badges (L, L×2: extra LoRA, ⇧:
-upscale; details on hover), like the queue and the video info. The plugin is not modified: Encore
-adds the LoRA loaders to the workflow it sends.
+upscale; details on hover), like the queue and the video info. Encore adds the LoRA loaders to the
+workflow it sends.
 
 The plan window **≡** (on a take, a generation in progress, a placeholder or a column header) ends
 with a **Generation** block: models, LoRA, upscale settings (and where they come from), seed, size,
@@ -560,14 +633,16 @@ reference image size and song — those used for a take, or those that would be 
 ## Assembly
 
 On hover, each take shows a **▶ assemble 1–k** button: it adds to the queue the assembly of clips 1
-to k along this twig (the take and those it continues). The selection does not change. Encore sends these takes to ComfyUI and runs the plugin's assembly node
-(same result as in ComfyUI): the branch's song for a music video, the sound generated by the clips
-in free mode, the branch size.
+to k along this twig (the take and those it continues). The selection does not change. Encore makes it
+itself with ffmpeg, from the takes' previews (nothing is decoded again, ComfyUI is not needed): the
+branch's song for a music video, the sound generated by the clips in free mode, the branch size. A take
+without its preview cannot be assembled: make it again.
 
 - The video is copied into `exports\`: `project_branch_YYYY-MM-DD_HHhMM.mp4`, with a sheet (branch,
   takes, clips covered).
 - It appears in the « ▶ Videos » panel on the right of the takes screen, under its branch name (hover:
-  play and source takes highlighted; click: large; « ⌖ takes »: center the view).
+  play and source takes highlighted; double click: large, looping; « ⌖ takes »: center the view). When
+  the panel is folded, its tab shows the assemblies waiting or running, and launching one says so.
 - **Assembled videos…** (top bar) lists them all, with a player.
 - Next to the video, `<name>.infos.md` (readable summary: table of the clips with start/end in the
   video, take, seed, size, model, LoRA, sampler, steps, upscale; then the details and prompt of
@@ -575,38 +650,41 @@ in free mode, the branch size.
   assembly). « infos » button in the player and in « Assembled videos… »: a page in Encore's
   colors (summary, clip table with their length, one card per clip with its branch dot, prompts),
   with links to the .md and the .json. Videos assembled before v0.11 have none.
-- Each assembly has its own working copy in ComfyUI (purged at the end): several can be queued,
-  even during generations; ComfyUI handles them in order. A copy of the video also stays in
-  `ComfyUI\output\h3_clip_plan\h3studio_…\`.
+- Several assemblies can be queued, even during generations; Encore makes them one after the other.
 
 ### Plan of a clip, plan of a take
 
 - **≡** before the name of a clip (column header): the clip as it is in the plan of the selection,
-  read only (length, link, place in the video, references with their pictures in the branch shown,
-  lyrics or lines, the prompt by section).
+  read only (length, link, place in the video, subjects with their pictures, anchors, lyrics or lines,
+  the H3 prompt).
 - **≡** on a placeholder (on hover): the plan of the clip now, with the pictures of that branch — to
   read the prompt again before launching.
 - **≡** on a generation still queued or running (on hover): the plan it was launched with.
 - **≡** at the top left of a take (on hover): the frozen part of this take — the clip exactly as it
-  was generated (length, link, references with their pictures, lyrics or lines, the prompt by
-  section, the common instruction of an edit) — then the Generation block.
+  was generated (length, link, subjects with their pictures, anchors, lyrics or lines, the H3 prompt,
+  the common instruction of an edit) — then the Generation block.
 
 ## Generating
 
-Each take thumbnail shows the length of its clip (e.g. « 8.7 s »).
+Each take thumbnail shows the length of its clip (e.g. « 8.7 s »). A video opened large (take,
+generation, assembled video) plays in a loop. **◎ Generation running** (top bar of the takes screen)
+brings the take being generated to the middle of the view, unfolding its branch; the queue itself is
+in the indicator of the « Encore » bar.
 
 Navigation: the wheel scrolls up and down, Shift + wheel zooms (25 to 200 %) around the cursor;
 dragging (on the background or a thumbnail) scrolls left / right, up to the edges of the graph; the
-scroll bar scrolls up and down. « fit » fits the width of the graph to the window. The branch
+scroll bar scrolls up and down, until the lowest take reaches the top of the view. « fit » fits the
+width of the graph to the window. The branch
 column (left) and the row of clip names (top) always stay visible when scrolling; they follow the
 zoom.
 
 Overview (corner of the area, bottom right by default, ⚙ to change corner, ✕ to minimize): the
-whole area (graph and empty part of the window) in miniature with a frame for the visible part;
-clicking or dragging on it centers the view, the wheel zooms.
+whole graph in miniature, filling it, with a frame for the visible part (cut at its edges when the view
+goes past the graph) and the selection in blue; clicking or dragging on it centers the view, the wheel
+zooms.
 
 ▶ Videos panel (on the right, when videos are assembled, foldable with ▸): the videos per branch,
-the latest at the top; hover = play and source takes highlighted, click = player, « ⌖ takes »
+the latest at the top; hover = play and source takes highlighted, double click = player, « ⌖ takes »
 centers the view on the last take of the video.
 
 « generate » on clip 1, ↻ new take… for another version, + next clip… for the next clip from a
@@ -630,16 +708,29 @@ What Encore does for each generation:
 
 1. it composes the plan of the twig (frozen part of each previous take, then the clip and those after
    it) and records the plan of what follows the new take;
-2. it sends ComfyUI the plan (`input\h3studio\<project>\<branch>\plan.json`), the reference files
-   (same folder, named after their content; the song: `input\h3studio_<project>_…`) and, for a
-   continuation, the continued take with those it is built on;
-3. it builds the workflow with the plugin's nodes and puts it in ComfyUI's queue;
-4. it follows the generation and, once finished, copies the take (latent, signature, preview) into
-   the project's `takes\` and chooses it.
+2. it composes the clip's H3 prompt (the one of the « Prompt H3 » tab) and prepares its files with
+   ffmpeg: the voices cut to H3's limits (2 to 15 s each, 15 s in all), the song with silence before it
+   when it starts later than the plan, the end of the start video or the slice of the edited video at the
+   branch size (kept in `cache\comfy\` of the project);
+3. it sends them to ComfyUI (`input\encore\<project>\` for the pictures, `input\encore_<project>_…`
+   for the others, named after their content) and, for a continuation, the latent of the continued take
+   (`output\encore\<project>\latents\`);
+4. it builds the workflow, only with ComfyUI's own nodes (MiniMax H3 Reference to Video, Load Image,
+   Load Audio, sampler, VAE decode), those of MultiRef (load and save the latent, contexts of the
+   continuation, of the song and of a video) and VHS (load and write videos), and puts it in ComfyUI's
+   queue: ComfyUI does all the inference;
+5. it follows the generation and, once finished, copies the take (latent, preview) into the project's
+   `takes\`, writes its record and chooses it.
 
-On ComfyUI's side, the working copy is `output\h3_clip_plan\h3studio_<project>__<branch>\` (one per
-branch): the prefix avoids any mix with your plans used directly in ComfyUI. When no generation of
-the project is waiting any more, Encore empties it (option on the home page).
+On ComfyUI's side, what a generation makes is in `output\encore\<project>\` (takes, previews, latents
+sent). When no generation of the project is waiting any more, Encore empties it (option on the home
+page) — only when ComfyUI's folder is given in Installation…: ComfyUI cannot delete files through its
+API, so with a ComfyUI on another machine they stay.
+
+**Takes made before 0.50**: their latent was written by ComfyUI-H3-ClipPlan (`.pt`). When such a project
+is opened, Encore rewrites them once in MultiRef's format (`.safetensors`, a window shows the progress; a
+plain rewriting of files, nothing is computed). A take that cannot be converted stays visible and can be
+assembled, but cannot be continued.
 
 **Live preview** (Project settings… > Live preview): the thumbnail of the running generation shows
 the preview received at each step; double-click to enlarge it.
@@ -673,12 +764,14 @@ to Encore's queue and are sent again when it answers (twice at most); what Encor
 - `encore/`: the server (Python standard library only). `encore/locales/`: one file per language.
 - `ui/`: the sources of the page (JavaScript, `editor_shell.html`). After a change, rebuild the page with
   `python ui/build.py`, which writes `web/index.html` (the translations and the light theme are put in it).
-- `tests/`: unit and end-to-end tests, with a fake ComfyUI that runs the plugin's real nodes; see
+- `tests/`: unit and end-to-end tests, with a fake ComfyUI whose fake nodes check what they get; see
   [tests/README.md](tests/README.md).
 - `tests/screenshots/make_screenshots.py`: makes the screenshots of this page (`docs/screenshots/`) with the fake
-  ComfyUI and the robot example of the plugin.
+  ComfyUI and the robot example of `examples/`.
+- `docs/PLAN_SPEC.md` and `docs/plan.schema.json`: the plan format; `docs/LLM_SYSTEM_PROMPT.md`: the system prompt
+  to have a plan written by a language model.
 - [CHANGELOG.md](CHANGELOG.md): what changed in each version.
 
 ## License
 
-GPL-3.0 (see [LICENSE](LICENSE)), like the [ComfyUI-H3-ClipPlan](https://github.com/timpatim/ComfyUI-H3-ClipPlan) plugin.
+GPL-3.0 (see [LICENSE](LICENSE)).

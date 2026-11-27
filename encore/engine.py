@@ -1,18 +1,19 @@
 """Encore - generations: the Studio decides, ComfyUI only computes.
 
-For each generation the Studio
-  1. sends ComfyUI what the existing ComfyUI-H3-ClipPlan nodes read: the plan, the reference
-     files and, for a continuation, the take it continues (with the takes that one is built on);
-  2. builds the workflow (Reference, Voice, Clip, sampler, SaveLatent, preview) and queues it;
-  3. follows it (websocket for the progress, /queue and /history for the end);
-  4. copies the new take (latent, signature, preview) into the project and chooses it.
+For each generation the Studio (0.50: without the ComfyUI-H3-ClipPlan plugin)
+  1. composes the clip's H3 prompt and prepares its files with ffmpeg (prepare.py: voices cut to H3's limits,
+     the song shifted on the plan's timeline, the end of the start video or the slice of the edited video);
+  2. sends them to ComfyUI, with the latent of the take it continues;
+  3. builds the workflow (ComfyUI's own nodes, MultiRef, VHS: workflows.clip_workflow) and queues it; ComfyUI does
+     all the inference;
+  4. follows it (websocket for the progress, /queue and /history for the end);
+  5. fetches the new take (latent, preview) into the project, writes its record and chooses it.
 
-ComfyUI's side is a working copy, under names of its own so that it never mixes with the plans
-used directly in ComfyUI:
-    input/h3studio/<project>/plan.json, reference files       (sent by the Studio)
-    output/h3_clip_plan/h3studio_<project>/latents, clips      (takes being made or continued)
-When no generation of the project is waiting any more, that working copy is emptied (configurable):
-the takes are in the project, and leftovers must not interfere with the next generations.
+ComfyUI's side, under names of its own:
+    input/encore/<project>/ (pictures), input/encore_<project>_* (voices, song, pieces of video)
+    output/encore/<project>/ (latents sent, takes and previews made)
+When no generation of the project is waiting any more, Encore empties it (configurable), when it knows ComfyUI's
+folder: ComfyUI cannot delete files through its API.
 """
 from __future__ import annotations
 
@@ -22,30 +23,24 @@ import json
 import os
 import random
 import threading
+import traceback
 import time
 import uuid
 from pathlib import Path
 
-from . import assembler, comfy, comfy_setup, plan_core, plans, projects, takeplan, takes
+from . import assembler, comfy, comfy_setup, latents, plan_core, plans, prepare, previews, projects, takeplan, takes
 from .diagnostic import Diagnostic, image_size
 from .exports import export_name, write_infos
 from .projects import StudioError
-from .workflows import (assemble_workflow, clip_needs, clip_workflow, kj_frames_value, latent_frames, missing_nodes,
-                        upscale_plan)
+from .workflows import (clip_needs, clip_workflow, kj_frames_value, latent_frames, missing_nodes, ref_inputs,
+                        saved_latent_name, upscale_plan)
 
-MIRROR_PREFIX = "h3studio_"
-INPUT_DIR = "h3studio"
-STEP_KEYS = {"20": "engine.preparing", "25": "engine.generating", "26": "engine.saving", "27": "engine.decoding", "28": "engine.preview", "10": "engine.assembling"}
+# ComfyUI's side (0.50): input/encore/<project>/ (pictures), input/encore_<project>_* (voices, song, pieces of video),
+# output/encore/<project>/latents (takes continued), takes, previews (what a generation makes, fetched at its end)
+WORK_DIR = "encore"
+STEP_KEYS = {"20": "engine.preparing", "19": "engine.preparing", "25": "engine.generating", "26": "engine.saving",
+             "27": "engine.decoding", "28": "engine.preview"}
 ACTIVE = ("queued", "running")
-
-
-def mirror_name(project: str, branch: str) -> str:
-    """ComfyUI's working copy of one branch (the plugin compares takes with each other: one set per copy)."""
-    return f"{MIRROR_PREFIX}{project}__{branch}"
-
-
-def plan_file_of(project: str, branch: str) -> str:
-    return f"{INPUT_DIR}/{project}/{branch}/plan.json"
 
 
 # --------------------------------------------------------------------------- engine
@@ -78,8 +73,6 @@ class Engine:
         self.order = []             # ids of the jobs waiting in the Studio's own queue, in order (all projects)
         self.paused = False         # nothing new is sent to ComfyUI
         self.loaded = set()         # projects whose jobs.json was read
-        self.mirror = {}            # (project, branch) -> {(clip, take id)} present in ComfyUI's working copy
-        self.mirror_url = None      # the ComfyUI that mirror describes: another address starts from nothing
         self.comfy_down_at = None   # last time ComfyUI did not answer while jobs were running there
         self.uploaded = {}          # (comfy url, subfolder, name) -> sha already sent
         self.socket = None
@@ -108,14 +101,6 @@ class Engine:
         with self.lock:
             self.comfy_down_at = time.time()
             self.uploaded.clear()
-            self.mirror, self.mirror_url = {}, None
-
-    def _mirror(self, name, branch):
-        """The takes known to be in ComfyUI's copy of a branch; forgotten when the ComfyUI address changes."""
-        url = self.studio.config.get("comfy_url")
-        if url != self.mirror_url:
-            self.mirror, self.mirror_url = {}, url
-        return self.mirror.setdefault((name, branch), set())
 
     def _ensure_socket(self):
         url = self.studio.config["comfy_url"]
@@ -538,7 +523,7 @@ class Engine:
             # the take this generation will make, as far as it is known: ↻ « new take » works before it is finished
             st = job.get("studio") or {}
             out["record"] = {"id": job["take_id"], "seed": job.get("seed"), "pending": True,
-                             "studio": {k: st.get(k) for k in ("branch", "portion", "predecessor", "extra_loras", "upscale")
+                             "studio": {k: st.get(k) for k in ("branch", "portion", "predecessor", "extra_loras", "upscale", "line")
                                         if st.get(k) is not None}}
         if job.get("pending"):
             out["waiting_for"] = _t("engine.waiting_for_clips", count=len(job["pending"]), clips=_ranges(sorted(int(k) for k in job["pending"])))
@@ -595,40 +580,44 @@ class Engine:
                     self.order.remove(job["id"])
             self._save(name)
             self._save_queue()
-        for job in targets:
-            if job.get("kind") == "assemble" and job.get("dispatched"):
-                self._purge_workspace(client, job)
         self.wake.set()
         return self.list_jobs(name)
 
     def generate(self, name, clip_index, after=None, plan_from=None, entry=None, seed=None, branch=None, loras=None,
-                 upscale_settings=None, edit_instruction=None):
+                 upscale_settings=None, edit_instruction=None, line=False):
         """A new take of clip clip_index (chantier A).
         after: the take of the previous clip it follows (a take, or the take id of a generation still waiting);
         None for clip 1. plan_from: the leaf of the twig whose plan gives the clip (when entry is None) and the
         suite of the new take; by default the twig ending with `after` (« clip suivant »), or the master plan.
         entry: the clip as set in the launch panel. seed: None = random. loras / upscale_settings: None = the
-        branch's. edit_instruction: None = that of the plan."""
+        branch's. edit_instruction: None = that of the plan. line: a cell of the master line (0.48): the clip of the
+        master plan, after the take of the line for the clip before (entry, plan_from and after are not used)."""
         with self.launch_lock:
             return self._generate(name, int(clip_index), (after or "").strip() or None, (plan_from or "").strip() or None,
                                   entry, None if seed in (None, "") else int(seed), branch or None, loras,
-                                  upscale_settings, edit_instruction)
+                                  upscale_settings, edit_instruction, line=bool(line))
 
     # ------------------------------------------------------------------ ▶▶ compléter: the rest of a twig's plan
     def fill_twig(self, name, branch_id, leaf=None, dry_run=True, assemble=True):
-        """Generates the clips of a twig's plan that have no take yet (after its leaf; the whole master plan
-        without a leaf), each one after the one before, with a random seed. dry_run: only says what would be
+        """Generates the clips of a twig's plan that have no take yet, each one after the one before, with a random
+        seed. Without a leaf: the empty cells of the branch's master line (0.48); the selection ending with the last
+        take of the master line (and no plan of its own) is the master line too. dry_run: only says what would be
         generated."""
         with self.launch_lock:
             path = self._project(name)
             branch = projects.find_branch(projects.read_meta(path)["branches"], branch_id)
             with self.lock:
-                self._load(name)
-                busy = [j for j in self.jobs.values() if j["project"] == name and j["status"] in ACTIVE
-                        and j.get("kind") != "assemble" and j.get("branch") == branch_id]
-            if busy:
-                raise StudioError(_t("engine.generation_s_of_this_branch_are", v0=len(busy)), code="busy")
-            twig = plans.plan_of(path, branch_id, leaf or None, pending=self._pending_takes(name), project_name=name)
+                self._load(name)       # generations already queued on the branch do not block: the twig goes through them
+            pending = self._pending_takes(name)
+            line = plans.line_of(path, branch_id, pending=pending)
+            end = plans.line_end(line)
+            on_line = not leaf or (leaf == line.get(end) and plans.suite(path, leaf) is None)
+            if on_line:
+                twig = plans.plan_of(path, branch_id, None, pending=pending, project_name=name)
+                twig = dict(twig, locked=end, chain=[line[i] for i in range(1, end + 1)])
+                leaf = line.get(end)
+            else:
+                twig = plans.plan_of(path, branch_id, leaf, pending=pending, project_name=name)
             plan_raw = twig["plan"]
             errors, _w = plan_core.validate(json.loads(json.dumps(plan_raw)))
             if errors:
@@ -638,7 +627,10 @@ class Engine:
             steps = int(settings.get("steps") or 8)
             w, h = branch.get("width") or 960, branch.get("height") or 544
             items, total, known = [], 0.0, True
-            for clip in plan["clips"][twig["locked"]:]:
+            skip = set(line) if on_line else set()        # 0.49: the clips taken over after clips left free
+            for clip in plan["clips"][(0 if on_line else twig["locked"]):]:
+                if (on_line and (clip["index"] <= end or clip["index"] in skip)):
+                    continue
                 estimate = self._total_estimate({"units": int(w) * int(h) * int(clip["frames"]) / 1e6, "steps": steps,
                                                  "upscale": bool(projects.upscale_of(branch).get("enabled"))})
                 if estimate is None:
@@ -647,7 +639,7 @@ class Engine:
                     total += estimate
                 items.append({"clip": clip["index"], "name": clip.get("name") or "", "frames": clip["frames"],
                               "new_scene": not (clip["continue"] and clip["index"] > 1)})
-            todo = {"branch": branch_id, "branch_name": branch["name"], "leaf": leaf, "items": items,
+            todo = {"branch": branch_id, "branch_name": branch["name"], "leaf": leaf, "items": items, "line": on_line,
                     "eta": round(total) if items and known else None}
             if dry_run or not items:
                 return todo
@@ -657,15 +649,53 @@ class Engine:
             # a duplicated branch without its own take yet: after the last clip it takes over
             launched, made, previous = [], {}, leaf or (twig["chain"][-1] if twig["chain"] else None)
             for item in items:
-                job = self._generate(name, item["clip"], previous, previous, None, None, branch_id, None, None, None,
-                                     lot=lot, lot_label=label)
+                if on_line and item["clip"] - 1 in line and item["clip"] - 1 not in made:
+                    previous = line[item["clip"] - 1]     # after a portion taken over
+                job = self._generate(name, item["clip"], previous, None if on_line else previous, None, None, branch_id, None,
+                                     None, None, lot=lot, lot_label=label, line=on_line)
                 launched.append(job["id"])
-                made[item["clip"]] = job["id"]
+                made[item["clip"]] = job["take_id"]
                 previous = job["take_id"]
             assembly = None
             if assemble:
-                assembly = self._assemble_twig(name, previous, lot=lot, lot_label=label)
+                last = previous
+                if on_line:         # 0.49: the line goes on with the clips taken over after the last one generated
+                    k = items[-1]["clip"] + 1
+                    while k in line:
+                        last, k = line[k], k + 1
+                assembly = self._assemble_twig(name, last, lot=lot, lot_label=label, branch_id=branch_id)
             return dict(todo, launched=launched, assembly=assembly["id"] if assembly else None)
+
+    def project_busy(self, name):
+        """Number of generations or assemblies of a project still waiting or running."""
+        with self.lock:
+            self._load(name)
+            return sum(1 for j in self.jobs.values() if j.get("project") == name and (j["status"] in ACTIVE or j["status"] == "harvest"))
+
+    def forget_project(self, name):
+        """A deleted project: its finished jobs leave the list (none is waiting: see project_busy)."""
+        with self.lock:
+            for jid in [i for i, j in self.jobs.items() if j.get("project") == name]:
+                self.jobs.pop(jid, None)
+                if jid in self.order:
+                    self.order.remove(jid)
+            self.loaded.discard(name)
+            self._save_queue()
+
+    def files_waiting(self, name):
+        """The project files the generations still waiting or running will send (they must not be deleted)."""
+        out = set()
+        with self.lock:
+            for job in self.jobs.values():
+                if job.get("project") != name or job["status"] not in ACTIVE:
+                    continue
+                spec = job.get("spec") or {}
+                for files in (spec.get("files") or {}).values():
+                    out.update(v for k, v in (files or {}).items() if v and not k.endswith("_sha"))
+                for key in ("song",):
+                    if spec.get(key):
+                        out.add(spec[key])
+        return out
 
     def job_plan(self, name, job_id):
         """The plan a queued or running generation was launched with (the ≡ of its card)."""
@@ -685,8 +715,9 @@ class Engine:
                     and j.get("take_id") and j["status"] in ACTIVE + ("harvest",)}
 
     # ------------------------------------------------------------------ assemblies (from a take, a twig or the queue)
-    def assemble(self, name, clip=None, take_id=None, job_id=None):
-        """Assembles the twig ending with take_id (or with the take a waiting generation will make)."""
+    def assemble(self, name, clip=None, take_id=None, job_id=None, branch=None):
+        """Assembles the twig ending with take_id (or with the take a waiting generation will make). branch: the
+        branch that takes over take_id, when it is a clip taken over (0.49)."""
         with self.launch_lock:
             if job_id:
                 with self.lock:
@@ -695,9 +726,9 @@ class Engine:
                 if not job or job["project"] != name or job["kind"] != "clip" or job["status"] not in ACTIVE:
                     raise StudioError(_t("engine.this_generation_is_no_longer_waiting"))
                 return self._assemble_twig(name, job["take_id"], lot=job.get("lot"), lot_label=job.get("lot_label"))
-            return self._assemble_twig(name, str(take_id or ""))
+            return self._assemble_twig(name, str(take_id or ""), branch_id=branch or None)
 
-    def _assemble_twig(self, name, leaf_id, lot=None, lot_label=None):
+    def _assemble_twig(self, name, leaf_id, lot=None, lot_label=None, branch_id=None):
         """The assembly of the clips 1..k of a twig. Takes still to come (generations waiting) are given when they
         are harvested. The plan sent is the plan of the twig as its takes were made."""
         path = self._project(name)
@@ -707,14 +738,17 @@ class Engine:
         if leaf_id not in known and leaf_id not in pending:
             raise StudioError(_t("engine.take_no_longer_exists", leaf_id=leaf_id))
         leaf_record = known[leaf_id][1] if leaf_id in known else pending[leaf_id][1]
-        branch_id = takes.take_branch(leaf_record, None)
+        # branch_id: a clip taken over is assembled in the branch that takes it over (its leaf is not its own)
+        if not branch_id or leaf_id not in plans.kept_of(path, branch_id).values():
+            branch_id = takes.take_branch(leaf_record, None)
         branch = projects.find_branch(project["branches"], branch_id)
         twig = plans.plan_of(path, branch_id, leaf_id, known, pending, project_name=name)
-        count = twig["locked"]
+        count = len(twig["chain"]) if leaf_id in plans.kept_of(path, branch_id).values() else twig["locked"]
         raw = dict(twig["plan"], clips=twig["plan"]["clips"][:count])
         plan = plan_core.normalize(json.loads(json.dumps(raw)))
-        chosen = {i: t for i, t in twig["takes"].items() if t in known}
-        waiting = {i: pending[t][1]["job"] for i, t in twig["takes"].items() if t not in known}
+        steps = {int(i): t for i, t in twig["takes"].items() if int(i) <= count}
+        chosen = {i: t for i, t in steps.items() if t in known}
+        waiting = {i: pending[t][1]["job"] for i, t in steps.items() if t not in known}
         return self._make_assembly(name, path, raw, plan, project["settings"], branch, chosen, count, leaf=leaf_id,
                                    pending=waiting, wait_for=list(waiting.values()), lot=lot, lot_label=lot_label)
 
@@ -724,34 +758,24 @@ class Engine:
         for takes still to generate (resolved when they are harvested). raw: the plan of the twig."""
         branch_id = branch["id"]
         free = plan["mode"] == "free"
-        workspace = f"{branch_id}_a{uuid.uuid4().hex[:8]}"
         with self.lock:
             self._load(name)
             waiting = {j.get("export") for j in self.jobs.values() if j["project"] == name and j.get("kind") == "assemble"
                        and j["status"] in ACTIVE + ("harvest",)}
         export = export_name(path, name, branch["name"], taken=waiting)
-        try:
-            info = self._object_info()
-        except comfy.ComfyError as exc:
-            raise StudioError(str(exc)) from exc
+        # 0.50: Encore assembles itself with ffmpeg, from the takes' previews (assembler.py): ComfyUI is not needed
         start = plan.get("start_video") if (plan.get("start_video") or {}).get("in_assembly") else None
         edit = plan.get("edit_video") if (plan.get("edit_video") or {}).get("sound") == "original" else None
-        missing = [n for n in ["VAELoader", "H3PlanAssemble"] + ([] if free else ["LoadAudio"])
-                   + (["H3PlanVideo", "MiniMaxH3AudioVAECompatibility"] if start else [])
-                   + (["H3PlanVideo"] if edit else []) if n not in info]
-        if missing:
-            raise StudioError(_t("engine.nodes_missing_from_comfyui") + ", ".join(missing)
-                              + (_t("engine.video_node_needs_plugin") if "H3PlanVideo" in missing else ""))
         start_video = None
         if start:                                     # the segment opens the video: the project's start video
-            rel = (projects.effective_refs(path, branch, plan).get(start["ref"]) or {}).get("video")
+            rel = projects.video_file(path, plan)
             video_file = projects.safe_join(path, rel or "")
             if not rel or not video_file.is_file():
                 raise StudioError(_t("engine.start_video_not_chosen"))
             start_video = {"name": start["ref"], "video": rel, "sha": takes.file_sha(video_file)}
         edit_video = None
         if edit:                                      # the final video keeps the edited video's sound
-            rel = (projects.effective_refs(path, branch, plan).get(edit["ref"]) or {}).get("video")
+            rel = projects.video_file(path, plan)
             video_file = projects.safe_join(path, rel or "")
             if not rel or not video_file.is_file():
                 raise StudioError(_t("engine.edit_video_not_chosen"))
@@ -764,7 +788,7 @@ class Engine:
                         "start_video": start_video, "edit_video": edit_video},
                "project": name, "branch": branch_id, "kind": "assemble", "clips": count,
                "frames": int(plan_core.timeline(plan)[count - 1]["end"]) - plan_core.final_start(plan),
-               "workspace": workspace, "leaf": leaf,
+               "leaf": leaf,
                "takes": {str(k): v for k, v in chosen.items()}, "pending": {str(k): v for k, v in (pending or {}).items()},
                "parentJob": None, "waitFor": list(wait_for or []), "lot": lot, "lot_label": lot_label,
                "export": export, "status": "queued", "progress": None, "step": None,
@@ -790,7 +814,7 @@ class Engine:
 
     # ------------------------------------------------------------------ launching
     def _generate(self, name, index, after, plan_from, entry, forced_seed, branch_id, take_loras, upscale_settings,
-                  edit_instruction, lot=None, lot_label=None):
+                  edit_instruction, lot=None, lot_label=None, line=False):
         path = self._project(name)
         project = projects.read_project(self.studio.root, name)
         settings, branches = project["settings"], project["branches"]
@@ -798,6 +822,16 @@ class Engine:
             raise StudioError(_t("engine.an_active_lora_has_no_file"))
         known = plans.records_by_id(path)
         pending = self._pending_takes(name)
+        if line:
+            # a cell of the master line: generated once, in order, after the take of the line for the clip before
+            if not branch_id:
+                raise StudioError(_t("engine.no_branch_create_one_with_new"))
+            cells = plans.line_of(path, branch_id, known, pending)
+            if index in cells:
+                raise StudioError(_t("engine.line_cell_done", index=index))
+            if index != plans.line_end(cells) + 1:
+                raise StudioError(_t("engine.line_cell_order", index=index, before=plans.line_end(cells) + 1))
+            after, plan_from, entry = cells.get(index - 1), None, None
 
         # the take before this one (it continues it, or the new scene is timed after it)
         after_job = None
@@ -816,17 +850,20 @@ class Engine:
             if after_index != index - 1:
                 raise StudioError(_t("engine.the_take_of_clip_this_clip", v0=index - 1))
             # the branch of the take before, unless it is one the given branch takes over (duplicated with clips)
-            if not branch_id or after not in plans.base_of(path, branch_id):
+            if not branch_id or after not in plans.kept_of(path, branch_id).values():
                 branch_id = takes.take_branch(after_record, branch_id)
+            elif plans.holes_of(path, branch_id):
+                # 0.49: after a clip taken over that follows a clip left free, that clip must have a take here first
+                plans.chain(path, after, known, pending, plans.selection_prefer(path, branch_id), branch=branch_id)
         if not branch_id:
             raise StudioError(_t("engine.no_branch_create_one_with_new"))
         branch = projects.find_branch(branches, branch_id)
-        taken_over = projects.branch_base(branch)
-        if index <= len(taken_over):
-            raise StudioError(_t("engine.clip_taken_over", index=index, branch=branch["name"], k=len(taken_over)))
+        # (0.48.2) a clip the branch takes over from another one can get a take of its own: a variant in this branch,
+        # after the clip taken over before it; the branch it comes from does not change
 
-        # the plan: the twig before (portions), this clip, then the suite of the twig it is taken from
-        source = plans.plan_of(path, branch_id, plan_from or after, known, pending, project_name=name)
+        # the plan: the twig before (portions), this clip, then the suite of the twig it is taken from (the master
+        # plan for the master line)
+        source = plans.plan_of(path, branch_id, None if line else (plan_from or after), known, pending, project_name=name)
         if plan_from and index > 1 and (len(source["chain"]) < index - 1 or source["chain"][index - 2] != after):
             raise StudioError(_t("engine.plan_from_not_through", v0=index - 1))
         src = source["plan"]
@@ -838,11 +875,18 @@ class Engine:
             raise StudioError(_t("engine.the_plan_has_no_clip", index=index))
         entry = json.loads(json.dumps(entry))
         entry.pop("seed", None)
-        before = plans.plan_of(path, branch_id, after, known, pending, project_name=name)["plan"] if after else {"clips": [], "refs": {}}
+        kept = plans.kept_of(path, branch_id)
+        if plans.holes_of(path, branch_id) and index < max(kept):
+            # 0.49: before a portion taken over, the clips keep their length (the portion stays at its moment)
+            want = ((plans.plan_of(path, branch_id, None, known, pending)["plan"]["clips"] or [])[index - 1] or {}).get("frames")
+            if want is not None and int(entry.get("frames") or 0) != int(want):
+                raise StudioError(_t("engine.portion_frames_locked", index=index, frames=int(want)))
+        before = plans.plan_of(path, branch_id, after, known, pending, project_name=name)["plan"] if after else {"clips": []}
         composed = plans.head(src)
         if edit_instruction is not None and isinstance(composed.get("edit_video"), dict):
             composed["edit_video"]["instruction"] = str(edit_instruction)
-        composed["refs"] = {**(before.get("refs") or {}), **(composed.get("refs") or {})}
+            if isinstance(entry.get("defs"), dict):
+                entry["defs"].pop("edit_instruction", None)
         composed["clips"] = before["clips"][:index - 1] + [entry] + json.loads(json.dumps(src["clips"][index:]))
         composed["project"] = name
         composed.pop("seed", None)
@@ -875,7 +919,7 @@ class Engine:
         if upscale and clip["continue"]:     # clip 1 too when it continues the start video
             context = int(plan_core.timeline(plan)[index - 1]["context"])
             context_latent = latent_frames(context) if context else 0
-        refs, problems = clip_needs(plan, index, {"refs": projects.effective_refs(path, branch, plan), "song": branch.get("song") or ""})
+        refs, problems = clip_needs(plan, index, {"video": projects.video_file(path, plan), "song": branch.get("song") or ""})
         if problems:
             raise StudioError(_t("engine.clip_references_button_of_branch", index=index, v1=', '.join(problems), v2=branch['name']))
 
@@ -894,12 +938,16 @@ class Engine:
         except comfy.ComfyError as exc:
             raise StudioError(str(exc)) from exc
         missing = missing_nodes(info, settings, music=not free, upscale=upscale,
-                                video=any(r.get("video") for r in refs))
+                                video=any(r.get("video") for r in refs), voices=free and any(r.get("voice") for r in refs),
+                                continues=bool(clip["continue"] and index > 1))
         if missing:
             raise StudioError(_t("engine.nodes_missing_from_comfyui") + ", ".join(missing)
                               + (_t("engine.kjnodes_preview_install_comfyui_kjnodes_or")
                                  if "ModelPreviewOverrideKJ" in missing else "")
-                              + (_t("engine.video_node_needs_plugin") if "H3PlanVideo" in missing else ""))
+                              + (_t("engine.multiref_needed") if any(n.startswith("MiniMaxH3") and n not in
+                                 ("MiniMaxH3SigmaShift", "MiniMaxH3ReferenceToVideo") for n in missing) else ""))
+        if clip["continue"] and index > 1 and after in known and not takes.latent_ok(path, index - 1, after):
+            raise StudioError(_t("engine.take_cannot_be_continued", take=after))
         if extra_loras:
             known_loras = set(((((info.get("LoraLoaderModelOnly") or {}).get("input") or {}).get("required") or {}).get("lora_name") or [[]])[0] or [])
             unknown = [l["name"] for l in extra_loras if known_loras and l["name"] not in known_loras]
@@ -928,7 +976,6 @@ class Engine:
                 "parent_take": after if cont and after in known else None,
                 "settings": settings, "upscale": upscale, "context_latent": context_latent}
 
-        instruction = ((raw.get("edit_video") or {}) if isinstance(raw.get("edit_video"), dict) else {}).get("instruction")
         studio_info = {
             "branch": branch_id,
             "refs": {n: {"image": f["image_sha"], "voice": f["voice_sha"], **({"video": f["video_sha"]} if f.get("video") else {})}
@@ -944,10 +991,10 @@ class Engine:
                            loras=[{"name": l["name"], "strength": l["strength"]} for l in projects.active_loras(settings)]),
             "extra_loras": extra_loras,
             # the portion of plan this take is made with, and the take before it: a take never changes
-            "portion": {"clip": entry, "edit_instruction": instruction if isinstance(instruction, str) else None,
-                        "refs_desc": {n: (raw.get("refs") or {}).get(n) for n in entry.get("refs") or []}},
+            "portion": {"clip": dict(entry, defs=plan_core.snapshot_defs(raw, plan, index))},
             "predecessor": after,
             "raw_start": plan_core.timeline(plan)[index - 1]["raw_start"],
+            **({"line": True} if line else {}),
         }
         if upscale:
             studio_info["upscale"] = {k: upscale[k] for k in ("summary", "upscaler", "model", "w0", "h0", "start_mp", "steps",
@@ -962,8 +1009,13 @@ class Engine:
                "parentJob": after_job, "seed": seed, "status": "queued", "loras": extra_loras,
                "progress": None, "step": None, "error": None, "take": None, "created": time.time(), "studio": studio_info,
                "lot": lot, "lot_label": lot_label}
-        # what comes after the new take: the suite of the twig it was taken from (its clips after this one)
-        plans.set_suite(path, take_id, index, plans.suite_from(raw, index))
+        # the master plan of the branch no longer changes (a clip of the master line freezes that clip and its subjects)
+        plans.freeze(path, branch_id, index if line else None,
+                     (studio_info["portion"]["clip"].get("defs") or {}).get("subjects") or {} if line else (), known, pending)
+        # what comes after the new take: the suite of the twig it was taken from (its clips after this one); after a
+        # take of the master line comes the master plan itself
+        if not line:
+            plans.set_suite(path, take_id, index, plans.suite_from(raw, index))
         with self.lock:
             self.jobs[job["id"]] = job
             self._enqueue(job)
@@ -973,42 +1025,127 @@ class Engine:
 
     # ------------------------------------------------------------------ sending a job to ComfyUI
     def _dispatch_clip(self, client, job):
-        """Sends what a frozen generation needs (plan, references, song, takes continued) and queues it."""
-        name, branch_id, spec = job["project"], job["branch"], job["spec"]
+        """Prepares and sends what a frozen generation needs (pictures, voices, song, the video or the take it
+        continues), builds its workflow and queues it (0.50: ComfyUI's own nodes, MultiRef and VHS)."""
+        name, spec = job["project"], job["spec"]
         path, raw, index = self._project(name), spec["raw"], job["clip"]
-        with self.lock:
-            others = [j for j in self.jobs.values() if j is not job and j["project"] == name and _branch(j) == branch_id
-                      and (j.get("dispatched") and j["status"] in ACTIVE or j["status"] == "harvest")]
-        if not others:
-            self._purge_branch(client, name, branch_id)        # nothing left over from earlier sessions
-        plan_file = self._send_plan(client, name, branch_id, raw)
-        sent_refs = []
+        studio = job.get("studio") or {}
+        width, height = int(studio.get("width") or spec["settings"]["width"]), int(studio.get("height") or spec["settings"]["height"])
+        ffmpeg = previews.find_ffmpeg(self.studio.config)
+        sent = dict(json.loads(json.dumps(raw)), project=name, version=plan_core.PLAN_VERSION,
+                    ref_image_size=studio.get("ref_image_size") or projects.DEFAULT_REF_SIZE)
+        try:
+            plan = plan_core.normalize(sent)
+        except plan_core.PlanError as exc:
+            raise StudioError(_t("engine.the_plan_has_error_s", v0=len(exc.errors), v1=exc.errors[0])) from exc
+        entry, row = plan["clips"][index - 1], plan_core.timeline(plan)[index - 1]
+        free = plan["mode"] == "free"
+        # the project files, unchanged since the launch
+        local = {}
         for ref_name in spec["refs"]:
             f = spec["files"].get(ref_name) or {}
-            item = {"name": ref_name, "image": None, "voice": None, "video": None}
             for kind in ("image", "voice", "video"):
                 if f.get(kind):
                     local_file = projects.safe_join(path, f[kind])
                     if not local_file.is_file() or takes.file_sha(local_file) != f.get(kind + "_sha"):
                         raise StudioError(_t("engine.the_file_of_has_changed_or", ref_name=ref_name, v1=f[kind]))
-                    item[kind] = self._send_input(client, local_file, f[kind + "_sha"], f"{INPUT_DIR}/{name}", job=job)
-            sent_refs.append(item)
+                    local[(ref_name, kind)] = (local_file, f[kind + "_sha"])
+        has_image = {n for (n, kind) in local if kind == "image"}
+        has_voice = {n for (n, kind) in local if kind == "voice"} if free else set()
+        edit_spec = plan.get("edit_video") if plan_core.edit_slice(plan, index) else None
+        edit_sound = False
+        if edit_spec:
+            if (edit_spec["ref"], "video") not in local:
+                raise StudioError(_t("engine.edit_video_not_chosen"))
+            prepare.need_ffmpeg(ffmpeg, _t("prepare.what_video"))
+            edit_sound = prepare.probe(ffmpeg, local[(edit_spec["ref"], "video")][0])[1]
+        # the prompt composed by Encore, its pictures and voices in the order of <Picture i> / <Audio j>
+        try:
+            prompt, image_names, voice_names, notes = plan_core.resolve_prompt(
+                entry["prompt"], entry["refs"], has_image, has_voice, use_voices=free, audio_offset=1 if edit_sound else 0)
+        except plan_core.PlanError as exc:
+            raise StudioError("; ".join(exc.errors)) from exc
+        if len(image_names) > plan_core.MAX_REFS or len(voice_names) > plan_core.MAX_VOICES \
+                or len(image_names) + len(voice_names) > plan_core.MAX_REF_FILES:
+            raise StudioError(_t("engine.too_many_refs", index=index, images=len(image_names), voices=len(voice_names)))
+        here = f"{WORK_DIR}/{name}"
+        root_prefix = f"{WORK_DIR}_{name}_"
+        images = [self._send_input(client, *local[(n, "image")], here, job=job) for n in image_names]
+        cut, more = prepare.voices(ffmpeg, path, [(n, *local[(n, "voice")]) for n in voice_names])
+        notes += more
+        voices = [self._send_input(client, f, takes.file_sha(f), "", prefix=root_prefix, job=job) for f in cut]
         song = None
-        if spec.get("song"):
-            song_file = projects.safe_join(path, spec["song"])
+        if not free:
+            song_file = projects.safe_join(path, spec["song"] or "")
             if not song_file.is_file() or takes.file_sha(song_file) != spec.get("song_sha"):
-                raise StudioError(_t("engine.the_song_has_changed_or_disappeared", v0=spec['song']))
-            song = self._send_input(client, song_file, spec["song_sha"], "", prefix=f"{INPUT_DIR}_{name}_")
-        if spec.get("parent_take"):
-            self._send_chain(client, name, branch_id, path, raw, index - 1, spec["parent_take"])
-        elif job.get("parentToken"):
-            self._send_job_chain(client, name, branch_id, path, raw, job)
+                raise StudioError(_t("engine.the_song_has_changed_or_disappeared", v0=spec["song"]))
+            shifted = prepare.shifted_song(ffmpeg, path, song_file, spec["song_sha"], plan_core.song_offset(plan))
+            song = self._send_input(client, shifted, takes.file_sha(shifted), "", prefix=root_prefix, job=job)
+        # what it continues: the end of the start video (clip 1), or the take before it
+        source, parent = None, None
+        start_spec = plan.get("start_video")
+        if index == 1 and entry["continue"] and start_spec:
+            if (start_spec["ref"], "video") not in local:
+                raise StudioError(_t("engine.start_video_not_chosen"))
+            frames = min(int(start_spec["frames"]), prepare.START_CONTEXT_SOURCE)
+            piece = prepare.video_piece(ffmpeg, path, *local[(start_spec["ref"], "video")], int(start_spec["end_frame"]) - frames,
+                                        frames, width, height, sound=True)
+            source = {"video": self._send_input(client, piece, takes.file_sha(piece), "", prefix=root_prefix, job=job)}
+        elif entry["continue"] and index > 1:
+            parent = spec.get("parent_take") or self._parent_of(path, job)
+            source = {"latent": self._send_latent(client, path, name, index - 1, parent, job)}
+        edit = None
+        if edit_spec:
+            first, count = plan_core.edit_slice(plan, index)
+            piece = prepare.video_piece(ffmpeg, path, *local[(edit_spec["ref"], "video")], first, count, width, height, sound=edit_sound)
+            edit = {"video": self._send_input(client, piece, takes.file_sha(piece), "", prefix=root_prefix, job=job), "sound": edit_sound}
+        try:
+            info = self._object_info()
+        except comfy.ComfyError as exc:
+            raise StudioError(str(exc)) from exc
+        take_id = job["take_id"]
+        save_prefix = f"{here}/takes/{take_id}"
         workflow = clip_workflow({
-            "plan_file": plan_file, "clip_index": index, "mode": spec["mode"], "refs": sent_refs, "song": song,
-            "take_token": job["token"], "parent_token": job.get("parentToken") or "", "seed": job["seed"],
-            "settings": spec["settings"], "upscale": spec.get("upscale"), "context_latent": spec.get("context_latent") or 0,
+            "settings": spec["settings"], "mode": spec["mode"], "prompt": prompt, "length": int(entry["frames"]),
+            "ref_image_size": plan.get("ref_image_size"), "seed": job["seed"], "images": images, "voices": voices,
+            "song": song, "clip_start": row["raw_start_seconds"], "context": int(row["context"]),
+            "feather": int(plan.get("audio_feather_ticks", 8)), "source": source, "edit": edit,
+            "save_prefix": save_prefix, "preview_prefix": f"{here}/previews/{take_id}", "names": ref_inputs(info),
+            "upscale": spec.get("upscale"), "context_latent": spec.get("context_latent") or 0,
         })
+        missing = sorted({n["class_type"] for n in workflow.values() if n["class_type"] not in info})
+        if missing:
+            raise StudioError(_t("engine.nodes_missing_from_comfyui") + ", ".join(missing))
+        with self.lock:
+            job.update(save_prefix=save_prefix, notes=notes, fingerprint=plan_core.take_fingerprint(plan, index),
+                       clip_name=entry.get("name") or "", parent=parent if source and source.get("latent") else None)
         return client.queue_prompt(workflow, self.client_id, {"project": name, "clip": index, "token": job["token"]})
+
+    def _parent_of(self, path, job):
+        """The take a generation continues when it was launched after a generation then still waiting (its take is
+        known now: _ready waited for it)."""
+        token = job.get("parentToken")
+        local = takes.list_takes(path).get(job["clip"] - 1, [])
+        record = next((r for r in local if token and r["id"].endswith("_" + token)), None)
+        if record is None:
+            raise StudioError(_t("engine.the_take_of_clip_this_clip", v0=job["clip"] - 1))
+        return record["id"]
+
+    def _send_latent(self, client, path, name, index, take_id, job):
+        """The latent of the take a generation continues, into ComfyUI's output folder (MultiRef's loader reads it
+        there), sent once per ComfyUI; returns its path from the output folder."""
+        if not take_id or not takes.latent_ok(path, index, take_id):
+            raise StudioError(_t("engine.take_cannot_be_continued", take=take_id or "?"))
+        file = takes.take_files(path, index, take_id)[0]
+        sub = f"{WORK_DIR}/{name}/latents"
+        key = (self.studio.config["comfy_url"], sub, take_id)
+        if key not in self.uploaded:
+            def progress(sent, total):
+                if total > 8 * 1024 * 1024:
+                    job["step"] = _t("engine.sending_to_comfyui", file=file.name, v1=int(100 * sent / total))
+            self._put(client, file, file.name, sub, "output", progress)
+            self.uploaded[key] = True
+        return f"{sub}/{file.name}"
 
     def _resolve_assembly(self, job):
         """The takes of a planned assembly (generations it waited for), known only now."""
@@ -1020,13 +1157,13 @@ class Engine:
 
     def _local_assemblies(self):
         """Assemblies Encore makes itself with ffmpeg from the takes' previews, beside ComfyUI's work (one at a
-        time). One that cannot (no ffmpeg, a take without preview, invalidated takes) goes to the plugin."""
+        time). One that cannot (no ffmpeg, a take without preview) fails with the reason (0.50: no other way)."""
         self._sweep_orphans()
         with self.lock:
             if self.paused or any(j.get("local") and j["status"] == "running" for j in self.jobs.values()):
                 return
             job = next((self.jobs[i] for i in self.order if i in self.jobs and self.jobs[i]["kind"] == "assemble"
-                        and self.jobs[i].get("local") is not False and self._ready(self.jobs[i])), None)
+                        and self._ready(self.jobs[i])), None)
             if job is None:
                 return
             try:
@@ -1036,10 +1173,7 @@ class Engine:
             path = self._project(job["project"])
             ffmpeg, why = assembler.ready_for(path, job, self.studio.config)
             if ffmpeg is None:
-                job["local"] = False
-                print(f"[Encore] assembly {job['export']} by the plugin: {why}", flush=True)
-                self._save(job["project"])
-                return
+                return self._fail(job, why)
             job.update(local=True, status="running", t_start=time.time(), step=_t("assembler.step", pct=0),
                        progress={"value": 0, "max": 100})
             if job["id"] in self.order:
@@ -1074,7 +1208,7 @@ class Engine:
         info = {"name": job["export"], "created": time.time(), "branch": job.get("branch"), "branch_name": job.get("branch_name"),
                 "clips": job.get("clips"), "takes": {str(k): v for k, v in (job.get("takes") or {}).items()},
                 "size": job.get("size"), "report": report, "prompt_id": job.get("prompt_id"),
-                "assembled_by": "ffmpeg" if job.get("local") else "plugin"}
+                "assembled_by": "ffmpeg"}
         meta = path / "exports" / f"{job['export']}.json"
         tmp = meta.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(info, indent=1, ensure_ascii=False), encoding="utf-8")
@@ -1083,47 +1217,6 @@ class Engine:
             write_infos(path, job, report)
         except Exception as exc:          # never lose a video because of its information file
             print(_t("engine.encore_infos_of_not_written", v0=job['export'], exc=exc), flush=True)
-
-    def _dispatch_assembly(self, client, job):
-        name, spec = job["project"], job["spec"]
-        path, raw, workspace = self._project(name), spec["raw"], job["workspace"]
-        self._resolve_assembly(job)
-        plan_file = self._send_plan(client, name, workspace, raw, settings_branch=job["branch"])
-        chosen = {int(k): v for k, v in job["takes"].items()}
-        sent_plan = plan_core.normalize(json.loads(json.dumps(raw)))
-        for index in range(1, job["clips"] + 1):
-            meta = takes.clip_dir(path, index) / f"{chosen[index]}.json"
-            try:
-                record = dict(json.loads(meta.read_text(encoding="utf-8")), id=chosen[index])
-            except (OSError, ValueError) as exc:
-                raise StudioError(_t("engine.take_of_clip_has_disappeared_since", v0=chosen[index], index=index)) from exc
-            # the record matches the plan sent (the plan of the twig, as its takes were made)
-            record = takeplan.rewritten_record(sent_plan, index, record, record.get("parent"))
-            self._send_take(client, name, workspace, path, index, record)
-        client.save_selection(plan_file, chosen)
-        song = None
-        if spec.get("song"):
-            song_file = projects.safe_join(path, spec["song"])
-            if not song_file.is_file():
-                raise StudioError(_t("engine.song_not_found", v0=spec['song']))
-            song = self._send_input(client, song_file, takes.file_sha(song_file), "", prefix=f"{INPUT_DIR}_{name}_")
-        start_video = None
-        if spec.get("start_video"):
-            sv = spec["start_video"]
-            video_file = projects.safe_join(path, sv["video"])
-            if not video_file.is_file() or takes.file_sha(video_file) != sv["sha"]:
-                raise StudioError(_t("engine.the_file_of_has_changed_or", ref_name=sv["name"], v1=sv["video"]))
-            start_video = {"name": sv["name"], "video": self._send_input(client, video_file, sv["sha"], f"{INPUT_DIR}/{name}", job=job)}
-        edit_video = None
-        if spec.get("edit_video"):
-            ev = spec["edit_video"]
-            video_file = projects.safe_join(path, ev["video"])
-            if not video_file.is_file() or takes.file_sha(video_file) != ev["sha"]:
-                raise StudioError(_t("engine.the_file_of_has_changed_or", ref_name=ev["name"], v1=ev["video"]))
-            edit_video = {"name": ev["name"], "video": self._send_input(client, video_file, ev["sha"], f"{INPUT_DIR}/{name}", job=job)}
-        workflow = assemble_workflow(plan_file, spec["mode"], job["clips"], spec["settings"], song,
-                                     start_video=start_video, size=job.get("size"), edit_video=edit_video)
-        return client.queue_prompt(workflow, self.client_id, {"project": name, "kind": "assemble", "branch": job["branch"]})
 
     def _ready(self, job):
         """Can this waiting job be sent? (the generation it continues must be over and harvested)"""
@@ -1166,13 +1259,13 @@ class Engine:
                 if any(j["status"] == "harvest" for j in self.jobs.values()):
                     return
                 job = next((self.jobs[i] for i in self.order if i in self.jobs and self._ready(self.jobs[i])
-                            and not (self.jobs[i]["kind"] == "assemble" and self.jobs[i].get("local") is not False)), None)
+                            and self.jobs[i]["kind"] != "assemble"), None)
                 if job is None:
                     return
             client = self.client
             self._ensure_socket()
             try:
-                answer = self._dispatch_assembly(client, job) if job["kind"] == "assemble" else self._dispatch_clip(client, job)
+                answer = self._dispatch_clip(client, job)
             except comfy.ComfyError as exc:
                 if exc.unreachable:
                     self._comfy_down()
@@ -1200,17 +1293,6 @@ class Engine:
             for name in {job["project"]}:
                 self._save(name)
             self._save_queue()
-
-    def _send_plan(self, client, name, branch, raw, settings_branch=None):
-        copy = json.loads(json.dumps(raw))
-        copy["project"] = mirror_name(name, branch)
-        meta = projects.read_meta(self._project(name))
-        copy["ref_image_size"] = next((b.get("ref_image_size") for b in meta["branches"] if b["id"] == (settings_branch or branch)), None) \
-            or projects.DEFAULT_REF_SIZE        # a branch setting: the plan does not hold it any more
-        # version 5 only for an edited video: plans without one stay readable by the plugin 3.7
-        copy["version"] = plan_core.PLAN_VERSION if copy.get("edit_video") else 4
-        data = (json.dumps(copy, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
-        return self._put(client, data, "plan.json", f"{INPUT_DIR}/{name}/{branch}", "input")
 
     def _send_input(self, client, local_file: Path, sha, subfolder, prefix="", job=None):
         """A project file in ComfyUI's input folder, named after its content (sent once; a big file shows its
@@ -1268,40 +1350,6 @@ class Engine:
         except OSError:
             return False
         return client.exists(name, subfolder, kind)
-
-    def _send_take(self, client, name, branch, path, index, record):
-        """A take into a working copy in ComfyUI: its latent once, its record every time (it is rewritten to match
-        the plan sent with each generation or assembly)."""
-        key = (index, record["id"])
-        present = self._mirror(name, branch)
-        pt, meta, _mp4 = takes.take_files(path, index, record["id"])
-        sub = f"h3_clip_plan/{mirror_name(name, branch)}/latents/clip_{index:03d}"
-        if key not in present:
-            self._put(client, pt, pt.name, sub, "output")
-        data = {k: v for k, v in record.items() if k != "id"}
-        self._put(client, json.dumps(data, indent=1).encode("utf-8"), meta.name, sub, "output")
-        present.add(key)
-
-    def _send_chain(self, client, name, branch, path, raw, index, take_id):
-        """The takes a generation continues (up to the start of their scene), with records matching its plan."""
-        try:
-            chain = takes.ancestors(path, raw, index, take_id)
-        except ValueError as exc:
-            raise StudioError(str(exc)) from exc
-        sent_plan = plan_core.normalize(json.loads(json.dumps(raw)))
-        for number, record in reversed(chain):
-            record = dict(takeplan.rewritten_record(sent_plan, number, record, record.get("parent")), id=record["id"])
-            self._send_take(client, name, branch, path, number, record)
-
-    def _send_job_chain(self, client, name, branch, path, raw, job):
-        """The takes a generation continues when it was launched after a generation then still waiting."""
-        if not job.get("parentToken"):
-            return
-        local = takes.list_takes(path).get(job["clip"] - 1, [])
-        record = next((r for r in local if r["id"].endswith("_" + job["parentToken"])), None)
-        if record is None:
-            raise StudioError(_t("engine.the_take_of_clip_this_clip", v0=job["clip"] - 1))
-        return self._send_chain(client, name, branch, path, raw, job["clip"] - 1, record["id"])
 
     # ------------------------------------------------------------------ following the generations
     def _running_job(self, prompt_id=None):
@@ -1420,6 +1468,7 @@ class Engine:
             try:
                 self._poll()
             except Exception:  # noqa: BLE001 - keep following
+                traceback.print_exc()
                 time.sleep(1.0)
 
     def _poll(self):
@@ -1502,33 +1551,34 @@ class Engine:
         with self.lock:
             for name in {n for n, _b in touched}:
                 self._save(name)
-        for name, branch in touched:
-            self._purge_if_idle(client, name, branch)
-        finished_assemblies = [j for j in active + pending if j.get("kind") == "assemble" and j["status"] in ("done", "error")]
-        for job in finished_assemblies:
-            self._purge_workspace(client, job)
+        for name in {n for n, _b in touched}:
+            self._purge_if_idle(client, name)
 
     def _harvest(self, client, job):
-        if job.get("kind") == "assemble":
-            return self._harvest_assembly(client, job)
+        """A generation over: its latent (MultiRef's file) and its preview (VHS) come into the project, with the
+        record Encore writes (0.50: the plugin wrote it before)."""
         name, branch = job["project"], _branch(job)
         try:
             path = self._project(name)
-            plan_file = plan_file_of(name, branch)
-            listing = client.takes(plan_file)
-            entry = next((c for c in listing.get("clips") or [] if c["index"] == job["clip"]), None)
-            take = next((t for t in (entry or {}).get("takes") or [] if t["id"].endswith("_" + job["token"])), None)
-            if take is None:
-                raise StudioError(_t("engine.generation_finished_but_the_take_cannot"))
-            take_id = take["id"]
-            pt, meta, mp4 = takes.take_files(path, job["clip"], take_id)
-            sub = f"h3_clip_plan/{mirror_name(name, branch)}/latents/clip_{job['clip']:03d}"
-            client.download(pt.name, sub, str(pt))
-            if take.get("preview"):
-                pv = take["preview"]
-                client.download(pv["filename"], pv["subfolder"], str(mp4), pv.get("type", "output"))
-            record = {k: v for k, v in (take.get("record") or {}).items() if k != "id"}
-            record["studio"] = dict(job.get("studio") or {}, prompt_id=job.get("prompt_id"))
+            take_id = job["take_id"]
+            entry = client.history(job["prompt_id"]).get(job["prompt_id"]) or {}
+            st, meta, mp4 = takes.take_files(path, job["clip"], take_id)
+            st.parent.mkdir(parents=True, exist_ok=True)
+            sub, file_name = saved_latent_name(job.get("save_prefix") or f"{WORK_DIR}/{name}/takes/{take_id}")
+            part = st.with_suffix(".part")
+            client.download(file_name, sub, str(part))
+            latents.check_av(part)
+            os.replace(part, st)
+            out = (entry.get("outputs") or {}).get("28") or {}
+            videos = [f for f in (out.get("gifs") or out.get("videos") or []) if str(f.get("filename", "")).lower().endswith(".mp4")]
+            if videos:
+                client.download(videos[-1]["filename"], videos[-1].get("subfolder", ""), str(mp4), videos[-1].get("type", "output"))
+            studio = job.get("studio") or {}
+            record = {"clip": job["clip"], "name": job.get("clip_name") or "", "seed": job.get("seed"), "saved_at": time.time(),
+                      "fingerprint": job.get("fingerprint"), "frames": job.get("frames"), "width": studio.get("width"),
+                      "height": studio.get("height"), "refs": studio.get("refs") or {}, "parent": job.get("parent"),
+                      "notes": job.get("notes") or [],
+                      "studio": dict(studio, prompt_id=job.get("prompt_id"))}
             tmp = meta.with_suffix(".json.tmp")
             tmp.write_text(json.dumps(record, indent=1, ensure_ascii=False), encoding="utf-8")
             os.replace(tmp, meta)
@@ -1539,7 +1589,6 @@ class Engine:
             except (ValueError, IndexError, KeyError, StudioError):
                 pass
             with self.lock:
-                self._mirror(name, branch).add((job["clip"], take_id))
                 job["status"], job["take"], job["ended"] = "done", take_id, time.time()
                 for other in self.jobs.values():               # planned assemblies waiting for this take
                     pending = other.get("pending") or {}
@@ -1557,76 +1606,34 @@ class Engine:
                 if job["harvest_tries"] >= 3:
                     job["status"], job["error"] = "error", _t("engine.cannot_collect_the_take", exc=exc)
 
-    def _harvest_assembly(self, client, job):
-        name = job["project"]
-        try:
-            path = self._project(name)
-            entry = client.history(job["prompt_id"]).get(job["prompt_id"]) or {}
-            outputs = (entry.get("outputs") or {}).get("10") or {}
-            files = [f for f in (outputs.get("gifs") or outputs.get("videos") or outputs.get("images") or [])
-                     if str(f.get("filename", "")).lower().endswith((".mp4", ".webm", ".mov", ".mkv"))]
-            if not files:
-                raise StudioError(_t("engine.assembly_finished_but_the_video_cannot"))
-            video = files[-1]
-            target = path / "exports" / f"{job['export']}.mp4"
-            client.download(video["filename"], video.get("subfolder", ""), str(target), video.get("type", "output"))
-            report = (outputs.get("text") or [""])[0]
-            self._write_export(path, job, report)
-            with self.lock:
-                job["status"], job["ended"], job["progress"] = "done", time.time(), None
-                self._record_timing(job)
-        except (StudioError, comfy.ComfyError, OSError, ValueError) as exc:
-            with self.lock:
-                job["harvest_tries"] = job.get("harvest_tries", 0) + 1
-                if job["harvest_tries"] >= 3:
-                    job["status"], job["error"] = "error", _t("engine.cannot_collect_the_video", exc=exc)
-
-    def _purge_workspace(self, client, job):
-        """The ComfyUI copy made for one assembly: of no use once it is over."""
-        workspace = job.get("workspace")
-        if not workspace or not self.studio.config.get("purge_comfy_copy", True):
-            return
-        name = job["project"]
-        try:
-            listing = client.takes(plan_file_of(name, workspace))
-            items = [{"clip": c["index"], "id": t["id"]} for c in listing.get("clips") or [] for t in c.get("takes") or []]
-            if items:
-                client.delete_takes(plan_file_of(name, workspace), items)
-        except (StudioError, comfy.ComfyError, OSError, ValueError):
-            pass
-        self.mirror.pop((name, workspace), None)
-
-    def _purge_branch(self, client, name, branch):
+    def _purge_if_idle(self, client, name, branch=None):
+        """When no generation of the project is waiting any more, what it left in ComfyUI's output folder (its takes,
+        previews and the latents sent to be continued) is removed: they are in the project. Only when ComfyUI's
+        folder is known (welcome screen): ComfyUI has no route to delete files, so with a ComfyUI elsewhere they
+        stay (the project settings say so)."""
         if not self.studio.config.get("purge_comfy_copy", True):
             return
-        try:
-            listing = client.takes(plan_file_of(name, branch))
-            items = [{"clip": c["index"], "id": t["id"]} for c in listing.get("clips") or [] for t in c.get("takes") or []]
-            if items:
-                client.delete_takes(plan_file_of(name, branch), items)
-        except (StudioError, comfy.ComfyError, OSError, ValueError):
-            pass
-        self.mirror[(name, branch)] = set()
-
-    def _purge_if_idle(self, client, name, branch):
-        if not self.studio.config.get("purge_comfy_copy", True):
+        root = comfy_setup.comfy_root(self.studio.config.get("comfy_dir"))
+        if root is None:
             return
         with self.launch_lock:
             with self.lock:
-                mine = [j for j in self.jobs.values() if j["project"] == name and _branch(j) == branch]
+                mine = [j for j in self.jobs.values() if j["project"] == name]
                 if any(j["status"] in ACTIVE + ("harvest",) for j in mine):
                     return
                 # takes whose copy into the project failed are kept (their files can still be fetched by hand)
-                keep = {j["token"] for j in mine if j.get("harvest_tries")}
-            try:
-                listing = client.takes(plan_file_of(name, branch))
-                items = [{"clip": c["index"], "id": t["id"]} for c in listing.get("clips") or [] for t in c.get("takes") or []
-                         if t["id"].split("_")[-1] not in keep]
-                if items:
-                    client.delete_takes(plan_file_of(name, branch), items)
-                self.mirror[(name, branch)] = set()
-            except (StudioError, comfy.ComfyError, OSError, ValueError):
-                pass
+                keep = {j["take_id"] for j in mine if j.get("harvest_tries") and j.get("take_id")}
+            folder = root / "output" / WORK_DIR / name
+            for kind in ("takes", "previews", "latents"):
+                for file in (folder / kind).glob("*") if (folder / kind).is_dir() else []:
+                    if file.is_file() and not any(file.name.startswith(t) for t in keep):
+                        try:
+                            file.unlink()
+                        except OSError:
+                            pass
+            url = self.studio.config.get("comfy_url")
+            for key in [k for k in self.uploaded if k[0] == url and k[1] == f"{WORK_DIR}/{name}/latents"]:
+                self.uploaded.pop(key, None)
 
 
 def _branch(job):

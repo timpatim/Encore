@@ -1,13 +1,13 @@
 """Screenshots of the README (docs/screenshots/*.png), made with the fake ComfyUI of the tests and the robot example
-of the plugin: the takes are fake videos of the robot on the beach or in the workshop (render_videos.py).
+of examples/: the takes are fake videos of the robot on the beach or in the workshop (render_videos.py).
 
-    H3_PLUGIN=/path/to/ComfyUI-H3-ClipPlan CHROME=/path/to/chrome python tests/screenshots/make_screenshots.py
+    CHROME=/path/to/chrome python tests/screenshots/make_screenshots.py
 """
 import asyncio, json, os, shutil, subprocess, sys, time, urllib.error, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "e2e"))
-from common import ENCORE, CHROME, PLUGIN, restart_mock  # noqa: E402
+from common import ENCORE, CHROME, restart_mock  # noqa: E402
 from playwright.async_api import async_playwright  # noqa: E402
 
 DOCS = os.path.join(ENCORE, "docs", "screenshots")
@@ -45,8 +45,8 @@ def take_of(job):
     sys.exit(f"no take: {job}")
 
 
-def gen(index, branch, after=None):
-    body = {"clip": index, "branch": branch}
+def gen(index, branch, after=None, line=False):
+    body = {"clip": index, "branch": branch, "line": line}
     if after:
         body["after"] = after
     job = call(S, P + "/generate", body); run_one()
@@ -65,7 +65,7 @@ def setup():
     SRV = srv = subprocess.Popen([sys.executable, "-m", "encore", "--port", "8240", "--no-browser", "--config", cfg], cwd=ENCORE,
                            stdout=subprocess.DEVNULL, stderr=open(os.path.join(HERE, "out", "server.log"), "w"))
     time.sleep(1.5)
-    ex = os.path.join(PLUGIN, "examples")
+    ex = os.path.join(ENCORE, "examples")
     call(S, "/api/projects", {"name": "robot_beach", "mode": "music_video"})
     call(S, P + "/import-plan?filename=robot_beach.plan.json", raw=open(os.path.join(ex, "robot_beach.plan.json"), "rb").read(), method="POST")
     for kind, name in (("images", "robot.png"), ("images", "beach.png"), ("images", "workshop.png"), ("songs", "robot_beach_song.mp3")):
@@ -74,21 +74,27 @@ def setup():
     for _ in range(2):
         call(S, P + "/branches", {"how": "empty"})
     b1, b2, b3 = [b["id"] for b in call(S, P)["branches"]][:3]
-    call(S, f"{P}/branches/{b1}", {"name": "Sunset", "refs": {"robot": {"image": "refs/images/robot.png"}, "beach": {"image": "refs/images/beach.png"}},
-                                   "upscale": {"enabled": True, "model": M3D, "start_mp": 0.25, "upscaler": "lbh3d"}}, "PUT")
-    call(S, f"{P}/branches/{b2}", {"name": "Workshop version", "refs": {"robot": {"image": "refs/images/robot.png"}, "beach": {"image": "refs/images/workshop.png"}}}, "PUT")
-    call(S, f"{P}/branches/{b3}", {"name": "First draft", "refs": {"robot": {"image": "refs/images/robot.png"}, "beach": {"image": "refs/images/beach.png"}}}, "PUT")
-    # Sunset: two takes of clip 1, two continuations of the second, two takes of clip 3 (a new scene)
-    a1 = gen(1, b1); a2 = gen(1, b1)
-    gen(2, b1, a1); c1 = gen(2, b1, a2); gen(2, b1, a2)
-    gen(3, b1, c1); d2 = gen(3, b1, c1)
-    w1 = gen(1, b2); w2 = gen(2, b2, w1); gen(1, b2)
-    gen(1, b3)
-    call(S, P + "/selection", {"selection": {"branch": b1, "1": a2, "2": c1, "3": d2}}, "PUT")
+    call(S, f"{P}/branches/{b1}", {"name": "Sunset", "upscale": {"enabled": True, "model": M3D, "start_mp": 0.25, "upscaler": "lbh3d"}}, "PUT")
+    call(S, f"{P}/branches/{b2}", {"name": "Workshop version"}, "PUT")
+    call(S, f"{P}/branches/{b3}", {"name": "First draft"}, "PUT")
+    # the files of the plan (the example names them only), the workshop instead of the beach in « Workshop version »
+    for branch, beach in ((b1, "beach.png"), (b2, "workshop.png"), (b3, "beach.png")):
+        plan = call(S, f"{P}/plan?branch={branch}")["plan"]
+        plan["files"]["robot"]["file"] = "refs/images/robot.png"
+        plan["files"]["beach"]["file"] = f"refs/images/{beach}"
+        call(S, P + "/plan", {"branch": branch, "plan": plan}, "PUT")
+    # Sunset: its master line (clips 1 to 3), a variant of clip 1, two variants of clip 2 and one of clip 3 after them
+    a1 = gen(1, b1, line=True); gen(2, b1, line=True); gen(3, b1, line=True)
+    a2 = gen(1, b1)
+    c1 = gen(2, b1, a1); gen(2, b1, a2)
+    d2 = gen(3, b1, c1)
+    w1 = gen(1, b2, line=True); w2 = gen(2, b2, line=True); gen(1, b2)
+    gen(1, b3, line=True)
+    call(S, P + "/selection", {"selection": {"branch": b1, "1": a1, "2": c1, "3": d2}}, "PUT")
     job = call(S, P + "/assemble", {"clip": 3, "take": d2}); run_one(); run_one()
     # something waiting in the queue
     call(S, "/api/queue/pause", {})
-    call(S, P + "/generate", {"clip": 3, "after": w2, "branch": b2})
+    call(S, P + "/generate", {"clip": 3, "branch": b2, "line": True})
     return srv, (b1, b2, b3), c1, d2
 
 
@@ -102,6 +108,7 @@ async def shots(branches, c1, d2):
         await page.evaluate(f"localStorage.setItem('h3studio.project','robot_beach'); localStorage.setItem('encore.folded.robot_beach', JSON.stringify(['{b3}']))")
         await page.reload(); await page.wait_for_timeout(2500)
         # the takes screen (the main screen), the twig 1 → 2 → 3 of Sunset chosen
+        await page.locator(f".tk-card[data-take='{c1}']").first.click(); await page.wait_for_timeout(1200)
         await page.locator(f".tk-card[data-take='{d2}']").first.click(); await page.wait_for_timeout(1500)
         # the takes screen (the main screen)
         close = page.locator(".tk-map-btn:has-text('✕')")
@@ -122,10 +129,13 @@ async def shots(branches, c1, d2):
         await page.locator(".tk-plan-modal .tk-plan-gen").scroll_into_view_if_needed(); await page.wait_for_timeout(300)
         await page.locator(".tk-plan-modal > *").first.screenshot(path=os.path.join(DOCS, "plan_window.png"))
         await page.click(".tk-plan-modal >> text=Close"); await page.wait_for_timeout(300)
-        # the plan of the selection: generated clips locked, then what follows
-        await page.click(".tk-twigplan"); await page.wait_for_timeout(1500)
-        await page.locator(".clipitem").nth(1).click(); await page.wait_for_timeout(800)
+        # the master plan of Sunset: the library (subjects, files), clip 2 with its subjects and its H3 prompt
+        await page.locator(".tk-master").first.click(); await page.wait_for_timeout(1500)
+        await page.locator(".clipitem").nth(1).click(); await page.wait_for_timeout(1500)
         await page.screenshot(path=os.path.join(DOCS, "plan_editor.png"))
+        await page.locator(".sx-tab-h3").click(); await page.wait_for_timeout(1200)
+        await page.screenshot(path=os.path.join(DOCS, "plan_h3.png"))
+        await page.locator("button:has-text('Fields')").click(); await page.wait_for_timeout(300)
         await page.click("#studioBackBtn"); await page.wait_for_timeout(800)
         # queue
         await page.click("#studioQueueBtn"); await page.wait_for_timeout(800)
@@ -134,7 +144,6 @@ async def shots(branches, c1, d2):
 
 
 def main():
-    if not PLUGIN: sys.exit("set H3_PLUGIN to the ComfyUI-H3-ClipPlan folder")
     try:
         srv, branches, c1, d2 = setup()
         asyncio.run(shots(branches, c1, d2))

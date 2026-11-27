@@ -1,0 +1,73 @@
+{
+ "version": 7,
+ "project": "robot_beach",
+ "mode": "music_video",
+ "notes": "Example plan: a 20-second instrumental music video. Two images (robot, beach) and the song robot_beach_song.mp3, all in examples/.",
+ "files": {
+  "robot": {
+   "kind": "image",
+   "note": "examples/robot.png"
+  },
+  "beach": {
+   "kind": "image",
+   "note": "examples/beach.png"
+  }
+ },
+ "subjects": {
+  "robot": {
+   "kind": "person",
+   "description": "the small friendly robot",
+   "pictures": [
+    {
+     "file": "robot",
+     "role": "orange body, dark visor face with two round glowing blue eyes and a thin blue light for a mouth, yellow-bulb antenna, blue ear bolts and chest panel with three coloured buttons"
+    }
+   ]
+  },
+  "beach": {
+   "kind": "place",
+   "description": "The beach, the sea at sunset, the palm tree and the small blue beach hut",
+   "pictures": [
+    {
+     "file": "beach",
+     "role": ""
+    }
+   ]
+  }
+ },
+ "context_frames": 39,
+ "crossfade_frames": 0,
+ "song": {
+  "file": "robot_beach_song.mp3",
+  "duration_seconds": 20.0
+ },
+ "clips": [
+  {
+   "name": "sunset_walk",
+   "frames": 175,
+   "continue": false,
+   "summary": "The little robot walks along the shoreline at sunset toward the camera and waves, then starts to bob to the music.",
+   "description": "The target video is a colourful stylized 3D animated short in the style of a family animated film, with soft toy-like materials, clean shapes and colours matching the references, gentle physically grounded camera movement, no on-screen text.\n[Shot 1] Wide shot of the beach at sunset, warm orange light, the sun low over the sea. @robot walks along the wet sand at the water's edge toward the camera with small bouncy steps, its antenna bulb swaying. It stops, looks around at the sunset, raises one arm and waves at the camera. @robot never sings or speaks; its mouth light stays a steady thin line. As the soft introduction builds, it starts to bob its head to the beat. The camera slowly dollies in to a full shot. End with the robot already bobbing and lifting one foot, the movement still in progress. Setting: @beach.",
+   "soundscape": "Gentle waves breaking on the sand, a light sea breeze, soft metallic footsteps.",
+   "music": "The quiet introduction of the instrumental: soft synth pads and a light arpeggio over A minor, F, C and G chords. The robot's movement stays synchronized to this section of the music."
+  },
+  {
+   "name": "beach_dance",
+   "frames": 209,
+   "continue": true,
+   "summary": "Same unbroken shot: the beat drops and the robot dances on the sand in the sunset light.",
+   "description": "The target video is a colourful stylized 3D animated short in the style of a family animated film, with soft toy-like materials, clean shapes and colours matching the references, gentle physically grounded camera movement, no on-screen text.\n[Shot 1] @robot puts its foot down on the first beat of the drums and breaks into a cheerful robot dance: side steps, arms swinging in rhythm, a little spin on the spot, its antenna bulb blinking on every beat. @robot never sings or speaks; its mouth light stays a steady thin line. The camera circles slowly around it at waist height, the sea and the palm tree passing behind. Sand flicks up around its feet. End mid-move, arms raised. Setting: @beach.",
+   "soundscape": "Waves, sand crunching under metal feet, a soft whirr of motors.",
+   "music": "The groove section of the instrumental: kick drum on every beat, snare, hi-hats and a bouncing bass line under the pads and arpeggio. Every step and arm swing of the dance lands on the beat and stays synchronized to this section."
+  },
+  {
+   "name": "hut_goodbye",
+   "frames": 158,
+   "continue": false,
+   "summary": "Closer shot in front of the beach hut: the robot sways to the final melody, then waves goodbye as the music fades.",
+   "description": "The target video is a colourful stylized 3D animated short in the style of a family animated film, with soft toy-like materials, clean shapes and colours matching the references, gentle physically grounded camera movement, no on-screen text.\n[Shot 1] Medium shot of @robot standing on the sand in front of the small blue beach hut, the sunset glowing behind. It sways from side to side with the melody, eyes glowing softly. @robot never sings or speaks; its mouth light stays a steady thin line. On the last notes it turns to the camera, waves with one hand and its eyes curve into a happy expression while the light dims slightly. The camera holds still. Setting: @beach.",
+   "soundscape": "Waves and a faint breeze, a quiet click as the antenna bulb blinks.",
+   "music": "The final section of the instrumental: a simple synth melody over the groove, then a fade-out to silence. The swaying and the final wave stay synchronized to this section."
+  }
+ ]
+}

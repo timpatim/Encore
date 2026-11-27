@@ -122,6 +122,8 @@
         document.body.classList.add("studio");
         document.title = "Encore";
         ed().saveHook = savePlan;
+        // the H3 prompt of each clip of the plan being edited (chantier B: composed by the server only)
+        ed().composer = (plan) => (P.name ? post(`/api/projects/${encodeURIComponent(P.name)}/plan/compose`, { plan }) : Promise.reject(new Error("no project")));
         if (window.H3Takes) window.H3Takes.useStudio(takesApi());
         decorateHeader();
         P.config = await api("/api/config");
@@ -161,19 +163,28 @@
         header.classList.add("studio-project-row");
         showThemeButton();
         $("viewTabs").before(h("span", { class: "studio-project-label" }, _t("studio.project"), h("b", { id: "studioProject", class: "studio-project" }, "")));
-        // the plan screen (plan of the selection, master plan of a branch): « ← Prises » and what it shows
-        $("viewTabs").after(h("span", { class: "studio-plan-head" },
-            h("button", { id: "studioBackBtn", class: "primary", onclick: () => closePlanScreen() }, _t("studio.back_to_takes")),
-            h("b", { id: "studioPlanTitle" }, ""),
-            h("button", { id: "studioImportBtn", onclick: importPlan, title: _t("studio.import_a_plan_title") }, _t("studio.import_a_plan")),
-            h("button", { id: "studioUsePlanBtn", onclick: () => useThisPlan(), title: _t("studio.use_this_plan_title") }, _t("studio.use_this_plan"))));
-        const anchor = $("btnSave");
+        // the open project: its own buttons, whatever the screen
         const bar = h("span", { class: "studio-bar" },
             h("button", { onclick: openResources }, _t("studio.resources")),
             h("button", { class: "studio-trash-btn", onclick: () => window.H3Trash.open() }, _t("trash.button")),
             h("button", { onclick: openExports }, _t("studio.assembled_videos")),
             h("button", { onclick: () => openSettings() }, _t("studio.project_settings")));
-        anchor.before(bar);
+        $("btnSave").before(bar);
+        // the plan screen (plan of the selection, master plan of a branch) has a row of its own, under the project's:
+        // « ← Prises », what it shows, its settings, then undo, redo and save — they all act on the plan shown
+        $("btnUndo").textContent = "↶ " + _t("studio.undo");
+        $("btnRedo").textContent = "↷ " + _t("studio.redo");
+        $("btnSave").textContent = _t("studio.save_plan");
+        $("btnSave").title = _t("studio.save_plan_title");
+        const row = h("div", { class: "studio-plan-row" },
+            h("button", { id: "studioBackBtn", class: "primary", onclick: () => closePlanScreen() }, _t("studio.back_to_takes")),
+            h("b", { id: "studioPlanTitle" }, ""),
+            $("btnPlanSettings"),
+            h("button", { id: "studioImportBtn", onclick: importPlan, title: _t("studio.import_a_plan_title") }, _t("studio.import_a_plan")),
+            h("button", { id: "studioUsePlanBtn", onclick: () => useThisPlan(), title: _t("studio.use_this_plan_title") }, _t("studio.use_this_plan")),
+            h("span", { class: "spacer" }),
+            $("badge"), $("btnUndo"), $("btnRedo"), $("btnSave"));
+        header.after(row);
     }
 
     // ------------------------------------------------------------------ theme
@@ -207,8 +218,18 @@
             return id && window.H3Takes && window.H3Takes.branchHasTakes(id) ? _t("branch.frozen_why", { name: (branchById(id) || {}).name || "?" }) : null;
         },
         label: () => (mediaBranch() || {}).name || "?",
-        image: (name) => { const r = ((mediaBranch() || {}).refs || {})[name]; return r && r.image ? fileUrl(r.image) : null; },
-        voice: (name) => { const r = ((mediaBranch() || {}).refs || {})[name]; return r && r.voice ? fileUrl(r.voice) : null; },
+        // the project's files, for the library of the plan screen (chantier B)
+        fileUrl: (rel) => fileUrl(rel),
+        resources: () => ({ images: (P.resources && P.resources.images) || [], voices: (P.resources && P.resources.voices) || [] }),
+        importFiles: async (folder) => {
+            const files = await pickFiles(ACCEPT[folder], true);
+            if (!files.length) return [];
+            try { return await importFiles(folder, files); } catch (e) { if (e.code !== "cancelled") alert(e.message); return []; }
+        },
+        // files dropped from the computer (0.48.2)
+        importDropped: async (folder, files) => {
+            try { return await importFiles(folder, files); } catch (e) { if (e.code !== "cancelled") alert(e.message); return []; }
+        },
         song: () => { const b = mediaBranch(); return b && b.song ? fileUrl(b.song) : null; },
         // the start video: one file for the project, chosen in the plan settings
         video: () => (P.startVideoFile ? fileUrl(P.startVideoFile) : null),
@@ -260,6 +281,28 @@
         closeHome();
         ed().showView(true);
         if (data.validation.errors.length) toast(_t("studio.the_plan_has_error_s_see", { length: data.validation.errors.length }));
+        if (data.old_latents) await convertLatents(data.name, data.old_latents);
+    }
+    // 0.50: the takes' latents written by the ComfyUI-H3-ClipPlan plugin (.pt) are rewritten once in the format of
+    // MultiRef (.safetensors), the only one a take can be continued from
+    async function convertLatents(name, count) {
+        const url = `/api/projects/${encodeURIComponent(name)}/convert-latents`;
+        const bar = h("progress", { class: "convert-bar", max: count, value: 0, style: "width:100%" });
+        const line = h("div", { class: "hint convert-line" }, _t("studio.convert_progress", { done: 0, total: count }));
+        const dlg = modal(_t("studio.convert_title"), h("div", {}, h("p", {}, _t("studio.convert_intro", { count })), bar, line));
+        let st;
+        try {
+            st = await post(url, {});
+            while (st.running) {
+                await new Promise((r) => setTimeout(r, 400));
+                st = await api(url);
+                bar.value = st.done;
+                line.textContent = _t("studio.convert_progress", { done: st.done, total: st.total });
+            }
+        } catch (e) { dlg.close(); alert(e.message); return; }
+        dlg.close();
+        if ((st.failed || []).length) alert(_t("studio.convert_failed", { count: st.failed.length }) + "\n\n" + st.failed.slice(0, 6).join("\n"));
+        else toast(_t("studio.convert_done", { count: st.total }));
     }
     function applyProject(data) {
         P.settings = data.settings;
@@ -286,8 +329,7 @@
         catch (e) { alert(e.message); return; }
         P.editTarget = { branch: res.branch, leaf: res.leaf || null };
         const br = P.branches.find((b) => b.id === res.branch) || { name: res.branch };
-        const chain = (res.chain || []).map((id, k) => `${k + 1}:${id.slice(-4)}`).join(" → ");
-        const title = res.leaf ? _t("studio.plan_of_selection_title", { branch: br.name, chain }) : _t("studio.master_plan_title", { branch: br.name });
+        const title = res.leaf ? _t("studio.plan_of_selection_title", { branch: br.name }) : _t("studio.master_plan_title", { branch: br.name });
         $("studioPlanTitle").textContent = title;
         // « Importer un plan… »: the master plan of a branch that has no take yet
         const imp = $("studioImportBtn"), taken = !!(window.H3Takes && window.H3Takes.branchHasTakes(res.branch));
@@ -295,7 +337,8 @@
         $("studioUsePlanBtn").hidden = !res.leaf;
         imp.disabled = taken;
         imp.title = taken ? _t("studio.import_disabled_has_takes", { branch: br.name }) : _t("studio.import_a_plan_title");
-        ed().setPlan(res.plan, title, null, { locked: res.locked, takes: res.takes });
+        ed().setPlan(res.plan, title, null, { locked: res.locked, takes: res.takes, frozen: res.leaf ? null : res.frozen || null,
+            free: res.free || [], lockLength: res.lock_length || [] });
         ed().onLockedRetake = (n, take) => { closePlanScreen().then(() => window.H3Takes && window.H3Takes.launchForkById(n, take)); };
         ed().showView(false);
     }
@@ -317,31 +360,30 @@
         if (P.twig && t.branch === P.twig.branch && (t.leaf || null) === (P.twig.leaf || null)) {
             P.twig = { plan: res.plan, locked: res.locked, branch: res.branch, leaf: res.leaf, takes: res.takes || {} };
         }
-        planObject.version = 3;
+        planObject.version = H3.PLAN_VERSION;      // the server saved it with the current version
         const e = res.validation.errors.length;
         toast(e ? _t("studio.plan_saved_error_s_to_fix", { e }) : t.leaf ? _t("studio.plan_saved_twig") : _t("studio.plan_saved_master"));
     }
 
-    // « Utiliser ce plan… » (plan of a selection): it becomes the master plan of its branch, or of a new branch
+    // « Nouvelle branche avec ce plan… » (plan of a selection): a new branch whose master plan is this plan, with the
+    // settings of this branch and nothing taken over (0.48: a master plan is never replaced once its branch has takes)
     function useThisPlan() {
         const t = P.editTarget || {};
         if (!t.leaf) return;
         const br = P.branches.find((b) => b.id === t.branch) || { name: t.branch };
         const nameIn = h("input", { placeholder: _t("branch.name_auto"), style: "flex:1" });
-        const run = async (target) => {
+        const run = async () => {
             try {
                 await saveIfDirty();
-                const res = await post(`/api/projects/${encodeURIComponent(P.name)}/use-plan`, { branch: t.branch, leaf: t.leaf, target, name: nameIn.value.trim() || null });
+                const res = await post(`/api/projects/${encodeURIComponent(P.name)}/use-plan`, { branch: t.branch, leaf: t.leaf, name: nameIn.value.trim() || null });
                 dlg.close();
                 applyProject(res.project);
                 await openPlanScreen(t);
-                toast(target === "new" ? _t("studio.use_plan_done_new", { name: res.branch.name }) : _t("studio.use_plan_done_master", { name: br.name }));
+                toast(_t("studio.use_plan_done_new", { name: res.branch.name }));
             } catch (e) { alert(e.message); }
         };
         const dlg = modal(_t("studio.use_this_plan"), h("div", { class: "use-plan" },
-            h("div", { class: "br-opt" }, h("button", { class: "primary use-master", onclick: () => run("master") }, _t("studio.use_plan_master", { name: br.name })),
-                h("p", { class: "hint" }, _t("studio.use_plan_master_hint"))),
-            h("div", { class: "br-opt" }, h("div", { class: "tk-inline" }, nameIn, h("button", { class: "primary use-new", onclick: () => run("new") }, _t("studio.use_plan_new"))),
+            h("div", { class: "br-opt" }, h("div", { class: "tk-inline" }, nameIn, h("button", { class: "primary use-new", onclick: run }, _t("studio.use_plan_new"))),
                 h("p", { class: "hint" }, _t("studio.use_plan_new_hint", { name: br.name })))));
     }
 
@@ -366,6 +408,22 @@
 
     function closeHome() { const el = $("studioHome"); if (el) el.remove(); }
 
+    // a project deleted for good, after a confirmation that says what goes (refused while something of it runs)
+    async function deleteProject(name) {
+        let sum;
+        try { sum = await api(`/api/projects/${encodeURIComponent(name)}/summary`); } catch (e) { await H3Dialog.alert(e.message); return; }
+        if (sum.busy) { await H3Dialog.alert(_t("server.project_busy")); return; }
+        const mb = (sum.size / 1e6).toFixed(1).replace(".", H3I18n.decimal());
+        if (!(await H3Dialog.confirm(_t("studio.delete_project_confirm", { name, takes: sum.takes, exports: sum.exports, v0: mb })))) return;
+        try { await api(`/api/projects/${encodeURIComponent(name)}`, { method: "DELETE" }); }
+        catch (e) { await H3Dialog.alert(e.message); return; }
+        if (P.name === name) {
+            P.name = null;
+            try { localStorage.removeItem("h3studio.project"); } catch (_) { /* ignore */ }
+        }
+        toast(_t("studio.project_deleted", { name }));
+        showHome();
+    }
     async function showHome() {
         closeHome();
         P.config = await api("/api/config");
@@ -408,6 +466,7 @@
                 h("label", { class: "tk-check", style: "margin-top:6px" }, h("input", { type: "checkbox", checked: P.config.purge_comfy_copy !== false || null,
                     onchange: (e) => saveCfg({ purge_comfy_copy: e.target.checked }) }),
                     _t("studio.empty_the_working_copy_in_comfyui")),
+                P.config.comfy_dir ? null : h("div", { class: "hint" }, _t("studio.purge_needs_comfy_dir")),
                 h("div", { class: "hint" }, _t("studio.custom_nodes_comfyui_s_python_and"), h("button", { class: "small", onclick: () => openSetup() }, _t("studio.installation_2")))),
             h("section", {}, h("h3", {}, _t("studio.default_settings")),
                 h("div", { class: "tk-inline" }, h("button", { onclick: () => openSettings({ defaults: true }) }, _t("studio.default_settings_2")),
@@ -416,9 +475,11 @@
                 h("div", { class: "tk-inline" }, nameIn, modeSel, h("button", { class: "primary", onclick: create }, _t("studio.create"))),
                 h("div", { class: "hint" }, _t("studio.letters_digits_and_it_is_also"))),
             h("section", {}, h("h3", {}, _t("studio.projects_2", { length: list.projects.length })),
-                list.projects.length ? h("div", { class: "studio-projects" }, list.projects.map((p) => h("button", { class: `studio-card${p.name === P.name ? " current" : ""}`, onclick: () => openProject(p.name).catch((e) => alert(e.message)) },
-                    h("b", {}, p.name), h("span", { class: "hint" }, `${p.mode === "music_video" ? _t("studio.music_video") : _t("studio.free")} · ${p.clips} clip(s)`),
-                    h("span", { class: "hint" }, p.updated ? new Date(p.updated * 1000).toLocaleString("fr-FR") : ""))))
+                list.projects.length ? h("div", { class: "studio-projects" }, list.projects.map((p) => h("div", { class: "studio-card-wrap" },
+                    h("button", { class: `studio-card${p.name === P.name ? " current" : ""}`, onclick: () => openProject(p.name).catch((e) => alert(e.message)) },
+                        h("b", {}, p.name), h("span", { class: "hint" }, `${p.mode === "music_video" ? _t("studio.music_video") : _t("studio.free")} · ${p.clips} clip(s)`),
+                        h("span", { class: "hint" }, p.updated ? new Date(p.updated * 1000).toLocaleString("fr-FR") : "")),
+                    h("button", { class: "small danger studio-card-del", title: _t("studio.delete_project_title"), onclick: () => deleteProject(p.name) }, "🗑"))))
                     : h("p", { class: "hint" }, _t("studio.no_project_in_this_folder")))));
     }
 
@@ -602,24 +663,84 @@
             await refreshResources();
             draw();
         };
-        const draw = () => {
+        const draw = async () => {
+            let use = {};
+            try { use = await api(`/api/projects/${encodeURIComponent(P.name)}/resources/usages`); } catch (_) { use = {}; }
             fill(body);
             const all = Object.values(P.resources).flat();
-            body.append(h("p", { class: "hint" }, _t("studio.resources_total", { count: all.length, v1: mb(all.reduce((n, it) => n + (it.size || 0), 0)) })));
+            const unused = all.filter((it) => (use[it.path] || {}).state === "unused");
+            body.append(h("p", { class: "hint" }, _t("studio.resources_total", { count: all.length, v1: mb(all.reduce((n, it) => n + (it.size || 0), 0)) })),
+                h("div", { class: "tk-inline" },
+                    h("button", { class: "res-delete-unused", disabled: !unused.length || null, onclick: async () => {
+                        const size = unused.reduce((n, it) => n + (it.size || 0), 0);
+                        if (!(await H3Dialog.confirm(_t("studio.delete_unused_confirm", { count: unused.length, v1: mb(size),
+                            v2: unused.map((it) => "• " + it.name).join("\n") })))) return;
+                        try {
+                            const out = await post(`/api/projects/${encodeURIComponent(P.name)}/resources/delete-unused`, { paths: unused.map((it) => it.path) });
+                            toast(_t("studio.deleted_unused", { count: out.deleted.length }));
+                        } catch (e) { await H3Dialog.alert(e.message); }
+                        await refreshResources();
+                        draw();
+                    } }, _t("studio.delete_unused", { count: unused.length })),
+                    h("span", { class: "hint" }, _t("studio.delete_unused_hint"))));
+            const badge = (it) => {
+                const u = use[it.path];
+                if (!u) return null;
+                const title = u.state === "used" ? u.current.join("\n") : u.state === "takes" ? _t("studio.used_by_takes", { count: u.takes }) : _t("studio.res_unused_title");
+                return h("span", { class: `res-state res-${u.state}`, title }, _t("studio.res_" + u.state));
+            };
             for (const kind of ["images", "voices", "songs", "videos"]) {
                 const items = P.resources[kind] || [];
-                body.append(h("h3", {}, `${KIND_LABEL[kind]} (${items.length})`),
+                body.append(h("h3", { class: "res-kind", "data-kind": kind }, `${KIND_LABEL[kind]} (${items.length})`),
                     h("button", { onclick: async () => { const files = await pickFiles(ACCEPT[kind], true); if (files.length) { try { await importFiles(kind, files); } catch (e) { alert(e.message); } draw(); } } }, _t("studio.import")),
-                    h("div", { class: kind === "images" || kind === "videos" ? "studio-grid" : "studio-list" }, items.map((it) => h("div", { class: "studio-res" },
+                    h("div", { class: kind === "images" || kind === "videos" ? "studio-grid" : "studio-list" }, items.map((it) => h("div", { class: "studio-res", "data-path": it.path },
                         preview(kind, it.path),
                         h("div", { class: "studio-res-foot" },
-                            h("div", { class: "studio-res-name", title: it.path }, it.name, h("span", { class: "hint" }, mb(it.size))),
+                            h("div", { class: "studio-res-name", title: it.path }, it.name, h("span", { class: "hint" }, mb(it.size)), badge(it)),
                             // outside the name, which is cut when long: always visible
                             h("button", { class: "small danger studio-res-del", title: _t("studio.delete_resource"), onclick: () => remove(it) }, "🗑"))))));
             }
             body.append(h("p", { class: "hint" }, _t("studio.imported_files_are_copied_into_the")));
         };
         draw();
+        // 0.48.2: files dropped from the computer anywhere in the window are imported: pictures and videos by their type,
+        // sounds as voices or songs (the section they are dropped on, else the user says which)
+        const typeOf = (f) => {
+            const t = f.type || "", n = f.name.toLowerCase();
+            if (t.startsWith("image/") || /\.(png|jpe?g|webp|gif|bmp)$/.test(n)) return "images";
+            if (t.startsWith("video/") || /\.(mp4|mov|mkv|webm|avi|m4v)$/.test(n)) return "videos";
+            if (t.startsWith("audio/") || /\.(wav|mp3|flac|ogg|m4a|aac)$/.test(n)) return "audio";
+            return null;
+        };
+        body.addEventListener("dragover", (e) => { if ([...e.dataTransfer.types].includes("Files")) { e.preventDefault(); body.classList.add("res-over"); } });
+        body.addEventListener("dragleave", (e) => { if (!body.contains(e.relatedTarget)) body.classList.remove("res-over"); });
+        body.addEventListener("drop", async (e) => {
+            body.classList.remove("res-over");
+            const files = [...(e.dataTransfer.files || [])];
+            if (!files.length) return;
+            e.preventDefault();
+            // the section under the drop: the last kind heading above it
+            let section = null;
+            for (const head of body.querySelectorAll(".res-kind")) if (head.getBoundingClientRect().top <= e.clientY) section = head.dataset.kind;
+            const groups = { images: [], voices: [], songs: [], videos: [] }, refused = [];
+            for (const f of files) {
+                const t = typeOf(f);
+                if (!t) refused.push(f.name);
+                else if (t !== "audio") groups[t].push(f);
+                else if (section === "voices" || section === "songs") groups[section].push(f);
+                else {
+                    const where = await H3Dialog.choose(_t("studio.drop_audio_which", { name: f.name }),
+                        [{ value: "voices", label: _t("studio.voices") }, { value: "songs", label: _t("studio.songs") }]);
+                    if (where) groups[where].push(f);
+                }
+            }
+            if (refused.length) await H3Dialog.alert(_t("studio.drop_refused", { names: refused.join(", ") }));
+            for (const [kind, list] of Object.entries(groups)) {
+                if (!list.length) continue;
+                try { await importFiles(kind, list); } catch (err) { if (err.code !== "cancelled") alert(err.message); }
+            }
+            draw();
+        });
         modal(_t("studio.resources_of_project", { name: P.name }), body, { wide: true });
     }
 
@@ -691,9 +812,9 @@
             toast(_t("studio.deleted", { name: br.name }));
         } catch (e) { alert(e.message); }
     }
-    async function renameBranch(id) {
+    async function renameBranch(id, given) {
         const br = branchById(id);
-        const name = await H3Dialog.prompt(_t("studio.branch_name"), br ? br.name : "");
+        const name = given != null ? given : await H3Dialog.prompt(_t("studio.branch_name"), br ? br.name : "");
         if (!name || !name.trim()) return;
         try { await putBranch(id, { name: name.trim() }); } catch (e) { alert(e.message); }
     }
@@ -743,43 +864,6 @@
                     body.append(h("div", { class: "tk-ref" }, h("div", { class: "tk-refimg empty" }, "♪"),
                         h("div", { class: "tk-refbody" }, h("b", {}, _t("studio.song")), h("div", { class: "tk-inline" }, sel, up), player)));
                 }
-                const names = Object.keys(plan().refs || {}).filter((n) => n !== (plan().start_video || plan().edit_video || {}).ref);
-                if (!names.length) body.append(h("p", { class: "hint" }, _t("studio.the_plan_declares_no_reference_plan")));
-                for (const name of names) {
-                    const r = { ...((branch.refs || {})[name] || {}) };
-                    const kinds = H3.referenceKinds(plan(), name);
-                    // a reference changed: the takes of this branch made with the old file are invalidated, after confirmation
-                    const setRef = async (kind, value) => {
-                        try {
-                            if ((r[kind] || null) !== (value || null) && window.H3Takes && !(await window.H3Takes.changeReference(id, name, kind, value))) { draw(); return; }
-                            const refs = JSON.parse(JSON.stringify(branch.refs || {}));
-                            refs[name] = { ...(refs[name] || {}), [kind]: value || null };
-                            await putBranch(id, { refs });
-                        } catch (e) { alert(e.message); }
-                        draw();
-                    };
-                    const pick = (kind, label, list) => {
-                        const folder = { image: "images", voice: "voices", video: "videos" }[kind];
-                        const sel = h("select", { onchange: (e) => setRef(kind, e.target.value || null) },
-                            h("option", { value: "" }, label),
-                            list.map((it) => h("option", { value: it.path, selected: it.path === r[kind] || null }, it.name)));
-                        const up = h("button", { onclick: async () => {
-                            const [file] = await pickFiles(ACCEPT[folder]);
-                            if (!file) return;
-                            try { const [path] = await importFiles(folder, [file]); await setRef(kind, path); } catch (e) { alert(e.message); draw(); }
-                        } }, _t("studio.import"));
-                        return h("div", { class: "tk-inline" }, sel, up);
-                    };
-                    if (kinds.includes("video")) continue;    // the start video is chosen in the plan settings, for every branch
-                    body.append(h("div", { class: "tk-ref" },
-                        r.image ? zoom(h("img", { src: fileUrl(r.image), class: "tk-refimg" }), name) : h("div", { class: "tk-refimg empty" }, _t("studio.no_picture_2")),
-                        h("div", { class: "tk-refbody" },
-                            h("div", {}, h("b", {}, name), h("span", { class: "hint" }, `  ${plan().refs[name] || ""}`)),
-                            h("div", { class: "hint" }, kinds.length ? _t("studio.the_prompts_use", { v0: kinds.map((k) => _t("check." + k)).join(" + ") }) : _t("studio.not_cited_in_the_prompts")),
-                            h("label", {}, _t("studio.picture")), pick("image", _t("studio.no_picture"), P.resources.images || []),
-                            free ? [h("label", {}, _t("studio.voice")), pick("voice", _t("studio.no_voice_h3_chooses"), P.resources.voices || []),
-                                r.voice ? h("audio", { controls: true, src: fileUrl(r.voice), style: "width:100%" }) : null] : null)));
-                }
             };
             draw();
             modal(_t("studio.references_of", { name: br.name }), body, { onClose: () => { if (window.H3Takes) window.H3Takes.render(); resolve(); } });
@@ -827,6 +911,7 @@
             if (q.comfy) showComfyState(q.comfy);
             btn.className = `studio-queue-state ${cls}`;
             btn.querySelector(".studio-qs-text").textContent = text;
+            btn.title = `${text}\n${_t("studio.generation_queue_all_projects_click_to")}`;     // the button has a fixed width: the whole text here
             btn.querySelector(".studio-qs-bar i").style.width = `${pct}%`;
             btn.querySelector(".studio-qs-bar").style.visibility = run && run.status === "running" ? "visible" : "hidden";
             const plain = document.title.replace(/^[▶⏸⏳✖][^·]*· /u, "");      // the editor keeps its own title
@@ -939,51 +1024,67 @@
                             h("summary", { class: "hint" }, _t("studio.see_the_jobs", { length: lines.length })), ...lines);
                         return [det];
                     })());
-                // vertical drag only, stopped at the top and bottom of the list; the other groups make room live
-                box.addEventListener("pointerdown", (e) => {
-                    if (e.button !== 0 || e.target.closest("button")) return;
+                // drag and drop by the ≡ handle (so clicks inside the group, « see the n jobs » included, stay clicks): the
+                // group follows the pointer, a line shows where it lands, the window scrolls near its top and bottom edges
+                const handle = box.querySelector(".studio-q-handle");
+                handle.addEventListener("pointerdown", (e) => {
+                    if (e.button !== 0) return;
                     e.preventDefault();
-                    const list = box.parentElement, boxes = [...list.children];
-                    const from = boxes.indexOf(box), startY = e.clientY;
-                    const rects = boxes.map((el) => el.getBoundingClientRect());
-                    const listRect = list.getBoundingClientRect();
-                    const gap = boxes.length > 1 ? rects[1].top - rects[0].bottom : 6;
-                    const step = rects[from].height + gap;
-                    let to = from, moved = false;
+                    const list = box.parentElement;
+                    const boxes = [...list.children].filter((el) => el.classList.contains("studio-q-group"));
+                    const from = boxes.indexOf(box);
+                    const top0 = list.getBoundingClientRect().top;
+                    const spans = boxes.map((el) => { const r = el.getBoundingClientRect(); return { top: r.top - top0, bottom: r.bottom - top0, mid: (r.top + r.bottom) / 2 - top0 }; });
+                    const others = spans.filter((_, k) => k !== from), otherIds = q.groups.filter((x) => x.id !== g.id).map((x) => x.id);
+                    const grab = e.clientY - top0 - spans[from].top;
+                    const line = h("div", { class: "studio-q-drop", hidden: true });
+                    list.append(line);
+                    let scroller = list.parentElement;
+                    while (scroller && scroller !== document.body) {
+                        const o = getComputedStyle(scroller).overflowY;
+                        if ((o === "auto" || o === "scroll") && scroller.scrollHeight > scroller.clientHeight) break;
+                        scroller = scroller.parentElement;
+                    }
+                    if (scroller === document.body) scroller = null;
+                    let to = from, lastY = e.clientY, raf = 0, done = false;
                     dragging = g.id;
-                    box.setPointerCapture(e.pointerId);
-                    const move = (ev) => {
-                        let dy = ev.clientY - startY;
-                        dy = Math.max(listRect.top - rects[from].top, Math.min(listRect.bottom - rects[from].bottom, dy));
-                        if (Math.abs(dy) > 3) moved = true;
-                        box.style.transform = `translateY(${dy}px)`;
-                        box.classList.add("dragged");
-                        const centre = (rects[from].top + rects[from].bottom) / 2 + dy;
-                        to = from;
-                        rects.forEach((r, k) => {
-                            const mid = (r.top + r.bottom) / 2;
-                            if (k < from && centre < mid) to = Math.min(to, k);
-                            if (k > from && centre > mid) to = Math.max(to, k);
-                        });
-                        boxes.forEach((el, k) => {
-                            if (k === from) return;
-                            el.style.transform = k >= Math.min(from, to) && k <= Math.max(from, to) ? `translateY(${k < from ? step : -step}px)` : "";
-                        });
+                    box.classList.add("dragged");
+                    handle.setPointerCapture(e.pointerId);
+                    const place = () => {
+                        const y = lastY - list.getBoundingClientRect().top;        // the pointer, in the list's coordinates
+                        box.style.transform = `translateY(${y - grab - spans[from].top}px)`;
+                        to = others.filter((m) => y > m.mid).length;               // its place among the other groups
+                        line.hidden = to === from;
+                        line.style.top = `${to < others.length ? others[to].top - 4 : (others.length ? others[others.length - 1].bottom + 2 : 0)}px`;
                     };
+                    const loop = () => {
+                        if (done) return;
+                        if (scroller) {
+                            const r = scroller.getBoundingClientRect();
+                            if (lastY < r.top + 48) scroller.scrollTop -= 14;
+                            else if (lastY > r.bottom - 48) scroller.scrollTop += 14;
+                        }
+                        place();
+                        raf = requestAnimationFrame(loop);
+                    };
+                    const move = (ev) => { lastY = ev.clientY; };
                     const up = () => {
-                        box.removeEventListener("pointermove", move);
-                        box.removeEventListener("pointerup", up);
-                        box.removeEventListener("pointercancel", up);
-                        boxes.forEach((el) => { el.style.transform = ""; });
+                        done = true;
+                        cancelAnimationFrame(raf);
+                        handle.removeEventListener("pointermove", move);
+                        handle.removeEventListener("pointerup", up);
+                        handle.removeEventListener("pointercancel", up);
+                        line.remove();
+                        box.style.transform = "";
                         box.classList.remove("dragged");
                         dragging = null;
-                        if (!moved || to === from) return;
-                        const others = q.groups.filter((x) => x.id !== g.id);
-                        act("move", { group: g.id, before: others[to] ? others[to].id : null });
+                        if (to === from) return;
+                        act("move", { group: g.id, before: otherIds[to] || null });
                     };
-                    box.addEventListener("pointermove", move);
-                    box.addEventListener("pointerup", up);
-                    box.addEventListener("pointercancel", up);
+                    handle.addEventListener("pointermove", move);
+                    handle.addEventListener("pointerup", up);
+                    handle.addEventListener("pointercancel", up);
+                    raf = requestAnimationFrame(loop);
                 });
                 return box;
             });
@@ -994,6 +1095,11 @@
                     h("span", { style: "flex:1" }),
                     q.paused ? h("button", { class: "primary", onclick: () => act("resume") }, _t("studio.resume")) : null,
                     q.paused ? null : h("button", { title: _t("studio.the_running_job_finishes_nothing_else"), onclick: () => act("pause", { mode: "after" }) }, _t("studio.pause_after_the_running_job")),
+                (() => {
+                    const all = [...q.sent.filter((j) => j.status !== "harvest"), ...q.groups.flatMap((g) => g.jobs)].map((j) => j.id);
+                    return h("button", { class: "danger", disabled: !all.length || null, title: _t("studio.cancel_all_title"),
+                        onclick: () => act("cancel", { ids: all }, _t("studio.cancel_all_confirm", { count: all.length })) }, _t("studio.cancel_all"));
+                })(),
                     h("button", { class: "danger", title: _t("studio.interrupts_the_running_job_it_goes"),
                         disabled: !q.sent.some((j) => j.status !== "harvest") || null,
                         onclick: () => act("pause", { mode: "now" }, _t("studio.interrupt_the_running_job_it_goes")) }, _t("studio.pause_now"))),
@@ -1403,7 +1509,7 @@
                         title: detected(p) ? _t("studio.already_in_comfyui") : p.required ? _t("studio.required") : _t("studio.optional"),
                         onchange: (e) => { if (e.target.checked) choice.add(p.id); else choice.delete(p.id); draw(); } })),
                     h("td", {}, h("a", { class: "studio-pack-link", href: p.url.replace(/\.git$/, ""), target: "_blank", rel: "noopener",
-                        title: _t("studio.open_the_repository", { v0: p.url.replace(/\.git$/, "") }) }, p.name), p.required ? h("span", { class: "studio-req" }, "obligatoire") : h("span", { class: "hint" }, " facultatif"),
+                        title: _t("studio.open_the_repository", { v0: p.url.replace(/\.git$/, "") }) }, p.name), p.required ? h("span", { class: "studio-req" }, _t("studio.required").toLowerCase()) : h("span", { class: "hint" }, " " + _t("studio.optional").toLowerCase()),
                         h("div", { class: "hint" }, p.why), p.note ? h("div", { class: "hint warn" }, p.note) : null,
                         item && item.error ? h("div", { class: "bad" }, item.error) : null),
                     h("td", { class: `studio-pack-state ${progress ? (item.status === "error" ? "bad" : "warn") : cls}` }, progress || label));
@@ -1426,7 +1532,7 @@
                         job && job.status === "cancelled" ? h("span", { class: "hint" }, _t("studio.cancelled_can_be_resumed")) : null,
                         m.error ? h("span", { class: "hint warn" }, m.error) : null);
                 }
-                return h("tr", {}, h("td", {}, h("b", {}, m.label), m.required ? null : h("span", { class: "hint" }, " facultatif"),
+                return h("tr", {}, h("td", {}, h("b", {}, m.label), m.required ? null : h("span", { class: "hint" }, " " + _t("studio.optional").toLowerCase()),
                     h("div", { class: "hint" }, `${m.folder}/${m.file}`)),
                     h("td", { class: "hint", style: "white-space:nowrap" }, size ? fmtBytes(size) : ""), h("td", {}, cell));
             });
@@ -1447,12 +1553,16 @@
                     h("div", { class: "tk-row" }, h("label", {}, ""), h("div", { class: "tk-inline", style: "width:100%" }, pyIn,
                         h("button", { onclick: () => saveDir(true), title: _t("studio.runs_this_python_and_checks_that") }, _t("studio.check"))), h("span")),
                     h("div", { class: "tk-row" }, h("label", {}, "git"), st.git ? h("span", { class: "ok" }, `✓ ${st.git}`)
-                        : h("span", { class: "bad" }, _t("studio.not_found_install_git_for_windows")), h("span"))),
+                        : h("span", { class: "bad" }, _t("studio.not_found_install_git_for_windows")), h("span")),
+                    // 0.50: Encore cuts the voices and the pieces of video it sends, and assembles the videos, with ffmpeg
+                    h("div", { class: "tk-row setup-ffmpeg" }, h("label", {}, "ffmpeg"), st.ffmpeg ? h("span", { class: "ok" }, `✓ ${st.ffmpeg}`)
+                        : h("span", { class: "warn" }, _t("studio.ffmpeg_not_found")), h("span"))),
                 h("section", {}, h("h3", {}, _t("studio.2_custom_nodes")),
                     h("p", { class: "hint" }, _t("studio.encore_can_install_the_checked_packs")
                         + _t("studio.you_can_also_install_them_yourself")
                         + _t("studio.after_comfyui_restarts_encore_detects_them")),
                     h("table", { class: "studio-packs" }, packRows),
+                    st.old_plugin ? h("p", { class: "hint setup-old-plugin" }, _t("studio.old_plugin_unused")) : null,
                     st.core_missing.length ? h("div", { class: "bad" }, _t("studio.comfyui_is_too_old_missing_nodes", { v0: st.core_missing.join(", ") })) : null,
                     h("div", { class: "studio-dlg-actions", style: "justify-content:flex-start" },
                         h("button", { class: "primary", disabled: running || !toInstall.length || !st.comfy_dir_ok || !st.python || !st.git || null, onclick: install },
@@ -1653,7 +1763,7 @@
             listTakes: () => api(`${base()}/takes`),
             saveSelection: (selection) => put(`${base()}/selection`, { selection }),
             deleteTakes: (takes) => post(`${base()}/delete-takes`, { takes }),
-            assemble: (clip, take) => post(`${base()}/assemble`, { clip, take }),
+            assemble: (clip, take, branch = null) => post(`${base()}/assemble`, { clip, take, branch }),
             takePlan: (clip, take) => api(`${base()}/takes/${clip}/${encodeURIComponent(take)}/plan`),
             exports: () => api(`${base()}/exports`),
             // the start video's segment, small (made once by ffmpeg): GET its state, POST to have it made
@@ -1695,8 +1805,7 @@
                 const branches = {};
                 for (const b of P.branches) {
                     const refs = {};
-                    for (const [name, r] of Object.entries(b.refs || {})) refs[name] = { image: sha("images", r && r.image), voice: sha("voices", r && r.voice) };
-                    const sv = plan().start_video || plan().edit_video;    // the project's video, the same for every branch
+                        const sv = plan().start_video || plan().edit_video;    // the project's video, the same for every branch
                     if (sv && sv.ref) refs[sv.ref] = { image: null, voice: null, video: sha("videos", P.startVideoFile) };
                     branches[b.id] = { refs, song: sha("songs", b.song), size: [Number(b.width), Number(b.height)], ref_image_size: b.ref_image_size || null };
                 }

@@ -56,7 +56,6 @@ try:
     call(S, P + "/import-plan?filename=rue.json", raw=open(fixture("rue_test_v1.plan.json"), "rb").read(), method="POST")
     for f in (fixture("fillette.png"), fixture("rue.png")):
         call(S, f"{P}/resources?kind=images&filename={os.path.basename(f)}", raw=open(f, "rb").read(), method="POST")
-    call(S, P + "/branches/b1", {"refs": {"fillette": {"image": "refs/images/fillette.png"}, "rue": {"image": "refs/images/rue.png"}}}, "PUT")
     master = call(S, P + "/plan?branch=b1")["plan"]
     master["clips"][2]["continue"] = False            # clip 3: a new scene
     call(S, P + "/plan", {"branch": "b1", "leaf": None, "plan": master}, "PUT")
@@ -103,20 +102,22 @@ try:
     b3 = call(S, P + "/branches", {"how": "clips", "source": "b1", "leaf": t4, "upto": 3})
     B3 = b3["branch"]["id"]
     st = b3["project"]["branch_states"][B3]
-    check("duplicate with clips 1-3: taken over by reference", st["base"] == [t1, t2a, t3] and st["has_takes"] and {"fillette", "rue"} & set(st["refs_used"]), st)
+    check("duplicate with clips 1-3: taken over by reference", st["base"] == [t1, t2a, t3] and st["has_takes"], st)
     m3 = call(S, P + f"/plan?branch={B3}")
     check("its master plan: clips 1-3 read-only", m3["locked"] == 3 and m3["chain"] == [t1, t2a, t3], m3.get("locked"))
+    # (before its own first take: its master plan is still free, 0.48)
+    m3["plan"]["subjects"]["rue"]["pictures"][0]["file"] = "fillette"
+    call(S, P + "/plan", {"branch": B3, "plan": m3["plan"]}, "PUT")
+    m3b = call(S, P + f"/plan?branch={B3}")["plan"]
+    check("a clip taken over keeps the subjects it was made with", m3b["clips"][0]["defs"]["subjects"]["rue"]["pictures"][0]["file"] == "rue"
+          and m3b["subjects"]["rue"]["pictures"][0]["file"] == "fillette", m3b["clips"][0].get("defs"))
     out = call(S, P + "/generate", {"clip": 2, "after": t1, "branch": B3})
-    check("a clip taken over is not generated again", out.get("HTTP") == 400, out)
+    check("0.48.2: a clip taken over gets a new take, a variant of this branch", out.get("HTTP") is None and out.get("record", {}).get("studio", {}).get("branch") == B3, out)
+    run()
     jb = call(S, P + "/generate", {"clip": 4, "after": t3, "branch": B3}); run(); t4c = take_of(jb)
     rec = next((t["record"] for c in call(S, P + "/takes")["clips"] for t in c["takes"] if t["id"] == t4c), {})
     check("clip 4 in the new branch, after the clip taken over", t4c and rec.get("studio", {}).get("branch") == B3 and rec["studio"]["predecessor"] == t3, rec.get("studio", {}).get("branch"))
     check("its twig goes through the clips taken over", call(S, P + f"/plan?branch={B3}&leaf={t4c}")["chain"] == [t1, t2a, t3, t4c])
-    refs = dict(call(S, "/api/projects/rue")["branches"][-1]["refs"])
-    out = call(S, P + f"/branches/{B3}", {"refs": dict(refs, rue={"image": "refs/images/fillette.png"})}, "PUT")
-    check("a reference used by a clip taken over cannot change", out.get("HTTP") == 400, out)
-    out = call(S, P + f"/branches/{B3}", {"refs": dict(refs, chien={"image": "refs/images/rue.png"})}, "PUT")
-    check("a new reference can be added", "branch" in out, out)
     out = call(S, P + "/branches/b1", method="DELETE")
     check("deleting a branch keeps the takes another one takes over", out.get("needs_confirm") and out.get("kept") == 3, out)
     b4 = call(S, P + "/branches", {"how": "clips", "source": "b1", "leaf": t4, "upto": 2})

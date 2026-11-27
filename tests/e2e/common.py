@@ -11,7 +11,6 @@ ENCORE = os.path.dirname(TESTS)                      # the Encore folder (python
 FIX = os.path.join(TESTS, "fixtures")
 MOCK = os.path.join(TESTS, "mock")
 CHROME = os.environ.get("CHROME") or None             # None: the Chromium installed by « playwright install »
-PLUGIN = os.environ.get("H3_PLUGIN", "")
 MOCK_PORT = 8771
 
 
@@ -32,7 +31,7 @@ def restart_mock():
         if not _port_open(MOCK_PORT):
             break
         time.sleep(0.1)
-    env = dict(os.environ, PYTHONPATH=os.path.join(MOCK, "shim"), MOCK_PORT=str(MOCK_PORT), H3_PLUGIN=PLUGIN)
+    env = dict(os.environ, MOCK_PORT=str(MOCK_PORT))
     log = open(os.path.join(E2E, "out", "mock.log"), "a")
     subprocess.Popen([sys.executable, os.path.join(MOCK, "mock_studio.py")], cwd=MOCK, env=env, stdout=log, stderr=log,
                      start_new_session=True)

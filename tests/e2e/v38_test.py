@@ -5,6 +5,7 @@ them, the original sound kept only over the edited part)."""
 import asyncio, json, os, shutil, subprocess, sys, time, urllib.request, urllib.error
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from common import ENCORE, CHROME, fixture, plan_screen, takes_screen, launch_go  # noqa: E402
 from playwright.async_api import async_playwright
+sys.path.insert(0, ENCORE); from encore import plan_core  # noqa: E402
 S = "http://127.0.0.1:8247"; M = "http://127.0.0.1:8771"
 OK = []
 def check(name, cond, info=""):
@@ -30,14 +31,27 @@ def gen(body):            # until the job is over: the mock runs what ComfyUI ha
         if jobs and jobs[-1]["status"] in ("done", "error", "cancelled"): break
     return out
 
+def tone(path, at):
+    """0.50: dominant frequency (Hz) of the sound 0.5 s around ``at`` seconds of a video (0 when silent)."""
+    import numpy as np
+    raw = subprocess.run(["ffmpeg", "-v", "error", "-ss", str(max(0, at - 0.25)), "-t", "0.5", "-i", path, "-ac", "1", "-ar", "48000", "-f", "f32le", "-"],
+                         capture_output=True).stdout
+    x = np.frombuffer(raw[: len(raw) // 4 * 4], dtype=np.float32)
+    if len(x) < 1000 or np.abs(x).max() < 1e-3: return 0
+    spec = np.abs(np.fft.rfft(x * np.hanning(len(x))))
+    return round(float(np.argmax(spec) * 48000 / len(x)) / 50) * 50
+def last_export(root, project):
+    folder = f"{root}/projets/{project}/exports"
+    return max((os.path.join(folder, n) for n in os.listdir(folder) if n.endswith(".mp4")), key=os.path.getmtime)
+
 SRC = "/tmp/v38_source.mp4"     # 3 shots (9 s, 12 s, 7 s) with a sound
 subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=640x360:rate=24:duration=9", "-f", "lavfi", "-i",
                 "smptebars=size=640x360:rate=24:duration=12", "-f", "lavfi", "-i", "mandelbrot=size=640x360:rate=24", "-f", "lavfi", "-i",
-                "sine=frequency=300:duration=28", "-filter_complex", "[2:v]trim=duration=7,setpts=PTS-STARTPTS[m];[0:v][1:v][m]concat=n=3:v=1:a=0[v]",
+                "sine=frequency=1000:duration=28", "-filter_complex", "[2:v]trim=duration=7,setpts=PTS-STARTPTS[m];[0:v][1:v][m]concat=n=3:v=1:a=0[v]",
                 "-map", "[v]", "-map", "3:a", "-c:v", "libx264", "-preset", "veryfast", "-c:a", "aac", "-shortest", SRC], check=True)
 
 root = "/tmp/h3s_v38"; shutil.rmtree(root, ignore_errors=True); os.makedirs(root)
-cfg = root + "/config.json"; json.dump({"projects_root": root + "/projets", "comfy_url": M, "configured": True, "setup_done": True, "assembly_engine": "plugin", "language": "en"}, open(cfg, "w"))
+cfg = root + "/config.json"; json.dump({"projects_root": root + "/projets", "comfy_url": M, "configured": True, "setup_done": True, "language": "en"}, open(cfg, "w"))
 srv = subprocess.Popen([sys.executable, "-m", "encore", "--port", "8247", "--no-browser", "--config", cfg], cwd=ENCORE, stdout=subprocess.DEVNULL, stderr=open("v38_srv.log", "w"))
 time.sleep(1.5)
 P = "/api/projects/rue"
@@ -47,10 +61,9 @@ try:
     for f in (fixture("fillette.png"), fixture("rue.png")):
         call(S, f"{P}/resources?kind=images&filename={os.path.basename(f)}", raw=open(f, "rb").read(), method="POST")
     call(S, f"{P}/resources?kind=videos&filename=source.mp4", raw=open(SRC, "rb").read(), method="POST")
-    call(S, P + "/branches/b1", {"refs": {"fillette": {"image": "refs/images/fillette.png"}, "rue": {"image": "refs/images/rue.png"}},
-                                 "width": 1024, "height": 576}, "PUT")
+    call(S, P + "/branches/b1", {"width": 1024, "height": 576}, "PUT")
     plan = call(S, P)["plan"]
-    plan["refs"]["source"] = "edited video"
+    plan["files"]["source"] = {"kind": "video"}
     plan["edit_video"] = {"ref": "source", "start": 0, "end": 21.0}      # shots 1 and 2 edited, the rest continues
     plan["clips"] = plan["clips"][:1]                                     # inside the segment: replaced by the cut
     call(S, P + "/plan", plan, "PUT")
@@ -72,24 +85,23 @@ try:
                 if (await page.evaluate("H3Editor.state.plan.clips[0].name")).startswith("edit_"): break
                 await page.wait_for_timeout(200)
             plan = await page.evaluate("H3Editor.state.plan")
-            check("cut on the shots of 0-21 s: 3 clips, with {edit} instead of a TODO",
+            check("cut on the shots of 0-21 s: 3 clips that keep <Video 1>",
                   [[c["frames"], c["continue"]] for c in plan["clips"]] == [[209, False], [192, False], [175, True]]
-                  and all("{edit}" in c["prompt"] and "TODO" not in c["prompt"] for c in plan["clips"]), [[c["frames"], c["continue"]] for c in plan["clips"]])
+                  and all("<Video 1>" in c["description"] for c in plan["clips"]), [[c["frames"], c["continue"]] for c in plan["clips"]])
             # the common instruction, from the settings line
             await page.locator(".start-video .sv-instr button").click(); await page.wait_for_timeout(600)
             await plan_screen(page)
             check("the instruction entry opens in the Plan tab", await page.locator(".clipitem.instr.sel").count() == 1 and await page.locator("textarea.instr-text").count() == 1)
-            check("its palette lists the plan's references (not the video)", "fillette" in await page.locator("#side").inner_text() and "source" not in await page.locator("#side").inner_text())
+            check("its palette lists the plan's subjects (not the video)", "@fillette" in await page.locator("#side").inner_text() and "source" not in await page.locator("#side").inner_text())
             ta = page.locator("textarea.instr-text")
             await ta.click()
             await page.keyboard.type("the footage becomes a hand-drawn cartoon; the girl is replaced by @fill")
             await page.wait_for_timeout(300)
             await page.keyboard.press("Enter"); await page.wait_for_timeout(400)
             instr = await page.evaluate("H3Editor.state.plan.edit_video.instruction")
-            check("@ puts a picture in the instruction", instr and instr.strip().endswith("{picture:fillette}"), instr)
+            check("@ puts a subject in the instruction", instr and instr.strip().endswith("@fillette"), instr)
             info = await page.locator(".instr-info").inner_text()
-            check("…it says which clips use it and which reference they get", "clips 1, 2, 3" in info and "fillette" in info, info)
-            check("…and how H3 gets it", "hand-drawn cartoon" in info and "<fillette>" in info, info)
+            check("…it says which clips use it and which subjects it names", "1–3" in info and "@fillette" in info, info)
             errors = await page.evaluate("H3.validate(H3Editor.state.plan).filter((m) => m.level === 'error').map((m) => m.text)")
             check("the plan is valid (fillette added to the clips by the instruction)", not errors, errors)
             # a clip after the segment
@@ -98,7 +110,7 @@ try:
             await page.click("#list >> text=+ clip"); await page.wait_for_timeout(600)
             plan = await page.evaluate("H3Editor.state.plan")
             last = plan["clips"][-1]
-            check("a clip added after the segment continues the video, without <Video 1>", len(plan["clips"]) == 4 and last["continue"] and "<Video" not in last["prompt"], last)
+            check("a clip added after the segment continues the video, without <Video 1>", len(plan["clips"]) == 4 and last["continue"] and "<Video" not in last.get("description", ""), last)
             check("the timeline shows the end of the segment", await page.locator(".tl .segend").count() == 1)
             await plan_screen(page)
             badges = await page.locator("#list .clipitem:not(.instr) .nm").all_inner_texts()
@@ -109,7 +121,7 @@ try:
             await page.locator(".tk-box-head button", has_text="Close").last.click()
             await page.screenshot(path="v38_plan.png")
             saved = call(S, P + "/plan", await page.evaluate("H3Editor.state.plan"), "PUT")
-            check("plan saved (version 6) without error", saved.get("plan", {}).get("version") == 6 and not saved["validation"]["errors"], saved.get("validation"))
+            check("plan saved (version 7) without error", saved.get("plan", {}).get("version") == 7 and not saved["validation"]["errors"], saved.get("validation"))
             check("no page error", not errs, errs)
             await b.close()
     asyncio.run(main())
@@ -123,7 +135,7 @@ try:
         if k == 1:
             check("clip 1 generated", job["status"] == "done", (job["status"], job.get("error")))
             check("clip 1: the instruction in its prompt, with its picture", "hand-drawn cartoon" in (r2v["prompt"] or "") and "<Picture" in (r2v["prompt"] or "")
-                  and "{edit}" not in (r2v["prompt"] or ""), r2v["prompt"])
+                  and "[video editing" in (r2v["prompt"] or ""), r2v["prompt"])
             check("clip 1: its slice of the video", r2v["videos"] and r2v["videos"][0][0] == 209, r2v["videos"])
         if k == 4:
             check("clip 4 (after the segment) generated", job["status"] == "done", (job["status"], job.get("error")))
@@ -132,9 +144,12 @@ try:
     leaf = takes[3]["takes"][-1]["id"]
     call(S, P + "/assemble", {"clip": 4, "take": leaf}); time.sleep(1.5); run_mock(); time.sleep(3)
     jobs = call(S, P + "/jobs")["jobs"]
-    asm = call(M, "/test/cap", {})["assembly"]
     check("assembly of the 4 clips done", jobs[-1]["kind"] == "assemble" and jobs[-1]["status"] == "done", (jobs[-1]["status"], jobs[-1].get("error")))
-    check("…the original sound over the edited part only (the generated sound is silent here)", 0.001 < asm.get("audio_level", 0), asm)
+    # 0.50: assembled by Encore (ffmpeg); the segment's sound is at 1000 Hz, the fake preview of clip 4 at 600 Hz
+    normal = plan_core.normalize(call(S, P)["plan"]); rows = plan_core.timeline(normal)
+    at = lambda i: (rows[i]["visible"] + rows[i]["end"]) / 2 / 24 - plan_core.final_start(normal) / 24  # noqa: E731
+    tones = [tone(last_export(root, "rue"), at(i)) for i in range(4)]
+    check("…the original sound over the edited part only", tones[:3] == [1000, 1000, 1000] and tones[3] == 600, tones)
 finally:
     srv.terminate()
 print(f"\n{sum(OK)}/{len(OK)} passed")

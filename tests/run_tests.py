@@ -1,13 +1,13 @@
 """Runs Encore's tests.
 
     python tests/run_tests.py                       unit tests only (node and Python)
-    H3_PLUGIN=/path/to/ComfyUI-H3-ClipPlan python tests/run_tests.py --e2e      + end-to-end tests
+    python tests/run_tests.py --e2e                 + end-to-end tests
     python tests/run_tests.py --e2e v25_test        only the end-to-end tests whose name contains « v25_test »
 
-Needs: Python 3.10+, node (unit tests); for --e2e also Pillow, numpy, playwright with its Chromium
-(« pip install pillow numpy playwright » then « playwright install chromium », or CHROME=/path/to/chrome) and the
-plugin folder (H3_PLUGIN). The end-to-end tests run on Linux (or WSL): they start Encore's server, a fake ComfyUI
-that runs the real plugin code (tests/mock) and a headless browser. Screenshots and logs go to tests/e2e/out.
+Needs: Python 3.10+, node (unit tests); for --e2e also Pillow, playwright with its Chromium (« pip install pillow
+playwright » then « playwright install chromium », or CHROME=/path/to/chrome), ffmpeg and ffprobe. The end-to-end tests
+run on Linux (or WSL): they start Encore's server, a fake ComfyUI (tests/mock: fake nodes that check what they get)
+and a headless browser. Screenshots and logs go to tests/e2e/out.
 """
 import os
 import re
@@ -21,14 +21,13 @@ sys.path.insert(0, ROOT)
 
 UNIT = [
     ["node", "unit/sections_test.js"],
-    ["node", "unit/sha_test.js"],
-    ["node", "unit/roundtrip_test.js", "fixtures/rue_test_v1.plan.json", "fixtures/robot_beach.plan.json", "fixtures/robot_workshop.plan.json"],
     [sys.executable, "unit/parity_test.py"],
+    [sys.executable, "unit/latents_test.py"],
     [sys.executable, "unit/cuts_test.py"],
 ]
 # order matters: v21*, v22 and v23 reuse the projects made by v20 and v20b; *_ui_test reuse the one of the test before
 E2E = ["v20_test", "v20b_test", "v21_test", "v21b_test", "v22_test", "v23_test", "leaf_test", "infos_test", "upscale_test",
-       "queue_ui_test", "a1_api_test", "a1_ui_test", "a2_api_test", "a2_ui_test", "a3_api_test", "a3_ui_test", "v25_test", "v25_ui_test", "v28_test", "v29_test", "v30_test", "v31_test", "v34_test", "v35_test", "v36_test", "v37_test", "v38_test", "v40_test"]
+       "queue_ui_test", "a1_api_test", "a1_ui_test", "a2_api_test", "a2_ui_test", "a3_api_test", "a3_ui_test", "b1_api_test", "b2_ui_test", "c1_ui_test", "d1_api_test", "d2_ui_test", "e1_ui_test", "f1_api_test", "f1_ui_test", "g1_setup_test", "v25_test", "v25_ui_test", "v28_test", "v29_test", "v30_test", "v31_test", "v34_test", "v35_test", "v36_test", "v37_test", "v38_test", "v40_test"]
 BAD = re.compile(r"^FAIL|Traceback \(most recent call last\)|ERRORS: \[[^\]]|^errors \[[^\]]|^\s*\d+/\d+ passed", re.M)
 
 
@@ -59,15 +58,7 @@ def run(cmd, cwd, timeout):
 
 def versions():
     from encore import projects
-    line = f"Encore {projects.STUDIO_VERSION}"
-    plugin = os.environ.get("H3_PLUGIN")
-    if plugin:
-        try:
-            m = re.search(r'APP_VERSION = "([^"]+)"', open(os.path.join(plugin, "nodes.py"), encoding="utf-8").read())
-            line += f" · plugin ComfyUI-H3-ClipPlan {m.group(1) if m else '?'} ({plugin})"
-        except OSError:
-            line += f" · plugin not found in {plugin}"
-    return line
+    return f"Encore {projects.STUDIO_VERSION}"
 
 
 def main(argv):
@@ -85,8 +76,6 @@ def main(argv):
             if not ok:
                 print("   " + out.strip().replace("\n", "\n   ")[-3000:])
     if e2e:
-        if not os.environ.get("H3_PLUGIN"):
-            sys.exit("--e2e needs H3_PLUGIN=/path/to/ComfyUI-H3-ClipPlan")
         print("\n== end-to-end tests")
         sys.path.insert(0, os.path.join(TESTS, "e2e"))
         os.makedirs(os.path.join(TESTS, "e2e", "out"), exist_ok=True)

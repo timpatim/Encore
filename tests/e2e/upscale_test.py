@@ -37,9 +37,9 @@ async def main():
         await page.click(".tk-box-head button:has-text('Fermer')"); await page.wait_for_timeout(800)
         import json as J
         print("branch", J.dumps(call(S, P)["branches"][0]["upscale"])[:200])
-        await page.click(".tk-placeholder >> nth=0 >> .tk-plus"); await launch_go(page); run(); await page.wait_for_timeout(2700)
+        await page.click(".tk-cell.active >> nth=0"); await launch_go(page); run(); await page.wait_for_timeout(2700)
         wf = J.load(open("/tmp/mock_last_prompt.json")); print("clip1 nodes", sorted(n["class_type"] for k, n in wf.items() if int(k) >= 60), "71" in wf)
-        await page.click(".tk-slot >> nth=0"); await launch_go(page); run(); await page.wait_for_timeout(2700)
+        await page.click(".tk-cell.active >> nth=0"); await launch_go(page); run(); await page.wait_for_timeout(2700)
         wf = J.load(open("/tmp/mock_last_prompt.json")); print("clip2 has replace", "71" in wf, wf.get("70", {}).get("inputs"), wf["61"]["inputs"]["width"], wf["69"]["inputs"]["width"])
         # forced without
         await page.hover(".tk-card.chosen >> nth=1"); await page.locator(".tk-card.chosen >> nth=1").locator("button.tk-retake").click(); await page.wait_for_timeout(1200)

@@ -53,7 +53,7 @@ try:
     check("deleting a picture the branch uses: refused, says where", refused.get("code") == "in_use" and "Branch 1" in refused.get("error", "")
           and os.path.exists(f"{root}/projets/rue/refs/images/fillette.png"), refused)
     plan = call(S, P)["plan"]
-    plan["refs"]["intro"] = "start video"; plan["start_video"] = {"ref": "intro", "start": 0, "end": 4}; plan["clips"][0]["continue"] = True
+    plan["files"]["intro"] = {"kind": "video"}; plan["start_video"] = {"ref": "intro", "start": 0, "end": 4}; plan["clips"][0]["continue"] = True
     call(S, P + "/plan", plan, "PUT")
     call(S, P + "/start-video", {"file": "refs/videos/big.mp4"}, "PUT")
     refused = call(S, f"{P}/resources?path=refs/videos/big.mp4", method="DELETE")
